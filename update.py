@@ -14,6 +14,24 @@ REPO_URL = os.environ.get(
 )
 
 
+def find_git() -> str:
+    git = shutil.which("git")
+    if git:
+        return git
+    # Admin processes inherit system PATH, which often lacks Git for Windows.
+    if os.name == "nt":
+        for candidate in (
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files (x86)\Git\cmd\git.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe"),
+        ):
+            if Path(candidate).exists():
+                return candidate
+    raise FileNotFoundError(
+        "git executable not found. Install Git and ensure it is on PATH."
+    )
+
+
 def run(cmd: list[str]) -> None:
     print(f"$ {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
@@ -69,8 +87,9 @@ def main() -> int:
     print(f"Deleting {repo}...")
     shutil.rmtree(repo, onexc=force_remove)
 
+    git = find_git()
     print(f"Cloning {REPO_URL} into {name}...")
-    run(["git", "clone", REPO_URL, name])
+    run([git, "clone", REPO_URL, name])
 
     new_repo = parent / name
     os.chdir(new_repo)
@@ -85,8 +104,22 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # If we were relaunched as admin, Windows will close this console on exit.
+    # Pause so the user can read any output (success or failure).
+    elevated = os.name == "nt" and is_admin() and sys.argv[-1:] != ["--no-pause"]
+    code = 0
     try:
-        sys.exit(main())
+        code = main()
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {e}", file=sys.stderr)
-        sys.exit(e.returncode)
+        code = e.returncode
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        code = 1
+    if elevated:
+        try:
+            input("\nPress Enter to close this window...")
+        except EOFError:
+            pass
+    sys.exit(code)
