@@ -218,15 +218,22 @@ class RobotContainer:
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(self.elevatorDown).onFalse(self.stopElevator)
         # Shooter Buttons
+        # LB: shoot AND intake at the same time (shooter + kicker + conveyor + feeder run together)
+        def _fire_and_intake():
+            RobotContainer.operator.FIRE()
+            RobotContainer.operator.feederIn()
+
+        def _stop_fire_and_intake():
+            RobotContainer.operator.ceaseFire()
+            RobotContainer.operator.stopFeeder()
+
         gamepads.operator_leftShoulderButton.debounce(
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(
-            RobotContainer.operator.run(lambda: RobotContainer.operator.shooterOut())
-            .withTimeout(0.7)
-            .andThen(
-                RobotContainer.operator.run(lambda: RobotContainer.operator.FIRE())
-            )
-        ).onFalse(self.ceaseFire)
+            RobotContainer.operator.run(_fire_and_intake)
+        ).onFalse(
+            RobotContainer.operator.runOnce(_stop_fire_and_intake)
+        )
         gamepads.operator_rightShoulderButton.debounce(
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(self.clearOut).onFalse(self.ceaseFire)
