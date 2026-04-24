@@ -1,37 +1,49 @@
 #!/usr/bin/env python3
-"""Pull the latest changes from the git remote and refresh Python deps."""
+"""Nuke the local repo and re-clone fresh from GitHub."""
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
-def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+REPO_URL = os.environ.get(
+    "REPO_URL", "https://github.com/ethancroissants/frc-robotcode"
+)
+
+
+def run(cmd: list[str]) -> None:
     print(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, check=True, **kwargs)
+    subprocess.run(cmd, check=True)
 
 
 def main() -> int:
-    repo = Path(__file__).resolve().parent
-    os.chdir(repo)
+    script = Path(__file__).resolve()
+    repo = script.parent
+    parent = repo.parent
+    name = repo.name
 
-    remote = os.environ.get("REMOTE", "orgin")
-    branch = os.environ.get(
-        "BRANCH",
-        subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
-        ).strip(),
-    )
+    stash_dir = Path(tempfile.mkdtemp(prefix="frc-update-"))
+    stash = stash_dir / script.name
+    print(f"Moving update script to {stash}...")
+    shutil.move(str(script), str(stash))
 
-    print(f"Fetching from {remote}...")
-    run(["git", "fetch", remote, branch])
+    os.chdir(parent)
 
-    print(f"Pulling latest changes on {branch}...")
-    run(["git", "pull", "--ff-only", remote, branch])
+    print(f"Deleting {repo}...")
+    shutil.rmtree(repo)
 
-    if (repo / "pyproject.toml").exists() or (repo / "setup.py").exists():
-        print("Installing/updating Python dependencies...")
-        run([sys.executable, "-m", "pip", "install", "-e", ".", "--upgrade"])
+    print(f"Cloning {REPO_URL} into {name}...")
+    run(["git", "clone", REPO_URL, name])
+
+    new_repo = parent / name
+    os.chdir(new_repo)
+    print(f"Now in {new_repo}")
+
+    print(f"Deleting moved update script {stash}...")
+    stash.unlink()
+    stash_dir.rmdir()
 
     print("Update complete.")
     return 0
