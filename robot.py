@@ -1,102 +1,98 @@
-# ============================================================
-# ROBOT.PY - The main entry point for the robot
-# ============================================================
-# This is where it all starts! When the robot turns on, this
-# file runs first. It creates the RobotContainer (which sets
-# up everything else) and then handles the different phases
-# of an FRC match:
-#
-#   1. Autonomous (15 sec) -- Robot drives itself, no human input
-#   2. Teleop (2+ min)     -- Drivers control the robot
-#   3. Disabled             -- Robot is off, waiting
-#
-# The "periodic" methods run over and over (50 times per second!)
-# while the robot is in that mode. That's how the robot stays
-# responsive to controller inputs.
-# ============================================================
+"""
+Copyright (c) FIRST and other WPILib contributors.
+Open Source Software; you can modify and/or share it under the terms of
+the WPILib BSD license file in the root directory of this project.
+"""
 
 import wpilib
-from wpilib import DriverStation
 from commands2 import CommandScheduler
-from ntcore import NetworkTableInstance
+from phoenix6 import HootAutoReplay
+
+import constants
+import gamepads
+from generated import tuner_constants
 from robotcontainer import RobotContainer
 
 
-class Robot(wpilib.TimedRobot):
-    """The main robot class. This runs the whole show."""
+class MyRobot(wpilib.TimedRobot):
+    def robotInit(self) -> None:
+        self.m_autonomousCommand = None
+        self.m_robotContainer = RobotContainer()
 
-    def __init__(self):
-        # Use a 50ms loop instead of the default 20ms.
-        # CAN bus timeouts on missing/disconnected motors add ~5ms each,
-        # which causes loop overruns at 20ms. 50ms gives plenty of headroom.
-        super().__init__(period=0.05)
+        # Log and replay timestamp and joystick data
+        self.m_timeAndJoystickReplay = (
+            HootAutoReplay().with_timestamp_replay().with_joystick_replay()
+        )
 
-    def robotInit(self):
-        """Runs once when the robot first turns on."""
-        DriverStation.silenceJoystickConnectionWarning(True)
-        self.container = RobotContainer()
-        self.auto_command = None
+    def robotPeriodic(self) -> None:
+        self.m_timeAndJoystickReplay.update()
+        CommandScheduler.getInstance().run()
 
-        # Publish robot mode so the web panel can display it
-        status_table = NetworkTableInstance.getDefault().getTable("RobotStatus")
-        self._mode_pub = status_table.getStringTopic("mode").publish()
-        self._match_time_pub = status_table.getDoubleTopic("match_time").publish()
+        driver_Y_Button = gamepads.driver_Y_Button.getAsBoolean()
 
-    def robotPeriodic(self):
-        """Runs 50 times per second, no matter what mode we're in.
-        This keeps the command system running."""
-        try:
-            CommandScheduler.getInstance().run()
-        except Exception:
-            pass
+    def disabledInit(self) -> None:
+        pass
 
-        # Publish current mode and match time for the web panel
-        try:
-            if self.isDisabled():
-                self._mode_pub.set("disabled")
-            elif self.isAutonomous():
-                self._mode_pub.set("auto")
-            elif self.isTeleop():
-                self._mode_pub.set("teleop")
-            elif self.isTest():
-                self._mode_pub.set("test")
-            self._match_time_pub.set(DriverStation.getMatchTime())
-        except Exception:
-            pass
+    def disabledPeriodic(self) -> None:
+        pass
 
-    # --- AUTONOMOUS MODE ---
-    # The robot drives itself using pre-programmed routines
+    def disabledExit(self) -> None:
+        pass
 
-    def autonomousInit(self):
-        """Runs once when autonomous mode starts."""
-        self.auto_command = self.container.get_autonomous_command()
-        if self.auto_command is not None:
-            self.auto_command.schedule()
+    def autonomousInit(self) -> None:
+        self.m_autonomousCommand = self.m_robotContainer.getAutonomousCommand()
 
-    def autonomousExit(self):
-        """Runs once when autonomous mode ends."""
-        if self.auto_command is not None:
-            self.auto_command.cancel()
+        if self.m_autonomousCommand is not None:
+            CommandScheduler.getInstance().schedule(self.m_autonomousCommand)
 
-    # --- TELEOP MODE ---
-    # Human drivers control the robot with Xbox controllers
+    def autonomousPeriodic(self) -> None:
+        pass
 
-    def teleopInit(self):
-        """Runs once when teleop (driver control) mode starts."""
-        # If autonomous was running, stop it so the driver takes over
-        if self.auto_command is not None:
-            self.auto_command.cancel()
+    def autonomousExit(self) -> None:
+        pass
 
-    # --- DISABLED MODE ---
-    # Robot is powered on but not moving (between matches, etc.)
+    def teleopInit(self) -> None:
+        if self.m_autonomousCommand is not None:
+            CommandScheduler.getInstance().cancel(self.m_autonomousCommand)
+        # Apply Current Limits to Shooter Motors at the start of Teleop
+        self.m_robotContainer.motors.Shooter1Motor.configurator.apply(
+            tuner_constants.kShooterInitialConfigs
+        )
+        self.m_robotContainer.motors.Shooter2Motor.configurator.apply(
+            tuner_constants.kShooterInitialConfigs
+        )
 
-    def disabledPeriodic(self):
-        """Runs while the robot is disabled. We don't do anything here."""
+    def teleopPeriodic(self) -> None:
+        # Operator triggers drive the feeder motors directly
+        triggerLeftValue = gamepads.operatorController.getLeftTriggerAxis()
+        triggerRightValue = gamepads.operatorController.getRightTriggerAxis()
+
+        triggerValue = triggerLeftValue * constants.MotorSpeeds.FEEDER
+        if triggerRightValue > 0.05:
+            triggerValue = -triggerRightValue
+
+        self.m_robotContainer.motors.Feeder1Motor.set_control(
+            self.m_robotContainer.motors.m_dutyCycleOut.with_output(triggerValue)
+        )
+        self.m_robotContainer.motors.Feeder2Motor.set_control(
+            self.m_robotContainer.motors.m_dutyCycleOut.with_output(-1 * triggerValue)
+        )
+
+    def teleopExit(self) -> None:
+        pass
+
+    def testInit(self) -> None:
+        CommandScheduler.getInstance().cancelAll()
+
+    def testPeriodic(self) -> None:
+        pass
+
+    def testExit(self) -> None:
+        pass
+
+    def simulationPeriodic(self) -> None:
         pass
 
 
-# ============================================================
-# To run this robot code, use one of these commands:
-#   Simulate:  python -m robotpy sim
-#   Deploy:    python -m robotpy deploy
-# ============================================================
+if __name__ == "__main__":
+    wpilib.run(MyRobot)

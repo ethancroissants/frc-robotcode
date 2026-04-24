@@ -3,8 +3,9 @@
 # Version of robotpy this project depends on
 robotpy_version = "2026.2.2"
 
-# Packages to install on the roboRIO
+# Which packages to install on the roboRIO
 requires = [
     "robotpy-commands-v2",
     "phoenix6",
+    "robotpy-pathplannerlib",
 ]

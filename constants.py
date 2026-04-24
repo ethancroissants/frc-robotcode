@@ -1,157 +1,353 @@
-# ============================================================
-# CONSTANTS - All the important numbers for our robot
-# ============================================================
-# This file is like a settings page. Instead of hiding numbers
-# deep inside other files, we put them all here so they're
-# easy to find and change.
-#
-# Swerve constants are from Tuner X (the old Java code's
-# TunerConstants.java), so they match the actual hardware.
-# ============================================================
+"""
+Copyright (c) 2018-2019 FIRST. All Rights Reserved.
+Open Source Software - may be modified and shared by FRC teams. The code
+must be accompanied by the FIRST BSD license file in the root directory of
+the project.
+
+The Constants module provides a convenient place for teams to hold robot-wide
+numerical or boolean constants.
+"""
 
 import math
 
-
-# --- MOTOR CAN IDS ---
-# Every motor on the robot has a unique ID number, like a name tag.
-# The robot uses these IDs to talk to the right motor.
-
-# Swerve drive motors (the 4 wheels that let us drive in any direction)
-FRONT_LEFT_DRIVE_ID = 24
-FRONT_LEFT_STEER_ID = 23
-FRONT_RIGHT_DRIVE_ID = 28
-FRONT_RIGHT_STEER_ID = 27
-REAR_LEFT_DRIVE_ID = 22
-REAR_LEFT_STEER_ID = 21
-REAR_RIGHT_DRIVE_ID = 26
-REAR_RIGHT_STEER_ID = 25
-
-# Game piece motors (the motors that handle balls)
-FEEDER_LEFT_ID = 4       # Left feeder wheel  (picks up balls from ground)
-FEEDER_RIGHT_ID = 5      # Right feeder wheel
-CONVEYOR_ID = 6           # Conveyor belt       (moves balls inside the robot)
-ELEVATOR_ID = 8           # Elevator motor      (moves the elevator up/down)
-KICKER_ID = 9             # Kicker wheel        (pushes ball into shooter)
-SHOOTER_LEFT_ID = 10      # Left shooter wheel  (spins fast to launch balls)
-SHOOTER_RIGHT_ID = 11     # Right shooter wheel
-HOOD_ID = 12              # Hood motor          (tilts the shooter up/down to aim)
-
-# CANcoder IDs (absolute encoders on each swerve wheel)
-FRONT_LEFT_ENCODER_ID = 32
-FRONT_RIGHT_ENCODER_ID = 34
-REAR_LEFT_ENCODER_ID = 31
-REAR_RIGHT_ENCODER_ID = 33
-
-# Pigeon2 IMU (gyroscope -- tells us which way the robot is facing)
-PIGEON_ID = 0
+from wpimath.controller import PIDController
+from wpimath.geometry import Translation2d
+from wpimath.kinematics import DifferentialDriveKinematics, SwerveDrive4Kinematics
+from wpimath.trajectory import TrapezoidProfile
+from wpimath.units import inchesToMeters
 
 
-# --- SWERVE MODULE POSITIONS ---
-# Where each wheel is relative to the center of the robot (in meters).
-# These come from TunerConstants.java: 9.875" x 11.75"
-SWERVE_FL_X = 0.250825    # 9.875 inches forward
-SWERVE_FL_Y = 0.29845     # 11.75 inches left
-SWERVE_FR_X = 0.250825
-SWERVE_FR_Y = -0.29845    # 11.75 inches right
-SWERVE_BL_X = -0.250825   # 9.875 inches backward
-SWERVE_BL_Y = 0.29845
-SWERVE_BR_X = -0.250825
-SWERVE_BR_Y = -0.29845
-
-# --- CANCODER OFFSETS ---
-# Each CANcoder has a magnet that might not be perfectly aligned.
-# These offsets correct for that (in rotations, from Tuner X).
-FL_ENCODER_OFFSET = 0.326904296875
-FR_ENCODER_OFFSET = -0.322998046875
-BL_ENCODER_OFFSET = 0.18896484375
-BR_ENCODER_OFFSET = -0.274169921875
-
-# --- SWERVE GEAR RATIOS ---
-# From TunerConstants.java (Tuner X generated values)
-DRIVE_GEAR_RATIO = 6.746031746031747    # motor rotations per wheel rotation
-STEER_GEAR_RATIO = 21.428571428571427   # motor rotations per wheel rotation
-WHEEL_RADIUS_METERS = 0.0508           # 2 inches
-
-# --- SWERVE DRIVE SPEEDS ---
-MAX_SPEED_MPS = 4.58                          # meters/sec at 12V (from Tuner X)
-MAX_ANGULAR_RATE = 0.75 * 2 * math.pi         # 0.75 rotations/sec in rad/s
-
-# --- SWERVE STEER PID ---
-# These control how accurately each wheel points.
-# Scaled from Tuner X values (P=100, D=0.5) for motor-position control.
-# Original values are for FusedCANcoder (1 rotation = 1 wheel rotation).
-# Motor position has gear ratio applied, so we divide by gear ratio.
-STEER_P = 4.7      # 100 / 21.43
-STEER_I = 0.0
-STEER_D = 0.023    # 0.5 / 21.43
-
-# --- DRIVE INVERSION ---
-# The right side motors spin the opposite direction to go forward
-LEFT_SIDE_INVERTED = False
-RIGHT_SIDE_INVERTED = True
-
-# All steer motors are inverted (from Tuner X)
-STEER_INVERTED = True
-
-# --- INPUT DEADBAND ---
-# Ignore tiny joystick movements (stick drift)
-DRIVE_DEADBAND = 0.1   # 10% deadband (matches old code)
+class MotorSpeeds:
+    SHOOTER = 0.5
+    KICKER = 0.9
+    CONVEYOR = 1.0
+    HOOD = 0.2
+    FEEDER = 0.5
+    ELEVATOR = 0.6
+    LAUNCH = 0.7
 
 
-# --- GAMEPAD PORTS ---
-# We use two Xbox controllers: one for driving, one for operating mechanisms
-DRIVER_GAMEPAD_PORT = 0
-OPERATOR_GAMEPAD_PORT = 1
+class ControllerIDs:
+    FALCON_FRONT_RIGHT_STEER_ID = 27
+    FALCON_REAR_RIGHT_STEER_ID = 25
+    FALCON_FRONT_LEFT_STEER_ID = 23
+    FALCON_REAR_LEFT_STEER_ID = 21
+    KRAKEN_FRONT_RIGHT_DRIVE_ID = 28
+    KRAKEN_REAR_RIGHT_DRIVE_ID = 26
+    KRAKEN_FRONT_LEFT_DRIVE_ID = 24
+    KRAKEN_REAR_LEFT_DRIVE_ID = 22
+
+    MINION_DRIVE_ID = 3
+
+    FEEDER1_DRIVE_ID = 4
+    FEEDER2_DRIVE_ID = 5
+    CONVEYOR_DRIVE_ID = 6
+    WRIST_DRIVE_ID = 7
+    ELEVATOR_DRIVE_ID = 8
+    KICKER_DRIVE_ID = 9
+    SHOOTER1_DRIVE_ID = 10
+    SHOOTER2_DRIVE_ID = 11
+    HOOD_DRIVE_ID = 12
+
+    TEST_DRIVE_ID = 40
 
 
-# --- MOTOR SPEEDS ---
-# These control how fast each motor spins.
-# 1.0 = full speed, 0.5 = half speed, 0.0 = stopped
-SHOOTER_SPEED = 0.5
-KICKER_SPEED = 0.9
-CONVEYOR_SPEED = 1.0
-HOOD_SPEED = 0.2
-FEEDER_SPEED = 0.5
-ELEVATOR_SPEED = 0.6
-LAUNCH_SPEED = 0.7
-
-# Shooter velocity targets (rotations per second, used for precise speed control)
-SHOOTER_CLOSE_VELOCITY = -39   # Speed for shooting nearby targets
-SHOOTER_FAR_VELOCITY = -60     # Speed for shooting far away targets
+class CancoderIDs:
+    FRONT_LEFT_CANCODER_ID = 32
+    FRONT_RIGHT_CANCODER_ID = 34
+    REAR_LEFT_CANCODER_ID = 31
+    REAR_RIGHT_CANCODER_ID = 33
 
 
-# --- DRIVE SPEED MULTIPLIERS ---
-# How fast the whole robot moves around the field
-DRIVE_FULL_SPEED = 1.0     # Normal driving speed (multiplier)
-DRIVE_SLOW_SPEED = 0.6     # Slow mode for careful driving
+class GamePadIDs:
+    DRIVER_GAMEPAD_ID = 0
+    OPERATOR_GAMEPAD_ID = 1
 
 
-# --- ELEVATOR POSITIONS ---
-# The elevator can go to specific heights (measured in encoder ticks)
-ELEVATOR_BOTTOM = 0.0       # All the way down
-ELEVATOR_LOADING = 19.0     # Height for loading game pieces
-ELEVATOR_LEVEL_1 = 58.0     # Low scoring position
-ELEVATOR_LEVEL_2 = 86.0     # Medium scoring position
-ELEVATOR_LEVEL_3 = 110.0    # High scoring position
+class PneumaticIDs:
+    ARM_EXTEND_ID = 6
+    ARM_RETRACT_ID = 7
+    CONE_GRAB_ID = 4
+    CONE_RELEASE_ID = 5
+    CUBE_GRAB_ID = 2
+    CUBE_RELEASE_ID = 3
 
 
-# --- LIMIT SWITCHES ---
-# These are physical switches that tell us when something has
-# reached its maximum or minimum position (like a door stopper)
-ELEVATOR_TOP_SWITCH = 0
-ELEVATOR_BOTTOM_SWITCH = 1
+class ButtonIDs:
+    A_BUTTON_ID = 1
+    B_BUTTON_ID = 2
+    X_BUTTON_ID = 3
+    Y_BUTTON_ID = 4
+    LEFT_SHOULDER_BUTTON_ID = 5
+    RIGHT_SHOULDER_BUTTON_ID = 6
+    BACK_BUTTON_ID = 7
+    START_BUTTON_ID = 8
+    LEFT_STICK_BUTTON_ID = 9
+    RIGHT_STICK_BUTTON_ID = 10
 
 
-# --- PID TUNING ---
-# PID is a math formula that helps motors move to exact positions smoothly.
-# P = how aggressively it corrects errors
-# I = fixes small lingering errors over time
-# D = slows down as it approaches the target (prevents overshooting)
-SHOOTER_P = 0.55
-SHOOTER_I = 0.05
-SHOOTER_D = 0.0
-SHOOTER_V = 0.12    # Feedforward: gives the motor a head start
+class JoystickAxisIDs:
+    LEFT_X_AXIS = 0
+    LEFT_Y_AXIS = 1
+    RIGHT_X_AXIS = 4
+    RIGHT_Y_AXIS = 5
 
-ELEVATOR_P = 0.478
-ELEVATOR_I = 0.0
-ELEVATOR_D = 0.0
+    LEFT_TRIGGER_ID = 2
+    RIGHT_TRIGGER_ID = 3
+
+
+class Cameras:
+    AprilTagIP = "10.12.79.2"
+    AprilTagPort = 5810
+    AprilTagURL = f"http://{AprilTagIP}:{AprilTagPort}/?action=stream"
+
+
+class Switches:
+    elevatorTopLimitSwitch = 0
+    elevatorBottomLimitSwitch = 1
+    wristTopLimitSwitch = 2
+    wristBottomLimitSwitch = 3
+
+
+class ElevatorPositions:
+    bottom = 0.0
+    loading = 19.0
+    level1 = 58.0
+    level2 = 86.0
+    level3 = 110.0
+
+
+class DriveConstants:
+    fullSpeed = 1.0
+    slowSpeed = 0.6
+
+    kMaxSpeedMetersPerSecond = 1.0
+    kMaxAngularSpeed = 2 * math.pi
+
+    kDirectionSlewRate = 1.2
+    kMagnitudeSlewRate = 1.8
+    kRotationalSlewRate = 2.0
+
+    kTrackWidth = inchesToMeters(21.5)
+    kWheelBase = inchesToMeters(21.5)
+    kDriveKinematics = SwerveDrive4Kinematics(
+        Translation2d(kWheelBase / 2, kTrackWidth / 2),
+        Translation2d(kWheelBase / 2, -kTrackWidth / 2),
+        Translation2d(-kWheelBase / 2, kTrackWidth / 2),
+        Translation2d(-kWheelBase / 2, -kTrackWidth / 2),
+    )
+
+    kFrontLeftChassisAngularOffset = -math.pi / 2
+    kFrontRightChassisAngularOffset = 0
+    kBackLeftChassisAngularOffset = math.pi
+    kBackRightChassisAngularOffset = math.pi / 2
+
+    kFrontLeftDrivingCanId = 4
+    kRearLeftDrivingCanId = 2
+    kFrontRightDrivingCanId = 6
+    kRearRightDrivingCanId = 8
+
+    kFrontLeftTurningCanId = 3
+    kRearLeftTurningCanId = 1
+    kFrontRightTurningCanId = 5
+    kRearRightTurningCanId = 7
+
+    kGyroReversed = True
+
+
+class NeoMotorConstants:
+    kFreeSpeedRpm = 5676
+
+
+class ModuleConstants:
+    kDrivingMotorPinionTeeth = 13
+
+    kTurningEncoderInverted = True
+
+    kDrivingMotorFreeSpeedRps = NeoMotorConstants.kFreeSpeedRpm / 60
+    kWheelDiameterMeters = 0.0762
+    kWheelCircumferenceMeters = kWheelDiameterMeters * math.pi
+    kDrivingMotorReduction = (45.0 * 22) / (kDrivingMotorPinionTeeth * 15)
+    kDriveWheelFreeSpeedRps = (
+        kDrivingMotorFreeSpeedRps * kWheelCircumferenceMeters
+    ) / kDrivingMotorReduction
+
+    kDrivingEncoderPositionFactor = (kWheelDiameterMeters * math.pi) / kDrivingMotorReduction
+    kDrivingEncoderVelocityFactor = (
+        (kWheelDiameterMeters * math.pi) / kDrivingMotorReduction
+    ) / 60.0
+
+    kTurningEncoderPositionFactor = 2 * math.pi
+    kTurningEncoderVelocityFactor = (2 * math.pi) / 60.0
+
+    kTurningEncoderPositionPIDMinInput = 0
+    kTurningEncoderPositionPIDMaxInput = kTurningEncoderPositionFactor
+
+    kDrivingP = 0.04
+    kDrivingI = 0
+    kDrivingD = 0
+    kDrivingFF = 1 / kDriveWheelFreeSpeedRps
+
+    kDrivingMinOutput = -0.4
+    kDrivingMaxOutput = 0.4
+
+    kTurningP = 1
+    kTurningI = 0
+    kTurningD = 0
+    kTurningFF = 0
+    kTurningMinOutput = -1
+    kTurningMaxOutput = 1
+
+    kDrivingMotorCurrentLimit = 50
+    kSteerMotorCurrentLimit = 30
+    kDrivingMotorCurrentThreshold = 55
+    kSteerMotorCurrentThreshold = 30
+    kDrivingMotorCurrentThresholdTime = 0.1
+    kSteerMotorCurrentThresholdTime = 0.1
+
+    kShooterMotorCurrentLimit = 60.0
+
+
+class OIConstants:
+    kDriverControllerPort = 0
+    kDriveDeadband = 0.05
+    kDeadband = 0.09
+
+
+class AutoConstants:
+    kMaxSpeedMetersPerSecond = 1
+    kMaxAccelerationMetersPerSecondSquared = 1
+    kMaxAngularSpeedRadiansPerSecond = math.pi
+    kMaxAngularSpeedRadiansPerSecondSquared = math.pi
+
+    kPXController = 1
+    kPYController = 1
+    kPThetaController = 1
+
+    kThetaControllerConstraints = TrapezoidProfile.Constraints(
+        kMaxAngularSpeedRadiansPerSecond, kMaxAngularSpeedRadiansPerSecondSquared
+    )
+
+
+class RobotLimits:
+    kHoldDistance = 12.0
+    kValueToInches = 0.125
+    kP = 0.05
+    kUltrasonicPort = 0
+
+
+class DriveTrain:
+    driveSpeed = 0.8
+
+    kWheelRadiusInches = 2
+
+    kDriveReduction = 1.0
+
+    class Encoders:
+        LEFT_ENCODER_SLOT = 1
+        RIGHT_ENCODER_SLOT = 1
+
+        LEFT_SENSOR_PHASE = True
+        RIGHT_SENSOR_PHASE = False
+
+        PULSES_PER_REVOLUTION = 5760
+
+    class Measurements:
+        WHEEL_DIAMETER = inchesToMeters(6.0)
+        WHEEL_CIRCUMFERENCE = math.pi * WHEEL_DIAMETER
+
+        DRIVEBASE_WIDTH = inchesToMeters(28.0)
+        DRIVEBASE_LENGTH = inchesToMeters(28.0)
+
+        GEAR_RATIO = 8.45
+
+        MOTOR_MAX_RPM = 5330
+
+    ALIGNMENT_EPSILON = 3
+
+
+class Operator:
+    OPERATOR_ACTUATOR_TALON = 13
+    OPERATOR_ROLLER_TALON = 14
+
+    OPERATOR_ACTUATOR_TALON_INVERTED = False
+    OPERATOR_ROLLER_TALON_INVERTED = True
+
+    OPERATOR_LIMIT_BOTTOM = 0
+    OPERATOR_LIMIT_TOP = 1
+
+    kPArm = 0.011111111111
+    kIArm = 0.0
+    kDArm = 0.0
+
+    ARM_TICKS_PER_DEGREE = 1000
+
+    ARM_UP_SPEED = -0.85
+    ARM_DOWN_SPEED = 0.35
+
+    ROLLER_SPEED = 0.4
+
+
+class ControlGains:
+    ksVolts = 1.02
+    kvVoltsSecondsPerMeter = 7.01
+    kaVoltsSecondsSquaredPerMeter = 2.64
+
+    kPDriveVel = 0.478
+    kIDriveVel = 0.0
+    kDDriveVel = 0.008
+
+    kPTurnVel = 0.0088
+    kITurnVel = 0.01
+    kDTurnVel = 0.0106
+
+    kRP = 0.05
+
+    kPElevatorVel = 0.478
+    kIElevatorVel = 0.0
+    kDElevatorVel = 0.0
+
+    turningPIDController = PIDController(kPTurnVel, kITurnVel, kDTurnVel)
+    drivePidController = PIDController(kPTurnVel, kITurnVel, kDTurnVel)
+    elevatorPidController = PIDController(kPElevatorVel, kIElevatorVel, kDElevatorVel)
+
+    kTrackWidthMeters = 0.1524
+    kDriveKinematics = DifferentialDriveKinematics(kTrackWidthMeters)
+
+    kMaxSpeedMetersPerSecond = 3
+    kMaxAccelerationMetersPerSecondSquared = 1.5
+
+    kRamseteB = 2
+    kRamseteZeta = 0.7
+
+
+class Autonomous:
+    SCORE_LATE_DELAY = 5.0
+    VISION_DISTANCE_KP = -0.1
+    AUTO_TARGET_DISTANCE_EPSILON = 5.0
+
+
+DRIVETRAIN_TRACKWIDTH_METERS = 1.0
+DRIVETRAIN_WHEELBASE_METERS = 1.0
+
+DRIVETRAIN_PIGEON_ID = 0
+
+FRONT_LEFT_MODULE_DRIVE_MOTOR = ControllerIDs.KRAKEN_FRONT_LEFT_DRIVE_ID
+FRONT_LEFT_MODULE_STEER_MOTOR = ControllerIDs.FALCON_FRONT_LEFT_STEER_ID
+FRONT_LEFT_MODULE_STEER_ENCODER = CancoderIDs.FRONT_LEFT_CANCODER_ID
+FRONT_LEFT_MODULE_STEER_OFFSET = -math.radians(0.0)
+
+FRONT_RIGHT_MODULE_DRIVE_MOTOR = ControllerIDs.KRAKEN_FRONT_RIGHT_DRIVE_ID
+FRONT_RIGHT_MODULE_STEER_MOTOR = ControllerIDs.FALCON_FRONT_RIGHT_STEER_ID
+FRONT_RIGHT_MODULE_STEER_ENCODER = CancoderIDs.FRONT_RIGHT_CANCODER_ID
+FRONT_RIGHT_MODULE_STEER_OFFSET = -math.radians(0.0)
+
+BACK_LEFT_MODULE_DRIVE_MOTOR = ControllerIDs.KRAKEN_REAR_LEFT_DRIVE_ID
+BACK_LEFT_MODULE_STEER_MOTOR = ControllerIDs.FALCON_REAR_LEFT_STEER_ID
+BACK_LEFT_MODULE_STEER_ENCODER = CancoderIDs.REAR_LEFT_CANCODER_ID
+BACK_LEFT_MODULE_STEER_OFFSET = -math.radians(0.0)
+
+BACK_RIGHT_MODULE_DRIVE_MOTOR = ControllerIDs.KRAKEN_REAR_RIGHT_DRIVE_ID
+BACK_RIGHT_MODULE_STEER_MOTOR = ControllerIDs.FALCON_REAR_RIGHT_STEER_ID
+BACK_RIGHT_MODULE_STEER_ENCODER = CancoderIDs.REAR_RIGHT_CANCODER_ID
+BACK_RIGHT_MODULE_STEER_OFFSET = -math.radians(0.0)
