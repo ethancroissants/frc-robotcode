@@ -6,5 +6,5 @@ import sys
 
 
 if __name__ == "__main__":
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "robotpy"])
-    subprocess.check_call([sys.executable, "-m", "robotpy", "sync"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "robotpy", "certifi"])
+    subprocess.check_call([sys.executable, "-m", "robotpy", "sync", "--use-certifi"])

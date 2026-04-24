@@ -35,3 +35,7 @@ networktables.json
 networktables.json.bak
 simgui.json
 simgui-window.json
+
+# Contains credentials — never commit
+push.sh
+push.py
