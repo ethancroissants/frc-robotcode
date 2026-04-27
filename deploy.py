@@ -259,6 +259,58 @@ def check_connectivity(team: str | None) -> None:
         info("  - Firewall isn't blocking mDNS / port 22")
 
 
+_LARGE_FILE_THRESHOLD = 250_000
+# Mirrors robotpy_installer.cli_deploy._copy_to_tmpdir's filter, so the files
+# we scan match the ones robotpy would upload.
+_DEPLOY_IGNORE_DIRS = {"__pycache__", "ctre_sim", "venv"}
+_DEPLOY_IGNORE_EXTS = frozenset({".pyc", ".whl", ".ipk", ".zip", ".gz", ".wpilog"})
+
+
+def find_large_files(project_path: str) -> list[tuple[str, int]]:
+    """Replicate robotpy's pre-deploy large-file scan so we can prompt the user
+    ourselves. robotpy prompts on stdin, but in UI mode the subprocess has no
+    stdin and the prompt EOFs — taking the answer up front avoids that."""
+    found: list[tuple[str, int]] = []
+    for root, dirs, files in os.walk(project_path):
+        dirs[:] = [
+            d for d in dirs
+            if not d.startswith(".") and d not in _DEPLOY_IGNORE_DIRS
+        ]
+        for filename in files:
+            stem, ext = os.path.splitext(filename)
+            if ext in _DEPLOY_IGNORE_EXTS or stem.startswith("."):
+                continue
+            full = os.path.join(root, filename)
+            try:
+                size = os.stat(full).st_size
+            except OSError:
+                continue
+            if size > _LARGE_FILE_THRESHOLD:
+                rel = os.path.relpath(full, project_path)
+                found.append((rel, size))
+    found.sort()
+    return found
+
+
+def handle_large_files(extra_args: list[str]) -> bool:
+    """Returns False if the user declined to upload."""
+    if "--large" in extra_args:
+        return True
+    project_path = os.path.dirname(os.path.abspath(__file__))
+    large = find_large_files(project_path)
+    if not large:
+        return True
+    warn(f"Found {len(large)} file(s) larger than {_LARGE_FILE_THRESHOLD} bytes:")
+    for rel, sz in large[:10]:
+        info(f"- {rel} ({sz} bytes)")
+    if len(large) > 10:
+        info(f"...and {len(large) - 10} more")
+    if not ask_yn("Upload these large files anyway?", default=True):
+        return False
+    extra_args.append("--large")
+    return True
+
+
 def run_deploy(extra_args: list[str]) -> int:
     step("Sending code to the robot")
     info("This usually takes 30–90 seconds.")
@@ -338,6 +390,12 @@ def _main_logic(extra: list[str]) -> int:
         return 1
 
     check_connectivity(team)
+
+    if not handle_large_files(extra):
+        warn("Aborted: declined to upload large files.")
+        info("Delete the offending files (e.g. clear out logs/) and retry,")
+        info("or pass --large to skip this check next time.")
+        return 1
 
     rc = run_deploy(extra)
     result_box(rc == 0, rc)
