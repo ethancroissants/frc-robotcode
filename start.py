@@ -10,7 +10,7 @@ Run me directly with:
 
     python start.py
 
-…or double-click start.vbs on Windows.
+…or double-click START.bat on Windows.
 """
 
 from __future__ import annotations
