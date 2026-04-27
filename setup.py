@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import ui_mode
 
@@ -258,6 +259,7 @@ def ensure_tkinter() -> bool:
 
 
 def offer_deploy(repo: Path) -> int:
+    """Terminal-mode follow-up: asks via prompt, runs deploy.py inline."""
     print()
     rule("Next step", color=cyan)
     print()
@@ -279,12 +281,24 @@ def offer_deploy(repo: Path) -> int:
     if not deploy_script.exists():
         fail(f"deploy.py not found at {deploy_script}")
         return 1
-    deploy_cmd = [sys.executable, str(deploy_script)]
-    if ui_mode.is_active():
-        # Already in a Tk window — forward output here instead of spawning a
-        # second one. (deploy.py without --ui keeps using the stdout pipe.)
-        return ui_mode.get_app().stream_subprocess(deploy_cmd)
-    return subprocess.call(deploy_cmd)
+    return subprocess.call([sys.executable, str(deploy_script)])
+
+
+def _spawn_deploy_ui(repo: Path) -> Callable[[], None]:
+    """Build a callback that launches `deploy.py --ui` in a fresh process."""
+
+    def fire() -> None:
+        deploy_script = repo / "deploy.py"
+        if not deploy_script.exists():
+            return
+        cmd = [sys.executable, str(deploy_script), "--ui"]
+        try:
+            subprocess.Popen(cmd, cwd=str(repo))
+        except Exception:
+            # Best-effort; the setup window is about to close regardless.
+            pass
+
+    return fire
 
 
 def main() -> int:
@@ -357,6 +371,17 @@ def _main_logic() -> int:
         banner(f"Setup Finished with Errors  ({passed}/{total})",
                "fix the failures above before deploying", color=red)
         return 1
+
+    if ui_mode.is_active():
+        # Replace the success "you can close this" copy with a Deploy button.
+        # Clicking it spawns deploy.py --ui in a fresh window and closes this
+        # one — no second confirmation popup needed.
+        ui_mode.get_app().set_followup(
+            label="Deploy now",
+            on_click=_spawn_deploy_ui(repo),
+            prompt="Push code to the robot now?",
+        )
+        return 0
 
     return offer_deploy(repo)
 

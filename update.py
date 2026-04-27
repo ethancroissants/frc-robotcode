@@ -2,7 +2,13 @@
 """Reset the local repo to match its GitHub remote.
 
 Pass --ui to show the friendly Cold Fusion loading-bar window.
+
+When launched from start.py with CFR_RESTART_AFTER_UPDATE=1 in the env, the
+success screen offers an "Open Control Panel" button that respawns start.py
+with the freshly-pulled code. (If the user closes the window without
+clicking, we respawn anyway so they're never left stranded.)
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +16,9 @@ from pathlib import Path
 import ui_mode
 
 REPO_DIR = Path(__file__).resolve().parent
+
+# Set when the success-screen button fires, so we don't double-spawn.
+_followup_state = {"fired": False}
 
 
 def _git_capture(*args: str) -> str:
@@ -38,6 +47,24 @@ def _default_branch() -> str:
         return "main"
 
 
+def _spawn_start() -> None:
+    """Open a fresh control panel; called from the followup button or as
+    a fallback if the user closes the window manually."""
+    _followup_state["fired"] = True
+    start_py = REPO_DIR / "start.py"
+    if not start_py.exists():
+        return
+    try:
+        # Strip the restart flag so the new panel doesn't propagate it.
+        env = dict(os.environ)
+        env.pop("CFR_RESTART_AFTER_UPDATE", None)
+        subprocess.Popen(
+            [sys.executable, str(start_py)], cwd=str(REPO_DIR), env=env,
+        )
+    except Exception:
+        pass
+
+
 def _logic() -> int:
     if ui_mode.is_active():
         ui_mode.get_app().banner("Update", "syncing with GitHub")
@@ -56,6 +83,12 @@ def _logic() -> int:
 
     if ui_mode.is_active():
         ui_mode.get_app().ok(f"Updated to origin/{branch}")
+        if os.environ.get("CFR_RESTART_AFTER_UPDATE"):
+            ui_mode.get_app().set_followup(
+                label="Open Control Panel",
+                on_click=_spawn_start,
+                prompt="The menu will reopen with the new code.",
+            )
     else:
         print("Update complete.")
     return 0
@@ -66,7 +99,14 @@ def main() -> int:
         sys.argv = [a for a in sys.argv if a != "--ui"]
         if ui_mode.HAS_TK:
             app = ui_mode.activate("Update", "sync with GitHub")
-            return app.run(_logic)
+            rc = app.run(_logic)
+            # If start.py asked us to take over the panel and the user
+            # didn't click the followup button (closed the window or hit X
+            # after a failure), still bring the panel back.
+            if (os.environ.get("CFR_RESTART_AFTER_UPDATE")
+                    and not _followup_state["fired"]):
+                _spawn_start()
+            return rc
     return _logic()
 
 

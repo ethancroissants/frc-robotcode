@@ -189,6 +189,24 @@ class App:
             darkcolor=ACCENT,
             thickness=10,
         )
+        style.configure(
+            "Accent.TButton",
+            background=ACCENT,
+            foreground="#ffffff",
+            font=("Helvetica", 11, "bold"),
+            padding=(22, 9),
+            borderwidth=0,
+            focusthickness=0,
+        )
+        style.map(
+            "Accent.TButton",
+            background=[
+                ("active", "#0052a3"),
+                ("pressed", "#004a8f"),
+                ("disabled", BORDER),
+            ],
+            foreground=[("disabled", DIM)],
+        )
         self.progress = ttk.Progressbar(
             center,
             mode="indeterminate",
@@ -207,11 +225,20 @@ class App:
             font=("Helvetica", 10),
         ).pack(pady=(12, 0))
 
+        # Built up-front, only packed on success when a follow-up is set.
+        self._action_button = ttk.Button(
+            center, text="Continue", style="Accent.TButton",
+        )
+
         # Lazily created details pane.
         self._details_frame: tk.Frame | None = None
         self._details_text: tk.Text | None = None
         self._details_visible = False
         self._details_buf: list[str] = []
+
+        self._followup_label: str | None = None
+        self._followup_prompt: str = ""
+        self._followup_on_click: Callable[[], None] | None = None
 
         self._exit_code = 0
         self._closed = False
@@ -253,7 +280,7 @@ class App:
         self._done = True
         try:
             self.progress.stop()
-            self.progress.configure(mode="determinate", maximum=100, value=100)
+            self.progress.pack_forget()
         except Exception:
             pass
         rc = self._exit_code
@@ -261,7 +288,16 @@ class App:
             self._icon_label.configure(fg=OK_COLOR)
             self._icon_var.set("✓")
             self._title_var.set("All done!")
-            self._subtitle_var.set("You can close this window.")
+            if self._followup_label and self._followup_on_click:
+                self._subtitle_var.set(
+                    self._followup_prompt or "Ready for the next step?"
+                )
+                self._action_button.configure(
+                    text=self._followup_label, command=self._fire_followup
+                )
+                self._action_button.pack(pady=(4, 0))
+            else:
+                self._subtitle_var.set("You can close this window.")
             self._hint_var.set("")
             self._status_var.set("Done.")
         else:
@@ -275,6 +311,32 @@ class App:
             self._status_var.set(f"Failed (exit code {rc}).")
             if not self._details_visible:
                 self._toggle_details()
+
+    def _fire_followup(self) -> None:
+        cb = self._followup_on_click
+        self._followup_on_click = None
+        try:
+            if cb is not None:
+                cb()
+        finally:
+            self._closed = True
+            self.root.destroy()
+
+    def set_followup(
+        self,
+        label: str,
+        on_click: Callable[[], None],
+        prompt: str = "",
+    ) -> None:
+        """Show a button on the success screen instead of "you can close…".
+
+        on_click runs on the Tk main thread; the window closes after it
+        returns so the host can spawn a follow-up subprocess and let this
+        window go away.
+        """
+        self._followup_label = label
+        self._followup_on_click = on_click
+        self._followup_prompt = prompt
 
     # ---- API used by host scripts (call from worker thread) ----
 

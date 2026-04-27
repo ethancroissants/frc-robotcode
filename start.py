@@ -15,6 +15,7 @@ Run me directly with:
 
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 import sys
@@ -41,13 +42,20 @@ CARD_HOVER = "#f0f6ff"
 HOVER_BORDER = "#9cc4ee"
 
 
-def _launch(args: list[str]) -> None:
-    """Spawn a subprocess for a task; do not block the dashboard."""
+def _launch(args: list[str], *, restart_panel: bool = False) -> None:
+    """Spawn a subprocess for a task; do not block the dashboard.
+
+    If restart_panel is set, the child gets CFR_RESTART_AFTER_UPDATE=1 so it
+    knows to reopen the panel for us when it finishes.
+    """
     cmd = [sys.executable, *args]
     try:
+        env = dict(os.environ)
+        if restart_panel:
+            env["CFR_RESTART_AFTER_UPDATE"] = "1"
         # On Windows, open in a new console so the child has its own window
         # group; everywhere else, just spawn detached.
-        kwargs = {"cwd": str(REPO)}
+        kwargs = {"cwd": str(REPO), "env": env}
         if platform.system() == "Windows":
             kwargs["creationflags"] = 0x00000010  # CREATE_NEW_CONSOLE
         subprocess.Popen(cmd, **kwargs)
@@ -165,6 +173,13 @@ def main() -> int:
     body = tk.Frame(root, bg=BG)
     body.pack(fill="both", expand=True, padx=22, pady=18)
 
+    def _update_clicked() -> None:
+        # Close the panel so only the update window stays on screen; the
+        # update process will reopen a fresh panel when it finishes (so the
+        # menu picks up any code changes from the pull).
+        _launch(["update.py", "--ui"], restart_panel=True)
+        root.destroy()
+
     cards = [
         (
             "Install / Setup",
@@ -179,7 +194,7 @@ def main() -> int:
         (
             "Update from GitHub",
             "Sync this folder with the latest team code.",
-            lambda: _launch(["update.py", "--ui"]),
+            _update_clicked,
         ),
         (
             "Run Simulator",
@@ -196,14 +211,24 @@ def main() -> int:
     tk.Frame(footer, bg=BORDER, height=1).pack(fill="x", side="top")
     finner = tk.Frame(footer, bg=PANEL, padx=14, pady=10)
     finner.pack(fill="x")
+    left = tk.Frame(finner, bg=PANEL)
+    left.pack(side="left", fill="x", expand=True)
     tk.Label(
-        finner,
+        left,
         text=f"Working in: {REPO}",
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 9),
         anchor="w",
-    ).pack(side="left")
+    ).pack(anchor="w")
+    tk.Label(
+        left,
+        text="Code & GUI written, designed and maintained by Ethan Canterbury",
+        bg=PANEL,
+        fg=DIM,
+        font=("Helvetica", 8),
+        anchor="w",
+    ).pack(anchor="w", pady=(2, 0))
     tk.Button(
         finner,
         text="Quit",
