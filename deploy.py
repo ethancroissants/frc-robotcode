@@ -168,18 +168,65 @@ def ping(host: str, timeout_s: float = 1.0) -> bool:
 
 
 def read_team_number() -> str | None:
-    for path in (".deploy_cfg", ".wpilib/wpilib_preferences.json"):
+    for path in (
+        ".deploy_cfg",
+        ".wpilib/wpilib_preferences.json",
+        "pyproject.toml",
+    ):
         try:
             with open(path) as f:
                 text = f.read()
         except OSError:
             continue
         import re
-        m = re.search(r'"?team(?:-number|Number)?"?\s*[:=]\s*"?(\d+)', text)
+        m = re.search(r'"?team(?:[-_]?number|Number)?"?\s*[:=]\s*"?(\d+)', text)
         if m:
             return m.group(1)
     env = os.environ.get("FRC_TEAM") or os.environ.get("TEAM")
     return env if env and env.isdigit() else None
+
+
+def save_team_number(team: str) -> None:
+    """Persist the team number to .wpilib/wpilib_preferences.json so robotpy
+    (and other FRC tools) pick it up on the next run."""
+    import json
+    repo = os.path.dirname(os.path.abspath(__file__))
+    prefs_dir = os.path.join(repo, ".wpilib")
+    prefs_path = os.path.join(prefs_dir, "wpilib_preferences.json")
+    os.makedirs(prefs_dir, exist_ok=True)
+    data = {}
+    if os.path.exists(prefs_path):
+        try:
+            with open(prefs_path) as f:
+                data = json.load(f) or {}
+        except Exception:
+            data = {}
+    data["teamNumber"] = int(team)
+    with open(prefs_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def ensure_team_number(team: str | None) -> str | None:
+    """If we don't have a team number and we're in UI mode, ask the user.
+
+    Without this, `robotpy deploy` would prompt on stdin — but in UI mode
+    stdin is closed, so it would hang silently. Asking up front and saving
+    the answer means robotpy never has to prompt at all.
+    """
+    if team or not ui_mode.is_active():
+        return team
+    answer = ui_mode.get_app().ask_string(
+        "Enter your FRC team number:",
+        default="",
+        title="Team Number",
+    )
+    if not answer or not answer.isdigit():
+        return None
+    try:
+        save_team_number(answer)
+    except Exception as e:
+        warn(f"Couldn't save team number: {e}")
+    return answer
 
 
 def check_connectivity(team: str | None) -> None:
@@ -213,7 +260,8 @@ def check_connectivity(team: str | None) -> None:
 
 
 def run_deploy(extra_args: list[str]) -> int:
-    step("Running robotpy deploy")
+    step("Sending code to the robot")
+    info("This usually takes 30–90 seconds.")
     cmd = [sys.executable, "-m", "robotpy", "deploy", *extra_args]
     t0 = time.monotonic()
     if ui_mode.is_active():
@@ -269,7 +317,16 @@ def _main_logic(extra: list[str]) -> int:
     if team:
         info(f"Detected team number: {bold(team)}")
     else:
-        info("No team number configured. robotpy will prompt if it needs one.")
+        # In UI mode, ask via dialog and save it. Otherwise let robotpy
+        # prompt on the terminal as before.
+        team = ensure_team_number(team)
+        if team:
+            info(f"Saved team number: {bold(team)}")
+        elif ui_mode.is_active():
+            fail("No team number provided — can't deploy without one.")
+            return 1
+        else:
+            info("No team number configured. robotpy will prompt if needed.")
 
     step("Network")
     info("Make sure your computer is on the robot's WiFi,")

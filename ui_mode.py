@@ -19,7 +19,7 @@ from typing import Callable
 
 try:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import messagebox, simpledialog, ttk
     HAS_TK = True
 except ImportError:
     HAS_TK = False
@@ -472,7 +472,47 @@ class App:
         reply.get()
         self._buffer(f"  · {msg} (acknowledged)\n")
 
-    # ---- subprocess streaming (silent — output goes to details only) ----
+    def ask_string(
+        self,
+        prompt: str,
+        default: str = "",
+        title: str = "Cold Fusion Robotics",
+    ) -> str | None:
+        """Pop a modal asking for a single line of text.
+
+        Returns the trimmed string, or None if the user cancelled / the
+        window was closed.
+        """
+        reply = _Reply()
+
+        def show() -> None:
+            if self._closed:
+                reply.put(None)
+                return
+            result = simpledialog.askstring(
+                title, prompt, initialvalue=default, parent=self.root
+            )
+            reply.put(result)
+
+        self.root.after(0, show)
+        ans = reply.get()
+        ans = ans.strip() if isinstance(ans, str) else None
+        self._buffer(f"  ? {prompt} → {ans!r}\n")
+        return ans
+
+    def _set_hint(self, msg: str) -> None:
+        def do() -> None:
+            if self._closed or self._done:
+                return
+            self._hint_var.set(msg)
+        self.root.after(0, do)
+
+    # ---- subprocess streaming ----
+    # stdout/stderr are captured into the hidden details log; the latest
+    # non-empty line is also surfaced under the progress bar so long-running
+    # commands like `robotpy deploy` show live activity. stdin is closed so
+    # if the child tries to prompt interactively it fails fast (instead of
+    # silently hanging the UI forever).
 
     def stream_subprocess(self, cmd: list[str]) -> int:
         self._buffer(f"  $ {' '.join(cmd)}\n")
@@ -481,6 +521,7 @@ class App:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
@@ -490,4 +531,9 @@ class App:
         assert proc.stdout is not None
         for line in proc.stdout:
             self._buffer(line)
+            trimmed = line.strip()
+            if trimmed:
+                # Truncate so a giant traceback line doesn't blow up the layout.
+                self._set_hint(trimmed[:90])
+        self._set_hint("")
         return proc.wait()
