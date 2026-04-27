@@ -1,1 +1,0 @@
-.\gradlew.bat runPPSim --no-daemon
