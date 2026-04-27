@@ -1,5 +1,5 @@
-# FRC Robot Code
-
+# FRC Robot Code for Cold Fusion team 1279! 
+# Revision 2
 Python port (RobotPy) of the team's 2026 FRC robot code, originally written in Java.
 
 Built on [RobotPy](https://robotpy.readthedocs.io/) using the command-based framework, CTRE Phoenix 6 for swerve and motor control, and PathPlanner for autonomous routines.
