@@ -8,6 +8,7 @@ import wpilib
 from commands2 import CommandScheduler
 from phoenix6 import HootAutoReplay
 from phoenix6.controls import NeutralOut
+from wpilib import DriverStation
 
 import gamepads
 import tunables
@@ -17,6 +18,11 @@ from robotcontainer import RobotContainer
 
 class MyRobot(wpilib.TimedRobot):
     def robotInit(self) -> None:
+        # Without this, every JoystickButton trigger spams "Joystick Button N missing
+        # (max 0)" once per loop when no controller is plugged in. That print burns
+        # enough of the 20ms loop budget to push RobotPeriodic over the watchdog.
+        DriverStation.silenceJoystickConnectionWarning(True)
+
         self.m_autonomousCommand = None
         self.m_robotContainer = RobotContainer()
 
@@ -34,8 +40,6 @@ class MyRobot(wpilib.TimedRobot):
         self.m_timeAndJoystickReplay.update()
         CommandScheduler.getInstance().run()
         tunables.update(self.isEnabled())
-
-        driver_Y_Button = gamepads.driver_Y_Button.getAsBoolean()
 
     def disabledInit(self) -> None:
         # Phoenix 6 caches the last control request and resumes it on re-enable. Without this,
@@ -72,6 +76,9 @@ class MyRobot(wpilib.TimedRobot):
         self.m_robotContainer.motors.Shooter2Motor.configurator.apply(
             tuner_constants.kShooterInitialConfigs
         )
+        # The full TalonFXConfiguration apply above wipes audio settings, so
+        # restore the "allow music while disabled" flag the beep code relies on.
+        tunables.apply_beep_audio()
 
     def teleopPeriodic(self) -> None:
         # Operator triggers drive the feeder motors directly

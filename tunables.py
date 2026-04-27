@@ -15,7 +15,8 @@ buzzer). Beeps suppress while enabled to avoid commandeering a motor mid-match.
 import time
 from typing import Callable
 
-from phoenix6.controls import MusicTone
+from phoenix6.configs import AudioConfigs
+from phoenix6.controls import MusicTone, NeutralOut
 from wpilib import SmartDashboard
 
 import constants
@@ -114,7 +115,7 @@ _TUNABLES: list[tuple[str, Callable[[], float]]] = [
     (_ELEVATOR_SPEED, lambda: constants.MotorSpeeds.ELEVATOR),
 ]
 
-# Two ascending beeps with short gaps. (frequency Hz, duration s); 0 Hz = silent.
+# Two ascending beeps with short gaps. (frequency Hz, duration s); freq <= 0 is silent.
 _BEEP_SEQUENCE: list[tuple[float, float]] = [
     (880.0, 0.08),
     (0.0, 0.04),
@@ -124,14 +125,34 @@ _BEEP_SEQUENCE: list[tuple[float, float]] = [
 
 _last_values: dict[str, float] = {}
 _beep_motor = None
-_beep_tone = MusicTone(0.0)
+# Phoenix's control timeout is ~25ms — at the default MusicTone update rate the
+# motor will revert to neutral if a robot loop slips. Pin the update rate up so
+# a single missed loop doesn't cut the tone short.
+_beep_tone = MusicTone(0.0).with_update_freq_hz(200.0)
+_beep_silence = NeutralOut()
 _beep_start_time: float | None = None
+
+# Phoenix mutes MusicTone while the robot is disabled unless this is True.
+# We tune in the pit (disabled), so the audio gate has to be open there.
+_beep_audio_configs = AudioConfigs().with_allow_music_dur_disable(True)
 
 
 def configure_beep_motor(motor) -> None:
     """Pick the TalonFX/FXS that plays change-confirmation tones."""
     global _beep_motor
     _beep_motor = motor
+    apply_beep_audio()
+
+
+def apply_beep_audio() -> None:
+    """(Re)apply the audio config that lets the beep motor play while disabled.
+
+    Call this any time something does a full configurator.apply() on the beep
+    motor — a TalonFXConfiguration apply resets AudioConfigs back to defaults.
+    """
+    if _beep_motor is None:
+        return
+    _beep_motor.configurator.apply(_beep_audio_configs)
 
 
 def _poll_changes() -> bool:
@@ -156,11 +177,13 @@ def update(robot_enabled: bool) -> None:
     if robot_enabled:
         # Silence any in-flight chirp so cached MusicTone doesn't ring into the match.
         if _beep_start_time is not None:
-            _beep_motor.set_control(_beep_tone.with_audio_frequency(0.0))
+            _beep_motor.set_control(_beep_silence)
             _beep_start_time = None
         return
 
-    if changed and _beep_start_time is None:
+    # Re-trigger from the start on every change, even mid-beep — the user just edited
+    # another value and wants confirmation, not the tail of the previous chirp.
+    if changed:
         _beep_start_time = time.monotonic()
 
     if _beep_start_time is None:
@@ -171,8 +194,13 @@ def update(robot_enabled: bool) -> None:
     for freq, dur in _BEEP_SEQUENCE:
         cumulative += dur
         if elapsed < cumulative:
-            _beep_motor.set_control(_beep_tone.with_audio_frequency(freq))
+            if freq > 0.0:
+                _beep_motor.set_control(_beep_tone.with_audio_frequency(freq))
+            else:
+                # NeutralOut is a hard stop; MusicTone(0) is undefined and on some
+                # firmware leaves the coil singing at the previous frequency.
+                _beep_motor.set_control(_beep_silence)
             return
 
-    _beep_motor.set_control(_beep_tone.with_audio_frequency(0.0))
+    _beep_motor.set_control(_beep_silence)
     _beep_start_time = None
