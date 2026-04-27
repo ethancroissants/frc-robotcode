@@ -21,6 +21,9 @@ class MyRobot(wpilib.TimedRobot):
         self.m_robotContainer = RobotContainer()
 
         tunables.publish_defaults()
+        # Shooter1 (Kraken) is loud and idle outside of fire commands; disabledInit already
+        # clears its cached control, so it's the safest motor to commandeer for beeps.
+        tunables.configure_beep_motor(self.m_robotContainer.motors.Shooter1Motor)
 
         # Log and replay timestamp and joystick data
         self.m_timeAndJoystickReplay = (
@@ -30,6 +33,7 @@ class MyRobot(wpilib.TimedRobot):
     def robotPeriodic(self) -> None:
         self.m_timeAndJoystickReplay.update()
         CommandScheduler.getInstance().run()
+        tunables.update(self.isEnabled())
 
         driver_Y_Button = gamepads.driver_Y_Button.getAsBoolean()
 
