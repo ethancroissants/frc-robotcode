@@ -12,6 +12,11 @@ import time
 from pathlib import Path
 from typing import Callable
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 import ui_mode
 
 
@@ -258,6 +263,21 @@ def ensure_tkinter() -> bool:
     return False
 
 
+def read_robot_requires(repo: Path) -> list[str]:
+    """Read [tool.robotpy].requires from pyproject.toml.
+
+    `robotpy sync` stages these for the roboRIO but doesn't always install them
+    in the local Python environment, so `robotpy sim` can fail with
+    ModuleNotFoundError. We pip-install them explicitly to guarantee local sim works.
+    """
+    pyproject = repo / "pyproject.toml"
+    if not pyproject.exists():
+        return []
+    with pyproject.open("rb") as f:
+        data = tomllib.load(f)
+    return list(data.get("tool", {}).get("robotpy", {}).get("requires", []))
+
+
 def offer_deploy(repo: Path) -> int:
     """Terminal-mode follow-up: asks via prompt, runs deploy.py inline."""
     print()
@@ -335,6 +355,18 @@ def _main_logic() -> int:
     run("robotpy sync", [sys.executable, "-m", "robotpy", "sync", "--use-certifi"])
     ok("dependencies synced")
 
+    # `robotpy sync` stages the requires list for the roboRIO but doesn't always
+    # install them locally, leaving `robotpy sim` to fail on `import commands2`
+    # etc. Force-install them in the host interpreter so simulation works.
+    requires = read_robot_requires(repo)
+    if requires:
+        step("Installing project requirements locally (for sim)")
+        run(
+            f"pip install {' '.join(requires)}",
+            [sys.executable, "-m", "pip", "install", "--upgrade", *requires],
+        )
+        ok(f"{len(requires)} project requirement(s) installed locally")
+
     step("Running checks")
     results = {
         "robotpy CLI available": check(
@@ -345,6 +377,10 @@ def _main_logic() -> int:
         "wpilib importable": check(
             "import wpilib",
             [sys.executable, "-c", "import wpilib; print(wpilib.__version__)"],
+        )[0],
+        "commands2 importable": check(
+            "import commands2",
+            [sys.executable, "-c", "import commands2; print(commands2.__name__)"],
         )[0],
         "robot.py compiles": check(
             "compile robot.py",
