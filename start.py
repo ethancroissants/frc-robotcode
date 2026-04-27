@@ -201,6 +201,11 @@ def main() -> int:
             "Test the robot code on your computer.",
             lambda: _launch(["-m", "robotpy", "sim"]),
         ),
+        (
+            "Documentation",
+            "Read the team's guides and dashboard reference.",
+            lambda: _launch(["docs.py"]),
+        ),
     ]
     for title, subtitle, cmd in cards:
         Card(body, title, subtitle, cmd).pack(fill="x", pady=6)

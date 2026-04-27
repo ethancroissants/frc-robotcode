@@ -69,11 +69,6 @@ class OperatorSubsystem(SubsystemBase):
         self.kickerIn()
         self.conveyorFwd()
 
-    def LAUNCH(self):
-        self.farShooterOut()
-        self.kickerIn()
-        self.conveyorFwd()
-
     def ceaseFire(self):
         self.stopKicker()
         self.stopConveyor()
@@ -83,14 +78,11 @@ class OperatorSubsystem(SubsystemBase):
         motorcontrollers.Shooter1Motor.set(tunables.shooter_open_speed())  # CCW
 
     def shooterOut(self):
+        # Velocity is derived from the single Shooter Distance tunable — drivers
+        # dial in feet, the mapping picks rps. Negative for CW.
         motorcontrollers.Shooter1Motor.set_control(
-            self.m_request.with_velocity(-tunables.shooter_near_velocity())
-        )  # CW
-
-    def farShooterOut(self):
-        motorcontrollers.Shooter1Motor.set_control(
-            self.m_request.with_velocity(-tunables.shooter_far_velocity())
-        )  # CW
+            self.m_request.with_velocity(-tunables.shooter_velocity_rps())
+        )
 
     def stopShooter(self):
         # Drive the velocity PID to 0 rps so the wheel actively brakes instead of coasting

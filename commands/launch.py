@@ -18,11 +18,12 @@ class Launch(Command):
 
     def execute(self):
         # Spin the flywheel alone first so the underpowered shooter doesn't
-        # stall against the first ball fed into it.
+        # stall against the first ball fed into it. Velocity comes from the
+        # Shooter Distance tunable — same source FIRE uses.
         if self.m_timer.get() < tunables.shooter_spin_up_seconds():
-            self.operatorSubsystem.farShooterOut()
+            self.operatorSubsystem.shooterOut()
         else:
-            self.operatorSubsystem.LAUNCH()
+            self.operatorSubsystem.FIRE()
 
     def cancel(self):
         self.operatorSubsystem.ceaseFire()

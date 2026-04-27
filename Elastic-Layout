@@ -25,31 +25,20 @@
             }
           },
           {
-            "title": "Shooter Far Velocity (rps)",
+            "title": "Shooter Distance (ft)",
             "x": 640.0,
             "y": 128.0,
             "width": 256.0,
             "height": 128.0,
-            "type": "Text Display",
+            "type": "Number Slider",
             "properties": {
-              "topic": "/SmartDashboard/Tune/Shooter Far Velocity (rps)",
+              "topic": "/SmartDashboard/Tune/Shooter Distance (ft)",
               "period": 0.06,
               "data_type": "double",
-              "show_submit_button": false
-            }
-          },
-          {
-            "title": "Shooter Near Velocity (rps)",
-            "x": 640.0,
-            "y": 256.0,
-            "width": 256.0,
-            "height": 128.0,
-            "type": "Text Display",
-            "properties": {
-              "topic": "/SmartDashboard/Tune/Shooter Near Velocity (rps)",
-              "period": 0.06,
-              "data_type": "double",
-              "show_submit_button": false
+              "min_value": 0.0,
+              "max_value": 25.0,
+              "divisions": 25,
+              "update_continuously": true
             }
           },
           {

@@ -22,10 +22,9 @@ from wpilib import SmartDashboard
 import constants
 
 
-# Shooter timings / velocities
+# Shooter timings / distance
 _SHOOTER_SPIN_UP = "Tune/Shooter Spin-Up (s)"
-_SHOOTER_NEAR_VEL = "Tune/Shooter Near Velocity (rps)"
-_SHOOTER_FAR_VEL = "Tune/Shooter Far Velocity (rps)"
+_SHOOTER_DISTANCE = "Tune/Shooter Distance (ft)"
 _AUTO_FIRE_DURATION = "Tune/AutoFire Fire Duration After Spin-Up (s)"
 
 # Open-loop motor speeds
@@ -39,17 +38,23 @@ _ELEVATOR_SPEED = "Tune/Elevator Speed"
 
 # Defaults that don't live in constants.py yet — keep them here as the single
 # source of truth rather than scattering magic numbers.
-_DEFAULT_SHOOTER_NEAR_VEL = 95.0
-_DEFAULT_SHOOTER_FAR_VEL = 100.0
+_DEFAULT_SHOOTER_DISTANCE_FEET = 10.0
 _DEFAULT_AUTO_FIRE_DURATION = 3.0
+
+# Linear distance→velocity mapping for the flywheel. Empirical: at 10 ft we
+# want ~100 rps (matches the previous "far" setpoint), at 0 ft the wheel still
+# needs ~60 rps so the ball clears the hood. Replace with a real fit once we
+# have shot data — but a single-knob model means drivers tune by where they
+# are on the field, not by guessing rps.
+_SHOOTER_BASE_RPS = 60.0
+_SHOOTER_RPS_PER_FOOT = 4.0
 
 
 def publish_defaults() -> None:
     SmartDashboard.putNumber(
         _SHOOTER_SPIN_UP, constants.MotorSpeeds.SHOOTER_SPIN_UP_SECONDS
     )
-    SmartDashboard.putNumber(_SHOOTER_NEAR_VEL, _DEFAULT_SHOOTER_NEAR_VEL)
-    SmartDashboard.putNumber(_SHOOTER_FAR_VEL, _DEFAULT_SHOOTER_FAR_VEL)
+    SmartDashboard.putNumber(_SHOOTER_DISTANCE, _DEFAULT_SHOOTER_DISTANCE_FEET)
     SmartDashboard.putNumber(_AUTO_FIRE_DURATION, _DEFAULT_AUTO_FIRE_DURATION)
     SmartDashboard.putNumber(_SHOOTER_OPEN, constants.MotorSpeeds.SHOOTER)
     SmartDashboard.putNumber(_KICKER_SPEED, constants.MotorSpeeds.KICKER)
@@ -65,12 +70,19 @@ def shooter_spin_up_seconds() -> float:
     )
 
 
-def shooter_near_velocity() -> float:
-    return SmartDashboard.getNumber(_SHOOTER_NEAR_VEL, _DEFAULT_SHOOTER_NEAR_VEL)
+def shooter_distance_feet() -> float:
+    return SmartDashboard.getNumber(_SHOOTER_DISTANCE, _DEFAULT_SHOOTER_DISTANCE_FEET)
 
 
-def shooter_far_velocity() -> float:
-    return SmartDashboard.getNumber(_SHOOTER_FAR_VEL, _DEFAULT_SHOOTER_FAR_VEL)
+def shooter_velocity_rps() -> float:
+    """Flywheel rps for the currently dialed-in shot distance.
+
+    One knob (distance, in feet) replaces the old near/far velocity pair —
+    drivers tune for "where am I shooting from", not "what rps does that
+    need". The mapping is linear; recalibrate the constants above if shots
+    consistently undershoot or overshoot.
+    """
+    return _SHOOTER_BASE_RPS + _SHOOTER_RPS_PER_FOOT * shooter_distance_feet()
 
 
 def auto_fire_duration() -> float:
@@ -104,8 +116,7 @@ def elevator_speed() -> float:
 # All dashboard keys to watch, with their fallback default for the read-back.
 _TUNABLES: list[tuple[str, Callable[[], float]]] = [
     (_SHOOTER_SPIN_UP, lambda: constants.MotorSpeeds.SHOOTER_SPIN_UP_SECONDS),
-    (_SHOOTER_NEAR_VEL, lambda: _DEFAULT_SHOOTER_NEAR_VEL),
-    (_SHOOTER_FAR_VEL, lambda: _DEFAULT_SHOOTER_FAR_VEL),
+    (_SHOOTER_DISTANCE, lambda: _DEFAULT_SHOOTER_DISTANCE_FEET),
     (_AUTO_FIRE_DURATION, lambda: _DEFAULT_AUTO_FIRE_DURATION),
     (_SHOOTER_OPEN, lambda: constants.MotorSpeeds.SHOOTER),
     (_KICKER_SPEED, lambda: constants.MotorSpeeds.KICKER),

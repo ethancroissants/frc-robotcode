@@ -150,7 +150,7 @@ bindings 1:1.
 |--------------------------------|-----------------------------------------------------|
 | **Left bumper (hold)**         | **FIRE** — spin up shooter 0.7 s, then kicker + conveyor |
 | **Right bumper (hold)**        | Clear out — shooter/kicker/conveyor reversed        |
-| **Left stick click (hold)**    | LAUNCH — far-shot shooter speed + kicker + conveyor |
+| **Left stick click (hold)**    | LAUNCH — same shooter velocity as FIRE; both read `Tune/Shooter Distance (ft)` |
 | **Right stick click (hold)**   | Feeder in (pickup)                                  |
 | **Y button (press)**           | Elevator up to top (PID)                            |
 | **A button (hold)**            | Elevator down                                       |
@@ -202,8 +202,14 @@ shooter to spin up before the kicker + conveyor engage. Short taps never make it
 past spin-up.
 
 **"Shooter runs backwards."**
-→ `OperatorSubsystem.shooterOut()` uses `m_request.with_velocity(-39)` — the
-negative sign is intentional. Flipping it reverses the wheel.
+→ `OperatorSubsystem.shooterOut()` uses
+`m_request.with_velocity(-tunables.shooter_velocity_rps())` — the negative
+sign is intentional (CW). Flipping it reverses the wheel.
+
+**"Ball goes too short / too far at every distance."**
+→ Tune `Tune/Shooter Distance (ft)` to whatever you actually shot from. If
+the *whole* mapping is off, edit `_SHOOTER_BASE_RPS` and
+`_SHOOTER_RPS_PER_FOOT` in `tunables.py` and redeploy.
 
 **"Deploy fails: can't reach the roboRIO."**
 → `deploy.py` pings the robot first. If that fails, you're not actually on the
@@ -235,10 +241,19 @@ current commit:
 - Every button binding in `configureBindings()` (hood / elevator / shooter / kicker
   / conveyor / feeder)
 - Debounce of 0.1 s with `kBoth` on every button
-- Shooter velocity setpoints: `shooterOut()` = `-39`, `farShooterOut()` = `-60`
 - Motor-speed constants: SHOOTER 0.5, KICKER 0.9, CONVEYOR 1.0, HOOD 0.2, FEEDER
   0.5, ELEVATOR 0.6, LAUNCH 0.7
 - Sign conventions on every `xxxFwd` / `xxxRev` / `xxxIn` / `xxxOut` helper
+
+**Diverged from Java:** the shooter no longer has separate near/far velocity
+setpoints. Both `Fire` and `Launch` now read a single `Tune/Shooter Distance
+(ft)` knob (default `10 ft`) which maps to flywheel rps via a linear model in
+`tunables.py` (`rps = 60 + 4 × ft`). See `elastic.md` §5 for the dashboard
+table.
+
+**Terminology:** "elevator" in this codebase is the **climbing** elevator
+(limit switches, climb positions) — the *ball* elevator is the **conveyor**.
+See `elastic.md` for the conveyor direction convention.
 
 If you change a binding or motor sign in one project, change it in the other and
 re-check this parity list.

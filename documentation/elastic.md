@@ -93,24 +93,32 @@ dashboard. The flow is:
 All of these live under the `SmartDashboard/Tune/…` table (Elastic shows them
 under **SmartDashboard → Tune**). Source: `tunables.py`.
 
-### Shooter timings / velocities
+### Shooter timings / distance
 
 | NT key                                          | Default | Units | Recommended widget | Slider Min / Max | Used by                         |
 |-------------------------------------------------|--------:|-------|--------------------|------------------|---------------------------------|
-| `Tune/Shooter Spin-Up (s)`                      | `2.0`   | sec   | **Number Slider**  | `0` / `5`        | `commands/auto_fire.py`, `commands/fire.py` |
-| `Tune/Shooter Near Velocity (rps)`              | `95.0`  | rps   | **Text Display** (fine) or **Number Slider** (coarse) | `0` / `120` | closed-loop shooter (near shot) |
-| `Tune/Shooter Far Velocity (rps)`               | `100.0` | rps   | **Text Display** (fine) or **Number Slider** (coarse) | `0` / `120` | closed-loop shooter (far shot)  |
+| `Tune/Shooter Spin-Up (s)`                      | `2.0`   | sec   | **Number Slider**  | `0` / `5`        | `commands/auto_fire.py`, `commands/fire.py`, `commands/launch.py` |
+| `Tune/Shooter Distance (ft)`                    | `10.0`  | ft    | **Number Slider**  | `0` / `25`       | closed-loop shooter (Fire + Launch both read this) |
 | `Tune/AutoFire Fire Duration After Spin-Up (s)` | `3.0`   | sec   | **Number Slider**  | `0` / `10`       | `commands/auto_fire.py`         |
 
 Why these ranges:
 
 - **Spin-up seconds** — anything above ~4 s just wastes match time; `0` lets
   you test instant-fire.
-- **Shooter velocity (rps)** — Kraken free speed is ~100 rps at the motor,
-  geared shooter wheels typically top out near that. `120` gives a little
-  headroom; stay above ~60 rps or balls won't clear.
+- **Shooter distance (ft)** — one knob for *how far the ball goes*. The robot
+  converts feet → flywheel rps with a linear map (see `tunables.py`:
+  `rps = 60 + 4 × ft`). Default `10 ft → 100 rps`, which is the same as the
+  old "far" setpoint. Below ~0 ft balls won't clear the hood; above ~25 ft
+  you're past Kraken free speed. Recalibrate the slope/intercept in
+  `tunables.py` once you have shot data.
 - **Fire duration** — needs to cover spin-down + clearing stuck balls. More
   than ~6 s usually means something else is wrong.
+
+> **Why one knob instead of near/far?** The old setup had two velocity
+> tunables (`Shooter Near Velocity`, `Shooter Far Velocity`) that drivers had
+> to translate into rps in their head. One distance tunable matches how the
+> shot is actually scouted ("we're ~12 ft out") and means `Fire` and `Launch`
+> share a setpoint — change the distance, both commands track it.
 
 ### Open-loop motor speeds (duty-cycle, −1.0 … 1.0)
 
@@ -121,10 +129,31 @@ These are raw throttle values. **All of them want a Number Slider with min
 |--------------------------------|---------------------------------------:|---------------------------------|------------------------------|
 | `Tune/Shooter Open-Loop Speed` | `0.5`                                  | positive = shoot outward        | shooter (open-loop fallback) |
 | `Tune/Kicker Speed`            | `0.9`                                  | positive = kick into flywheel   | kicker                       |
-| `Tune/Conveyor Speed`          | `1.0`                                  | positive = feed upward          | conveyor                     |
+| `Tune/Conveyor Speed`          | `1.0`                                  | magnitude only — see below      | conveyor (ball elevator)     |
 | `Tune/Feeder Speed`            | `0.5`                                  | positive = intake               | feeder                       |
 | `Tune/Hood Speed`              | `0.2`                                  | tune **small** — hood is geared low | hood                     |
-| `Tune/Elevator Speed`          | `0.6`                                  | positive = up                   | elevator                     |
+| `Tune/Elevator Speed`          | `0.6`                                  | positive = up (climber)         | elevator (climber, not balls) |
+
+#### Conveyor (the "ball elevator") direction
+
+The conveyor is what you'd informally call the *ball elevator* — it's the
+belt that carries balls from the feeder up to the kicker/flywheel. The
+**`ElevatorSubsystem`** in this code is something different: it's the
+**climbing elevator** (limit switches at top/bottom, used for endgame), not
+ball handling.
+
+`Tune/Conveyor Speed` is a **magnitude**. The sign is applied in
+`OperatorSubsystem`:
+
+- `conveyorFwd()` → `ConveyorMotor.set(-conveyor_speed())` → **CW**, balls go
+  **up to the shooter** (this is what `FIRE` / `LAUNCH` / `Start` button do).
+- `conveyorRev()` → `ConveyorMotor.set(+conveyor_speed())` → **CCW**, balls
+  go **back down** (this is what `Back` button and the clear-out commands
+  do — used to unjam).
+
+So always set the tunable as a **positive number**. If "up to shooter" is
+running the wrong way physically, flip the sign in `conveyorFwd()` /
+`conveyorRev()` in `subsystems/operator_subsystem.py`, **not** the tunable.
 
 > 🛑 **Safety:** setting a duty-cycle to `1.0` means full voltage. For the
 > hood especially, crank it up **in small steps** (0.05) — it's easy to snap
@@ -139,8 +168,8 @@ If you're reading the code and wondering which dashboard key a call reads:
 | `tunables.*()` function          | NT key                                          |
 |----------------------------------|-------------------------------------------------|
 | `shooter_spin_up_seconds()`      | `Tune/Shooter Spin-Up (s)`                      |
-| `shooter_near_velocity()`        | `Tune/Shooter Near Velocity (rps)`              |
-| `shooter_far_velocity()`         | `Tune/Shooter Far Velocity (rps)`               |
+| `shooter_distance_feet()`        | `Tune/Shooter Distance (ft)`                    |
+| `shooter_velocity_rps()`         | *(derived from `Shooter Distance`, not its own NT key)* |
 | `auto_fire_duration()`           | `Tune/AutoFire Fire Duration After Spin-Up (s)` |
 | `shooter_open_speed()`           | `Tune/Shooter Open-Loop Speed`                  |
 | `kicker_speed()`                 | `Tune/Kicker Speed`                             |
