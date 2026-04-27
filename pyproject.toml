@@ -3,7 +3,12 @@
 # Version of robotpy this project depends on
 robotpy_version = "2026.2.2"
 
-# Which packages to install on the roboRIO
+# Which packages to install on the roboRIO. Developer-machine tools (e.g.
+# tkinter for `setup.py --ui` / `deploy.py --ui`) do NOT belong here — that
+# section only ships to the robot. tkinter is a Python stdlib module that
+# must be installed at the OS level (Homebrew: `brew install python-tk`,
+# Debian/Ubuntu: `sudo apt-get install python3-tk`); setup.py checks for it
+# and offers to install it when a package manager is detected.
 requires = [
     "robotpy-commands-v2",
     "phoenix6",

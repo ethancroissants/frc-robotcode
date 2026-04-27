@@ -116,15 +116,18 @@ _TUNABLES: list[tuple[str, Callable[[], float]]] = [
 ]
 
 # Two ascending beeps with short gaps. (frequency Hz, duration s); freq <= 0 is silent.
+# Pitched an octave below the obvious A5/E6 choice: motor-coil amplitude is V/(R+jωL),
+# so halving the frequency roughly doubles the current swing — much louder mechanical
+# sound, still well above any rotational concern and right in the ear's sensitive band.
 _BEEP_SEQUENCE: list[tuple[float, float]] = [
-    (880.0, 0.08),
-    (0.0, 0.04),
-    (1319.0, 0.10),
-    (0.0, 0.04),
+    (440.0, 0.15),
+    (0.0, 0.05),
+    (660.0, 0.20),
+    (0.0, 0.05),
 ]
 
 _last_values: dict[str, float] = {}
-_beep_motor = None
+_beep_motors: list = []
 # Phoenix's control timeout is ~25ms — at the default MusicTone update rate the
 # motor will revert to neutral if a robot loop slips. Pin the update rate up so
 # a single missed loop doesn't cut the tone short.
@@ -137,22 +140,32 @@ _beep_start_time: float | None = None
 _beep_audio_configs = AudioConfigs().with_allow_music_dur_disable(True)
 
 
-def configure_beep_motor(motor) -> None:
-    """Pick the TalonFX/FXS that plays change-confirmation tones."""
-    global _beep_motor
-    _beep_motor = motor
+def configure_beep_motors(*motors) -> None:
+    """Pick the TalonFXs that play change-confirmation tones in unison.
+
+    MusicTone has no software volume — the only way to crank it up is to
+    vibrate more coils at once. Pass every TalonFX that's safe to commandeer
+    while disabled (idle, no follower obligations the caller hasn't already
+    accepted will reset).
+    """
+    global _beep_motors
+    _beep_motors = list(motors)
     apply_beep_audio()
 
 
-def apply_beep_audio() -> None:
-    """(Re)apply the audio config that lets the beep motor play while disabled.
+def configure_beep_motor(motor) -> None:
+    """Back-compat single-motor wrapper for configure_beep_motors."""
+    configure_beep_motors(motor)
 
-    Call this any time something does a full configurator.apply() on the beep
+
+def apply_beep_audio() -> None:
+    """(Re)apply the audio config that lets beep motors play while disabled.
+
+    Call this any time something does a full configurator.apply() on a beep
     motor — a TalonFXConfiguration apply resets AudioConfigs back to defaults.
     """
-    if _beep_motor is None:
-        return
-    _beep_motor.configurator.apply(_beep_audio_configs)
+    for motor in _beep_motors:
+        motor.configurator.apply(_beep_audio_configs)
 
 
 def _poll_changes() -> bool:
@@ -166,18 +179,23 @@ def _poll_changes() -> bool:
     return changed
 
 
+def _set_all(control) -> None:
+    for motor in _beep_motors:
+        motor.set_control(control)
+
+
 def update(robot_enabled: bool) -> None:
     """Call from robotPeriodic. Plays a beep when a tunable just changed."""
     global _beep_start_time
     changed = _poll_changes()
 
-    if _beep_motor is None:
+    if not _beep_motors:
         return
 
     if robot_enabled:
         # Silence any in-flight chirp so cached MusicTone doesn't ring into the match.
         if _beep_start_time is not None:
-            _beep_motor.set_control(_beep_silence)
+            _set_all(_beep_silence)
             _beep_start_time = None
         return
 
@@ -195,12 +213,12 @@ def update(robot_enabled: bool) -> None:
         cumulative += dur
         if elapsed < cumulative:
             if freq > 0.0:
-                _beep_motor.set_control(_beep_tone.with_audio_frequency(freq))
+                _set_all(_beep_tone.with_audio_frequency(freq))
             else:
                 # NeutralOut is a hard stop; MusicTone(0) is undefined and on some
                 # firmware leaves the coil singing at the previous frequency.
-                _beep_motor.set_control(_beep_silence)
+                _set_all(_beep_silence)
             return
 
-    _beep_motor.set_control(_beep_silence)
+    _set_all(_beep_silence)
     _beep_start_time = None

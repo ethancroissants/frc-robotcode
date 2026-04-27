@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+import ui_mode
+
 
 # -------- styling --------
 
@@ -57,6 +59,9 @@ def _width() -> int:
 
 
 def banner(title: str, subtitle: str = "", color=cyan) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().banner(title, subtitle)
+        return
     w = _width()
     inner = w - 2
     top = "╔" + "═" * inner + "╗"
@@ -77,6 +82,8 @@ def banner(title: str, subtitle: str = "", color=cyan) -> None:
 
 
 def rule(label: str = "", color=cyan) -> None:
+    if ui_mode.is_active():
+        return
     w = _width()
     if not label:
         print(color("─" * w))
@@ -87,26 +94,43 @@ def rule(label: str = "", color=cyan) -> None:
 
 
 def step(msg: str) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().step(msg)
+        return
     print(f"\n{cyan('▶')} {bold(msg)}")
 
 
 def ok(msg: str) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().ok(msg)
+        return
     print(f"  {green('✓')} {msg}")
 
 
 def fail(msg: str) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().fail(msg)
+        return
     print(f"  {red('✗')} {msg}")
 
 
 def warn(msg: str) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().warn(msg)
+        return
     print(f"  {yellow('!')} {msg}")
 
 
 def info(msg: str) -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().info(msg)
+        return
     print(f"  {dim('·')} {dim(msg)}")
 
 
 def ask_yn(prompt: str, default: bool = False) -> bool:
+    if ui_mode.is_active():
+        return ui_mode.get_app().ask_yn(prompt, default)
     suffix = "[Y/n]" if default else "[y/N]"
     try:
         ans = input(f"{magenta('?')} {bold(prompt)} {dim(suffix)} ").strip().lower()
@@ -119,6 +143,9 @@ def ask_yn(prompt: str, default: bool = False) -> bool:
 
 
 def pause(msg: str = "Press Enter to continue...") -> None:
+    if ui_mode.is_active():
+        ui_mode.get_app().pause(msg)
+        return
     try:
         input(f"{yellow('⏸')}  {msg}")
     except EOFError:
@@ -188,19 +215,22 @@ def check_connectivity(team: str | None) -> None:
 def run_deploy(extra_args: list[str]) -> int:
     step("Running robotpy deploy")
     cmd = [sys.executable, "-m", "robotpy", "deploy", *extra_args]
-    info(f"$ {' '.join(cmd)}")
-    rule("live output", color=dim)
-    sys.stdout.flush()
     t0 = time.monotonic()
-    try:
-        rc = subprocess.call(cmd)
-    except KeyboardInterrupt:
+    if ui_mode.is_active():
+        rc = ui_mode.get_app().stream_subprocess(cmd)
+    else:
+        info(f"$ {' '.join(cmd)}")
+        rule("live output", color=dim)
+        sys.stdout.flush()
+        try:
+            rc = subprocess.call(cmd)
+        except KeyboardInterrupt:
+            rule("", color=dim)
+            print()
+            warn("Interrupted by user.")
+            return 130
         rule("", color=dim)
-        print()
-        warn("Interrupted by user.")
-        return 130
     elapsed = time.monotonic() - t0
-    rule("", color=dim)
     info(f"robotpy exited with code {rc} after {elapsed:.1f}s")
     return rc
 
@@ -221,7 +251,18 @@ def result_box(success: bool, rc: int) -> None:
 
 
 def main() -> int:
-    extra = sys.argv[1:]
+    extra = list(sys.argv[1:])
+    if "--ui" in extra:
+        extra.remove("--ui")
+        if not ui_mode.HAS_TK:
+            print("UI mode requested but tkinter is unavailable; using terminal.")
+        else:
+            app = ui_mode.activate("Deploy", "push code to the roboRIO")
+            return app.run(lambda: _main_logic(extra))
+    return _main_logic(extra)
+
+
+def _main_logic(extra: list[str]) -> int:
     banner("Robot Deploy", "push code to the roboRIO", color=cyan)
 
     team = read_team_number()

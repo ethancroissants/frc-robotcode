@@ -27,9 +27,17 @@ class MyRobot(wpilib.TimedRobot):
         self.m_robotContainer = RobotContainer()
 
         tunables.publish_defaults()
-        # Shooter1 (Kraken) is loud and idle outside of fire commands; disabledInit already
-        # clears its cached control, so it's the safest motor to commandeer for beeps.
-        tunables.configure_beep_motor(self.m_robotContainer.motors.Shooter1Motor)
+        # MusicTone has no software volume control, so loudness scales with how many
+        # coils we vibrate at once. Recruit every idle TalonFX we can — both shooters
+        # plus the conveyor/elevator/wrist — so the chirp is audible across the pit.
+        motors = self.m_robotContainer.motors
+        tunables.configure_beep_motors(
+            motors.Shooter1Motor,
+            motors.Shooter2Motor,
+            motors.ConveyorMotor,
+            motors.ElevatorMotor,
+            motors.WristMotor,
+        )
 
         # Log and replay timestamp and joystick data
         self.m_timeAndJoystickReplay = (
