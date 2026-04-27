@@ -31,6 +31,7 @@ from commands.elevator_up import ElevatorUp
 from commands.feeder_in import FeederIn
 from commands.feeder_out import FeederOut
 from commands.fire import Fire
+from commands.fire_and_intake import FireAndIntake
 from commands.hood_down import HoodDown
 from commands.hood_up import HoodUp
 from commands.kicker_in import KickerIn
@@ -81,6 +82,7 @@ class RobotContainer:
         self.stopFeeder = StopFeeder(RobotContainer.operator)
         # Shooter Commands
         self.fire = Fire(RobotContainer.operator)
+        self.fireAndIntake = FireAndIntake(RobotContainer.operator)
         self.autoFire = AutoFire(RobotContainer.operator)
         self.launch = Launch(RobotContainer.operator)
         self.ceaseFire = CeaseFire(RobotContainer.operator)
@@ -218,22 +220,11 @@ class RobotContainer:
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(self.elevatorDown).onFalse(self.stopElevator)
         # Shooter Buttons
-        # LB: shoot AND intake at the same time (shooter + kicker + conveyor + feeder run together)
-        def _fire_and_intake():
-            RobotContainer.operator.FIRE()
-            RobotContainer.operator.feederIn()
-
-        def _stop_fire_and_intake():
-            RobotContainer.operator.ceaseFire()
-            RobotContainer.operator.stopFeeder()
-
+        # LB: shoot AND intake at the same time — 2s shooter spin-up, then
+        # kicker/conveyor engage while feeder runs the whole time.
         gamepads.operator_leftShoulderButton.debounce(
             0.1, Debouncer.DebounceType.kBoth
-        ).whileTrue(
-            RobotContainer.operator.run(_fire_and_intake)
-        ).onFalse(
-            RobotContainer.operator.runOnce(_stop_fire_and_intake)
-        )
+        ).whileTrue(self.fireAndIntake)
         gamepads.operator_rightShoulderButton.debounce(
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(self.clearOut).onFalse(self.ceaseFire)

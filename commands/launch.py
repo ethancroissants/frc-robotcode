@@ -1,6 +1,7 @@
 from commands2 import Command
 from wpilib import Timer
 
+import tunables
 from subsystems.operator_subsystem import OperatorSubsystem
 
 
@@ -16,7 +17,12 @@ class Launch(Command):
         self.m_timer.start()
 
     def execute(self):
-        self.operatorSubsystem.LAUNCH()
+        # Spin the flywheel alone first so the underpowered shooter doesn't
+        # stall against the first ball fed into it.
+        if self.m_timer.get() < tunables.shooter_spin_up_seconds():
+            self.operatorSubsystem.farShooterOut()
+        else:
+            self.operatorSubsystem.LAUNCH()
 
     def cancel(self):
         self.operatorSubsystem.ceaseFire()

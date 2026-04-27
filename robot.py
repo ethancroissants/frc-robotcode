@@ -7,9 +7,10 @@ the WPILib BSD license file in the root directory of this project.
 import wpilib
 from commands2 import CommandScheduler
 from phoenix6 import HootAutoReplay
+from phoenix6.controls import NeutralOut
 
-import constants
 import gamepads
+import tunables
 from generated import tuner_constants
 from robotcontainer import RobotContainer
 
@@ -18,6 +19,8 @@ class MyRobot(wpilib.TimedRobot):
     def robotInit(self) -> None:
         self.m_autonomousCommand = None
         self.m_robotContainer = RobotContainer()
+
+        tunables.publish_defaults()
 
         # Log and replay timestamp and joystick data
         self.m_timeAndJoystickReplay = (
@@ -31,7 +34,11 @@ class MyRobot(wpilib.TimedRobot):
         driver_Y_Button = gamepads.driver_Y_Button.getAsBoolean()
 
     def disabledInit(self) -> None:
-        pass
+        # Phoenix 6 caches the last control request and resumes it on re-enable. Without this,
+        # disabling while the shooter is mid-fire leaves VelocityVoltage(-95) cached, and the
+        # wheel starts spinning the instant the robot is re-enabled. Only clear the leader;
+        # Shooter2's Follower request follows the leader's output to neutral.
+        self.m_robotContainer.motors.Shooter1Motor.set_control(NeutralOut())
 
     def disabledPeriodic(self) -> None:
         pass
@@ -67,7 +74,7 @@ class MyRobot(wpilib.TimedRobot):
         triggerLeftValue = gamepads.operatorController.getLeftTriggerAxis()
         triggerRightValue = gamepads.operatorController.getRightTriggerAxis()
 
-        triggerValue = triggerLeftValue * constants.MotorSpeeds.FEEDER
+        triggerValue = triggerLeftValue * tunables.feeder_speed()
         if triggerRightValue > 0.05:
             triggerValue = -triggerRightValue
 

@@ -26,6 +26,9 @@ class MotorSpeeds:
     ELEVATOR = 0.6
     LAUNCH = 0.7
 
+    # Seconds the flywheel spins alone before the kicker/conveyor feed a ball.
+    SHOOTER_SPIN_UP_SECONDS = 2.0
+
 
 class ControllerIDs:
     FALCON_FRONT_RIGHT_STEER_ID = 27

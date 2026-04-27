@@ -68,12 +68,24 @@ _encoderInitialConfigs = configs.CANcoderConfiguration()
 _pigeonConfigs = None
 
 # Shooter motor initial configs
-kShooterInitialConfigs = configs.TalonFXConfiguration().with_current_limits(
-    configs.CurrentLimitsConfigs()
-    .with_stator_current_limit(constants.ModuleConstants.kShooterMotorCurrentLimit)
-    .with_stator_current_limit_enable(True)
-    .with_supply_current_limit(constants.ModuleConstants.kShooterMotorCurrentLimit)
-    .with_supply_current_limit_enable(True)
+# Slot0 gains must live here so teleopInit's full-config apply doesn't wipe them,
+# leaving VelocityVoltage shooterOut() with zero output.
+kShooterInitialConfigs = (
+    configs.TalonFXConfiguration()
+    .with_current_limits(
+        configs.CurrentLimitsConfigs()
+        .with_stator_current_limit(constants.ModuleConstants.kShooterMotorCurrentLimit)
+        .with_stator_current_limit_enable(True)
+        .with_supply_current_limit(constants.ModuleConstants.kShooterMotorCurrentLimit)
+        .with_supply_current_limit_enable(True)
+    )
+    .with_slot0(
+        configs.Slot0Configs()
+        .with_k_p(0.55)
+        .with_k_i(0.05)
+        .with_k_d(0.0)
+        .with_k_v(0.12)
+    )
 )
 
 # CAN bus that the devices are located on; all swerve devices must share the same CAN bus
