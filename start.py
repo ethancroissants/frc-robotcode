@@ -182,11 +182,6 @@ def main() -> int:
             lambda: _launch(["update.py", "--ui"]),
         ),
         (
-            "Push Changes",
-            "Commit your edits and push them to GitHub.",
-            lambda: _launch(["push.py", "--ui"]),
-        ),
-        (
             "Run Simulator",
             "Test the robot code on your computer.",
             lambda: _launch(["-m", "robotpy", "sim"]),
