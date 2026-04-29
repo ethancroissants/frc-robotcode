@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -50,10 +51,15 @@ CARD_HOVER = "#f0f6ff"
 HOVER_BORDER = "#9cc4ee"
 OK_COLOR = "#16a34a"
 FAIL_COLOR = "#dc2626"
+DISABLED_FG = "#9ca3af"
+DISABLED_BG = "#f1f3f6"
 
 DEFAULT_TEAM = "1279"
 ROBOT_SSID = "FRC-1279"
 STATUS_POLL_MS = 5000
+
+# roboRIO ships with these SSH accounts; `admin` has no password by default.
+SSH_USER = "admin"
 
 # Standard FRC DS install locations. We probe in order; first one wins.
 DRIVER_STATION_PATHS = [
@@ -238,6 +244,53 @@ def _connect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
     return False, f"Couldn't connect to {ssid}: {msg}"
 
 
+def _open_ssh_terminal(host: str) -> tuple[bool, str]:
+    """Spawn a new terminal window running `ssh admin@host`.
+
+    Each platform needs a different invocation: Windows Terminal if present
+    (else cmd /k), Terminal.app via osascript on macOS, and the first
+    available terminal emulator on Linux.
+    """
+    target = f"{SSH_USER}@{host}"
+    system = platform.system()
+    try:
+        if system == "Windows":
+            # Windows Terminal preferred — it's the modern one and ships
+            # with Win11 by default. cmd /k keeps the window open after
+            # ssh exits so the user can read errors.
+            wt = shutil.which("wt.exe") or shutil.which("wt")
+            if wt:
+                subprocess.Popen([wt, "ssh", target])
+            else:
+                # Use shell=True so cmd's `start` builtin opens a new window.
+                subprocess.Popen(
+                    f'start "" cmd /k ssh {target}', shell=True,
+                )
+        elif system == "Darwin":
+            script = (
+                f'tell application "Terminal" to do script "ssh {target}"\n'
+                'tell application "Terminal" to activate'
+            )
+            subprocess.Popen(["osascript", "-e", script])
+        else:
+            for term, args in (
+                ("gnome-terminal", ["--", "ssh", target]),
+                ("konsole", ["-e", "ssh", target]),
+                ("xfce4-terminal", ["-e", f"ssh {target}"]),
+                ("kitty", ["ssh", target]),
+                ("alacritty", ["-e", "ssh", target]),
+                ("xterm", ["-e", f"ssh {target}"]),
+            ):
+                if shutil.which(term):
+                    subprocess.Popen([term, *args])
+                    break
+            else:
+                return False, "No supported terminal emulator found on PATH."
+    except Exception as e:
+        return False, f"Failed to open terminal: {e}"
+    return True, f"Opened SSH to {target}"
+
+
 def _rio_addresses(team: str | None, *, include_mdns: bool = False) -> list[str]:
     """Candidate addresses for the rio. mDNS is slow when it fails, so it's
     off by default — we use it only for the explicit Prep Bot button."""
@@ -292,6 +345,8 @@ class Card(tk.Frame):
         title: str,
         subtitle: str,
         command,
+        *,
+        enabled: bool = True,
     ) -> None:
         super().__init__(
             parent,
@@ -303,6 +358,7 @@ class Card(tk.Frame):
         self._command = command
         self._normal_bg = PANEL
         self._hover_bg = CARD_HOVER
+        self._enabled = enabled
 
         inner = tk.Frame(self, bg=PANEL, padx=14, pady=9)
         inner.pack(fill="x")
@@ -332,22 +388,48 @@ class Card(tk.Frame):
             w.bind("<Enter>", self._enter)
             w.bind("<Leave>", self._leave)
 
+        self._apply_enabled()
+
     def _set_bg(self, color: str) -> None:
         self.configure(bg=color)
         self._inner.configure(bg=color)
         self._title.configure(bg=color)
         self._subtitle.configure(bg=color)
 
+    def _apply_enabled(self) -> None:
+        if self._enabled:
+            self._normal_bg = PANEL
+            self._title.configure(fg=FG)
+            self._subtitle.configure(fg=DIM)
+            self.configure(cursor="hand2", highlightbackground=BORDER)
+        else:
+            self._normal_bg = DISABLED_BG
+            self._title.configure(fg=DISABLED_FG)
+            self._subtitle.configure(fg=DISABLED_FG)
+            self.configure(cursor="arrow", highlightbackground=BORDER)
+        self._set_bg(self._normal_bg)
+
+    def set_enabled(self, value: bool) -> None:
+        if self._enabled == value:
+            return
+        self._enabled = value
+        self._apply_enabled()
+
     def _click(self, _event=None) -> None:
+        if not self._enabled:
+            return
         self._command()
 
     def _enter(self, _event=None) -> None:
+        if not self._enabled:
+            return
         self._set_bg(self._hover_bg)
         self.configure(highlightbackground=HOVER_BORDER)
 
     def _leave(self, _event=None) -> None:
         self._set_bg(self._normal_bg)
-        self.configure(highlightbackground=BORDER)
+        if self._enabled:
+            self.configure(highlightbackground=BORDER)
 
 
 def main() -> int:
@@ -410,6 +492,11 @@ def main() -> int:
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x")
 
     alive = {"v": True}
+    # Latest reachable host from the status poller. The SSH button reads
+    # this so it always targets the address that just answered a ping,
+    # rather than re-probing on click.
+    current_host: dict[str, str | None] = {"v": None}
+    card_refs: dict[str, "Card"] = {}
 
     def _set_status(reachable: bool | None, host: str | None) -> None:
         if not alive["v"]:
@@ -423,6 +510,12 @@ def main() -> int:
         else:
             status_dot.configure(fg=FAIL_COLOR)
             status_text.configure(text="No bot connection", fg=FG)
+        # Track the host so SSH knows where to dial; only the True branch
+        # has a real host. None reverts the SSH button to disabled.
+        current_host["v"] = host if reachable else None
+        ssh_card = card_refs.get("ssh")
+        if ssh_card is not None:
+            ssh_card.set_enabled(bool(reachable))
 
     def _poll_status() -> None:
         if not alive["v"]:
@@ -522,6 +615,19 @@ def main() -> int:
             messagebox.showinfo("Disconnect", body_text, parent=root)
         else:
             messagebox.showwarning("Disconnect", body_text, parent=root)
+
+    def _ssh_clicked() -> None:
+        host = current_host["v"]
+        if not host:
+            messagebox.showwarning(
+                "SSH",
+                "Not connected to the robot. Press Connect first.",
+                parent=root,
+            )
+            return
+        ok_, msg = _open_ssh_terminal(host)
+        if not ok_:
+            messagebox.showerror("SSH", msg, parent=root)
 
     prep_running = {"v": False}
 
@@ -631,6 +737,12 @@ def main() -> int:
                 "Re-enable firewall and leave the robot WiFi.",
                 _disconnect_clicked,
             ),
+            (
+                "SSH to Robot",
+                "Open a terminal connected to the rio over SSH.",
+                _ssh_clicked,
+                "ssh",
+            ),
         ]),
         ("Tools", [
             (
@@ -655,10 +767,19 @@ def main() -> int:
         grid.pack(fill="x")
         grid.grid_columnconfigure(0, weight=1, uniform="cards")
         grid.grid_columnconfigure(1, weight=1, uniform="cards")
-        for j, (title, subtitle, cmd) in enumerate(section_cards):
-            Card(grid, title, subtitle, cmd).grid(
-                row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4,
-            )
+        for j, item in enumerate(section_cards):
+            # 4th tuple element (optional) is a stable id used to look the
+            # card up later — needed for the SSH card whose enabled state
+            # tracks bot reachability.
+            title, subtitle, cmd = item[0], item[1], item[2]
+            card_id = item[3] if len(item) > 3 else None
+            # SSH starts disabled; the status poller flips it on once the
+            # rio answers a ping.
+            initial_enabled = card_id != "ssh"
+            card = Card(grid, title, subtitle, cmd, enabled=initial_enabled)
+            card.grid(row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4)
+            if card_id:
+                card_refs[card_id] = card
 
     # ----- footer -----
     footer = tk.Frame(root, bg=PANEL)

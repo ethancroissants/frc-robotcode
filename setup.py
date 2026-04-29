@@ -187,6 +187,125 @@ def check(label: str, cmd: list[str]) -> tuple[bool, str]:
         return False, detail
 
 
+DRIVER_STATION_PATHS = [
+    r"C:\Program Files (x86)\FRC Driver Station\DriverStation.exe",
+    r"C:\Program Files\FRC Driver Station\DriverStation.exe",
+]
+DRIVER_STATION_URL = (
+    "https://www.ni.com/en/support/downloads/drivers/download.frc-game-tools.html"
+)
+MIN_PY = (3, 9)
+
+
+def ensure_python_version() -> bool:
+    step("Checking Python version")
+    have = sys.version_info[:3]
+    if have >= MIN_PY:
+        ok(f"Python {have[0]}.{have[1]}.{have[2]}  {dim(sys.executable)}")
+        return True
+    fail(
+        f"Python {have[0]}.{have[1]} is too old — need "
+        f"{MIN_PY[0]}.{MIN_PY[1]}+."
+    )
+    info("Reinstall a newer Python from https://www.python.org/downloads/")
+    return False
+
+
+def _git_install_cmd() -> list[str] | None:
+    """Return a best-guess install command for the host's package manager.
+
+    Returns None when we don't have a confident automated path — the caller
+    falls back to a manual-install hint.
+    """
+    if sys.platform.startswith("win"):
+        if shutil.which("winget"):
+            return [
+                "winget", "install", "-e", "--id", "Git.Git",
+                "--accept-source-agreements", "--accept-package-agreements",
+                "--silent",
+            ]
+        return None
+    if sys.platform == "darwin":
+        if shutil.which("brew"):
+            return ["brew", "install", "git"]
+        return None
+    if shutil.which("apt-get"):
+        return ["sudo", "apt-get", "install", "-y", "git"]
+    if shutil.which("dnf"):
+        return ["sudo", "dnf", "install", "-y", "git"]
+    if shutil.which("yum"):
+        return ["sudo", "yum", "install", "-y", "git"]
+    if shutil.which("pacman"):
+        return ["sudo", "pacman", "-S", "--noconfirm", "git"]
+    if shutil.which("zypper"):
+        return ["sudo", "zypper", "--non-interactive", "install", "git"]
+    return None
+
+
+def ensure_git() -> bool:
+    """Verify git is installed and on PATH; offer to install it if not."""
+    step("Checking git")
+    if shutil.which("git"):
+        return check("git", ["git", "--version"])[0]
+    warn("git is not installed (or not on PATH).")
+
+    cmd = _git_install_cmd()
+    if cmd is not None:
+        info(f"Would run: {' '.join(cmd)}")
+        if ask_yn("Install git now?", default=True):
+            try:
+                subprocess.check_call(cmd)
+            except subprocess.CalledProcessError as e:
+                fail(f"Install command exited {e.returncode}; install manually.")
+                return False
+            if shutil.which("git"):
+                ok("git installed")
+                return True
+            warn("git installed but not yet on PATH — open a new terminal.")
+            return False
+        info("Skipped. Install git when you're ready.")
+        return False
+    info("Install git from https://git-scm.com/downloads")
+    return False
+
+
+def _driver_station_path() -> str | None:
+    if not sys.platform.startswith("win"):
+        return None
+    for p in DRIVER_STATION_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def ensure_driver_station() -> bool:
+    """Windows-only: check FRC Driver Station and prompt to install if missing.
+
+    Driver Station ships in NI's FRC Game Tools bundle; there's no winget
+    package, so we just point at the download page (and offer to open it).
+    """
+    if not sys.platform.startswith("win"):
+        step("Checking FRC Driver Station")
+        info("Skipping (Driver Station only runs on Windows).")
+        return True
+    step("Checking FRC Driver Station")
+    path = _driver_station_path()
+    if path:
+        ok(f"Driver Station installed  {dim(path)}")
+        return True
+    warn("FRC Driver Station is not installed.")
+    info(f"Download FRC Game Tools from: {DRIVER_STATION_URL}")
+    info("After installing, re-run setup.")
+    if ask_yn("Open the download page in your browser?", default=True):
+        try:
+            import webbrowser
+            webbrowser.open(DRIVER_STATION_URL)
+            ok("Opened in browser.")
+        except Exception as e:
+            warn(f"Couldn't open browser: {e}")
+    return False
+
+
 def _tkinter_install_hint() -> tuple[str | None, list[str] | None]:
     """Return (human hint, auto-runnable cmd) for installing tkinter on this OS.
 
@@ -340,6 +459,14 @@ def _main_logic() -> int:
 
     banner("RobotPy Setup", "install, sync, and verify your robot code", color=cyan)
 
+    # Prereq checks. These are reported in the final summary; only the Python
+    # version gate is fatal — git/DS/tkinter just warn so the user can keep
+    # going if they only need part of the toolchain.
+    py_ok = ensure_python_version()
+    if not py_ok:
+        return 1
+    git_ok = ensure_git()
+    ds_ok = ensure_driver_station()
     # tkinter is optional (only used by --ui mode), so check but don't fail setup.
     ensure_tkinter()
 
@@ -368,7 +495,12 @@ def _main_logic() -> int:
         ok(f"{len(requires)} project requirement(s) installed locally")
 
     step("Running checks")
-    results = {
+    results: dict[str, bool] = {
+        "git installed": git_ok,
+    }
+    if sys.platform.startswith("win"):
+        results["FRC Driver Station installed"] = ds_ok
+    results |= {
         "robotpy CLI available": check(
             "robotpy CLI",
             [sys.executable, "-c",
