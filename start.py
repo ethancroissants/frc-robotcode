@@ -71,6 +71,45 @@ def _driver_station_path() -> str | None:
     return None
 
 
+def _run_elevated(file: str, args: list[str], *, wait: bool, timeout: int = 30) -> tuple[int, str]:
+    """Run a program elevated via PowerShell `Start-Process -Verb RunAs`.
+
+    UAC pops automatically. Returns (exit_code, stderr_or_stdout). Use
+    wait=True to block until the elevated child exits (e.g. taskkill);
+    wait=False fires-and-forgets (e.g. DriverStation, which we want to
+    leave running).
+    """
+    arg_list = ",".join(f"'{a}'" for a in args) if args else ""
+    body = (
+        f"Start-Process -FilePath '{file}' "
+        + (f"-ArgumentList {arg_list} " if arg_list else "")
+        + "-Verb RunAs -PassThru -WindowStyle Hidden -ErrorAction Stop"
+    )
+    if wait:
+        ps = (
+            "$ErrorActionPreference='Stop'; try { "
+            f"$p = {body}; $p.WaitForExit(); exit $p.ExitCode "
+            "} catch { Write-Error $_.Exception.Message; exit 2 }"
+        )
+    else:
+        ps = (
+            "$ErrorActionPreference='Stop'; try { "
+            f"$null = {body}; exit 0 "
+            "} catch { Write-Error $_.Exception.Message; exit 2 }"
+        )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        return 127, "PowerShell not found."
+    except subprocess.TimeoutExpired:
+        return 124, "Timed out waiting for the UAC prompt."
+    err = (result.stderr or result.stdout or "").strip()
+    return result.returncode, err
+
+
 def _open_driver_station() -> tuple[bool, str]:
     if platform.system() != "Windows":
         return True, "Skipped Driver Station (not on Windows)."
@@ -79,34 +118,36 @@ def _open_driver_station() -> tuple[bool, str]:
         return False, (
             "Couldn't find DriverStation.exe in the standard FRC install path."
         )
-    try:
-        # DETACHED_PROCESS so closing the control panel doesn't take DS with it.
-        subprocess.Popen([path], creationflags=0x00000008)
-    except Exception as e:
-        return False, f"Failed to launch Driver Station: {e}"
-    return True, "Launched Driver Station."
+    # DS requires admin (it manages joystick HID and high-priority sockets),
+    # so we elevate via UAC. Fire-and-forget: we don't want to wait for the
+    # user to close DS.
+    rc, err = _run_elevated(path, [], wait=False)
+    if rc == 0:
+        return True, "Launched Driver Station."
+    low = err.lower()
+    if "canceled" in low or "cancelled" in low:
+        return False, "Admin permission denied — Driver Station not launched."
+    return False, f"Failed to launch Driver Station: {err.splitlines()[0] if err else 'unknown error'}"
 
 
 def _close_driver_station() -> tuple[bool, str]:
     if platform.system() != "Windows":
         return True, "Skipped Driver Station (not on Windows)."
-    try:
-        result = subprocess.run(
-            ["taskkill", "/IM", "DriverStation.exe", "/F"],
-            capture_output=True, text=True, timeout=8,
-        )
-    except FileNotFoundError:
-        return False, "taskkill not found."
-    except subprocess.TimeoutExpired:
-        return False, "taskkill timed out."
-    combined = (result.stdout + result.stderr).lower()
-    # Windows returns 128 with "not found" when no matching process exists.
-    if "not found" in combined or "no tasks" in combined or result.returncode == 128:
-        return True, "Driver Station wasn't running."
-    if result.returncode == 0:
+    # DS runs elevated so killing it needs admin too. Wait for taskkill to
+    # finish so the exit code tells us whether it actually killed something.
+    rc, err = _run_elevated(
+        "taskkill", ["/IM", "DriverStation.exe", "/F"], wait=True,
+    )
+    if rc == 0:
         return True, "Closed Driver Station."
-    err = (result.stderr or result.stdout or "").strip().splitlines()
-    return False, f"Couldn't close Driver Station: {err[0] if err else 'unknown error'}"
+    if rc == 128:
+        return True, "Driver Station wasn't running."
+    low = err.lower()
+    if "canceled" in low or "cancelled" in low:
+        return False, "Admin permission denied — Driver Station not closed."
+    if "not found" in low or "no tasks" in low:
+        return True, "Driver Station wasn't running."
+    return False, f"Couldn't close Driver Station: {err.splitlines()[0] if err else 'unknown error'}"
 
 
 def _current_wifi_ssid() -> str | None:
@@ -133,19 +174,17 @@ def _current_wifi_ssid() -> str | None:
 
 
 def _disconnect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
-    """Disconnect the WiFi adapter, but only if it's currently on the
-    robot network — we don't want "Disconnect" to silently kick the user
-    off their home/office WiFi.
+    """Disconnect the WiFi adapter. The user pressed an explicit
+    Disconnect button, so we honor it unconditionally — no SSID
+    detection that could falsely report "not connected" and skip the
+    action while we're actually still on the robot network.
 
-    Returns (action_taken_or_not_applicable, message).
+    Reports the previously-associated SSID when we can detect it, just
+    so the user has feedback about what got dropped.
     """
     if platform.system() != "Windows":
         return True, "Skipped WiFi disconnect (not on Windows)."
-    current = _current_wifi_ssid()
-    if current != ssid:
-        if current:
-            return True, f"Left WiFi alone (on '{current}', not {ssid})."
-        return True, "Not connected to any WiFi — nothing to disconnect."
+    current = _current_wifi_ssid()  # best-effort; may return None
     try:
         result = subprocess.run(
             ["netsh", "wlan", "disconnect"],
@@ -156,7 +195,9 @@ def _disconnect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "WiFi disconnect timed out."
     if result.returncode == 0:
-        return True, f"Disconnected from {ssid}."
+        if current:
+            return True, f"Disconnected from {current}."
+        return True, "WiFi disconnected."
     err = (result.stderr or result.stdout or "").strip().splitlines()
     return False, f"Couldn't disconnect: {err[0] if err else 'unknown error'}"
 
