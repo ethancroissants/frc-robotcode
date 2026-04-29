@@ -725,6 +725,11 @@ def main() -> int:
                 "Test the robot code on your computer.",
                 lambda: _launch(["-m", "robotpy", "sim"]),
             ),
+            (
+                "Wipe RoboRIO",
+                "Fresh-install Python on the rio when a deploy left it broken.",
+                lambda: _launch(["wipe_rio.py", "--ui"]),
+            ),
         ]),
         ("Connection", [
             (
