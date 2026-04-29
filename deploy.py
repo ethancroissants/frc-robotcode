@@ -315,6 +315,7 @@ def handle_large_files(extra_args: list[str]) -> bool:
 def run_deploy(extra_args: list[str]) -> int:
     step("Sending code to the robot")
     info("This usually takes 30–90 seconds.")
+    info("(any 'install/uninstall on roboRIO?' prompts auto-answered yes)")
     cmd = [sys.executable, "-m", "robotpy", "deploy", *extra_args]
     t0 = time.monotonic()
     if ui_mode.is_active():
@@ -324,7 +325,7 @@ def run_deploy(extra_args: list[str]) -> int:
         rule("live output", color=dim)
         sys.stdout.flush()
         try:
-            rc = subprocess.call(cmd)
+            rc = _spawn_with_yes(cmd)
         except KeyboardInterrupt:
             rule("", color=dim)
             print()
@@ -334,6 +335,34 @@ def run_deploy(extra_args: list[str]) -> int:
     elapsed = time.monotonic() - t0
     info(f"robotpy exited with code {rc} after {elapsed:.1f}s")
     return rc
+
+
+def _spawn_with_yes(cmd: list[str]) -> int:
+    """Run cmd while pre-feeding 'y' answers to its stdin.
+
+    robotpy deploy prompts to uninstall+install rio packages whenever
+    pyproject.toml's requires list changes (e.g. when we added robotpy-cscore).
+    Its input() call EOFs when stdin is a non-interactive pipe in this chained
+    setup.py → deploy.py → robotpy deploy flow, so we explicitly write 'y'
+    lines into the pipe. Buffering means later input() calls consume them as
+    needed; we close stdin only after the process exits.
+    """
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(b"y\n" * 20)
+                proc.stdin.flush()
+            except (OSError, BrokenPipeError):
+                # robotpy didn't read stdin at all — nothing to do.
+                pass
+        return proc.wait()
+    finally:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
 
 
 def result_box(success: bool, rc: int) -> None:
