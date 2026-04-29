@@ -55,6 +55,59 @@ DEFAULT_TEAM = "1279"
 ROBOT_SSID = "FRC-1279"
 STATUS_POLL_MS = 5000
 
+# Standard FRC DS install locations. We probe in order; first one wins.
+DRIVER_STATION_PATHS = [
+    r"C:\Program Files (x86)\FRC Driver Station\DriverStation.exe",
+    r"C:\Program Files\FRC Driver Station\DriverStation.exe",
+]
+
+
+def _driver_station_path() -> str | None:
+    if platform.system() != "Windows":
+        return None
+    for p in DRIVER_STATION_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _open_driver_station() -> tuple[bool, str]:
+    if platform.system() != "Windows":
+        return True, "Skipped Driver Station (not on Windows)."
+    path = _driver_station_path()
+    if not path:
+        return False, (
+            "Couldn't find DriverStation.exe in the standard FRC install path."
+        )
+    try:
+        # DETACHED_PROCESS so closing the control panel doesn't take DS with it.
+        subprocess.Popen([path], creationflags=0x00000008)
+    except Exception as e:
+        return False, f"Failed to launch Driver Station: {e}"
+    return True, "Launched Driver Station."
+
+
+def _close_driver_station() -> tuple[bool, str]:
+    if platform.system() != "Windows":
+        return True, "Skipped Driver Station (not on Windows)."
+    try:
+        result = subprocess.run(
+            ["taskkill", "/IM", "DriverStation.exe", "/F"],
+            capture_output=True, text=True, timeout=8,
+        )
+    except FileNotFoundError:
+        return False, "taskkill not found."
+    except subprocess.TimeoutExpired:
+        return False, "taskkill timed out."
+    combined = (result.stdout + result.stderr).lower()
+    # Windows returns 128 with "not found" when no matching process exists.
+    if "not found" in combined or "no tasks" in combined or result.returncode == 128:
+        return True, "Driver Station wasn't running."
+    if result.returncode == 0:
+        return True, "Closed Driver Station."
+    err = (result.stderr or result.stdout or "").strip().splitlines()
+    return False, f"Couldn't close Driver Station: {err[0] if err else 'unknown error'}"
+
 
 def _current_wifi_ssid() -> str | None:
     """Return the SSID currently associated with the WiFi adapter, or None.
@@ -77,6 +130,35 @@ def _current_wifi_ssid() -> str | None:
             value = value.strip()
             return value or None
     return None
+
+
+def _disconnect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
+    """Disconnect the WiFi adapter, but only if it's currently on the
+    robot network — we don't want "Disconnect" to silently kick the user
+    off their home/office WiFi.
+
+    Returns (action_taken_or_not_applicable, message).
+    """
+    if platform.system() != "Windows":
+        return True, "Skipped WiFi disconnect (not on Windows)."
+    current = _current_wifi_ssid()
+    if current != ssid:
+        if current:
+            return True, f"Left WiFi alone (on '{current}', not {ssid})."
+        return True, "Not connected to any WiFi — nothing to disconnect."
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "disconnect"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except FileNotFoundError:
+        return False, "netsh not found — can't manage WiFi."
+    except subprocess.TimeoutExpired:
+        return False, "WiFi disconnect timed out."
+    if result.returncode == 0:
+        return True, f"Disconnected from {ssid}."
+    err = (result.stderr or result.stdout or "").strip().splitlines()
+    return False, f"Couldn't disconnect: {err[0] if err else 'unknown error'}"
 
 
 def _connect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
@@ -376,23 +458,29 @@ def main() -> int:
         _launch(["update.py", "--ui"], restart_panel=True)
         root.destroy()
 
-    def _firewall_on_clicked() -> None:
-        if not firewall.is_windows():
-            messagebox.showinfo(
-                "Cold Fusion Robotics",
-                "This button only does something on Windows. "
-                "Your firewall (if any) is unchanged.",
-                parent=root,
-            )
-            return
-        # set_firewall blocks while UAC is up; the panel freezes for a
-        # second or two and that's fine — UAC is the user's signal that
-        # the request was heard.
-        ok_, msg = firewall.set_firewall(True)
-        if ok_:
-            messagebox.showinfo("Cold Fusion Robotics", msg, parent=root)
+    def _disconnect_clicked() -> None:
+        # "Disconnect" is the inverse of Connect: re-enable the firewall,
+        # drop the robot WiFi (only if we're actually on it — see
+        # _disconnect_robot_wifi), and close the Driver Station.
+        if firewall.is_windows():
+            fw_ok, fw_msg = firewall.set_firewall(True)
         else:
-            messagebox.showwarning("Cold Fusion Robotics", msg, parent=root)
+            fw_ok, fw_msg = True, "Skipped firewall (not on Windows)."
+        wifi_ok, wifi_msg = _disconnect_robot_wifi(ROBOT_SSID)
+        ds_ok, ds_msg = _close_driver_station()
+        # Refresh the header dot — we just kicked the WiFi, so cached
+        # state is stale.
+        _set_status(None, None)
+
+        body_text = (
+            f"Firewall: {fw_msg}\n\n"
+            f"WiFi: {wifi_msg}\n\n"
+            f"Driver Station: {ds_msg}"
+        )
+        if fw_ok and wifi_ok and ds_ok:
+            messagebox.showinfo("Disconnect", body_text, parent=root)
+        else:
+            messagebox.showwarning("Disconnect", body_text, parent=root)
 
     prep_running = {"v": False}
 
@@ -437,12 +525,15 @@ def main() -> int:
                         "Check that the rio is powered, fully booted, and "
                         "that you're on its WiFi (or USB tethered)."
                     )
+
+                # 4) Launch the Driver Station so the user has it ready.
+                ds_ok, ds_msg = _open_driver_station()
             except Exception as e:  # never lose the lock on a crash
-                fw_ok = wifi_ok = bot_ok = False
-                fw_msg = wifi_msg = bot_msg = ""
-                _err = f"Prep crashed: {e}"
+                fw_ok = wifi_ok = bot_ok = ds_ok = False
+                fw_msg = wifi_msg = bot_msg = ds_msg = ""
+                _err = f"Connect crashed: {e}"
                 root.after(0, lambda: messagebox.showerror(
-                    "Prep Bot", _err, parent=root,
+                    "Connect", _err, parent=root,
                 ))
                 prep_running["v"] = False
                 return
@@ -452,12 +543,13 @@ def main() -> int:
                 body_text = (
                     f"Firewall: {fw_msg}\n\n"
                     f"WiFi: {wifi_msg}\n\n"
-                    f"Robot: {bot_msg}"
+                    f"Robot: {bot_msg}\n\n"
+                    f"Driver Station: {ds_msg}"
                 )
-                if bot_ok and fw_ok and wifi_ok:
-                    messagebox.showinfo("Prep Bot", body_text, parent=root)
+                if bot_ok and fw_ok and wifi_ok and ds_ok:
+                    messagebox.showinfo("Connect", body_text, parent=root)
                 else:
-                    messagebox.showwarning("Prep Bot", body_text, parent=root)
+                    messagebox.showwarning("Connect", body_text, parent=root)
                 prep_running["v"] = False
 
             root.after(0, show)
@@ -489,14 +581,14 @@ def main() -> int:
         ]),
         ("Connection", [
             (
-                "Prep Bot",
-                "Disable firewall and check the robot connection.",
+                "Connect",
+                "Disable firewall, join FRC-1279 WiFi, and ping the robot.",
                 _prep_bot_clicked,
             ),
             (
-                "Turn Firewall Back On",
-                "Re-enable Windows Firewall when you're done.",
-                _firewall_on_clicked,
+                "Disconnect",
+                "Re-enable firewall and leave the robot WiFi.",
+                _disconnect_clicked,
             ),
         ]),
         ("Tools", [
