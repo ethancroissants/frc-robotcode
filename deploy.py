@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 
+import firewall
 import ui_mode
 
 
@@ -398,8 +399,33 @@ def _main_logic(extra: list[str]) -> int:
         return 1
 
     rc = run_deploy(extra)
+    if rc == 0:
+        disable_firewall_for_ds()
     result_box(rc == 0, rc)
     return rc
+
+
+def disable_firewall_for_ds() -> None:
+    """After a successful deploy, drop Windows Firewall so the Driver Station
+    can talk to the rio. Triggers a UAC prompt; safe no-op on non-Windows.
+
+    Why: the DS reports `link-bad` / `DS radio(.4)-bad` even when the rio is
+    reachable from PowerShell, because the firewall blocks the DS's inbound
+    discovery traffic. The user wants this off for bench testing and will
+    re-enable it from the control panel when they're done.
+    """
+    if not firewall.is_windows():
+        return
+    step("Disabling Windows Firewall for the Driver Station")
+    info("Windows will pop a UAC prompt — click Yes to allow.")
+    ok_, msg = firewall.set_firewall(False)
+    if ok_:
+        ok(msg)
+        info("Re-enable it from the control panel when you're done.")
+    else:
+        warn(msg)
+        info("You can still try the DS; if it shows link-bad, run:")
+        info("  python firewall.py off   (and approve the UAC prompt)")
 
 
 if __name__ == "__main__":

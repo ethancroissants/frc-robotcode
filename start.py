@@ -28,6 +28,8 @@ try:
 except ImportError:
     HAS_TK = False
 
+import firewall
+
 
 REPO = Path(__file__).resolve().parent
 
@@ -180,6 +182,24 @@ def main() -> int:
         _launch(["update.py", "--ui"], restart_panel=True)
         root.destroy()
 
+    def _firewall_on_clicked() -> None:
+        if not firewall.is_windows():
+            messagebox.showinfo(
+                "Cold Fusion Robotics",
+                "This button only does something on Windows. "
+                "Your firewall (if any) is unchanged.",
+                parent=root,
+            )
+            return
+        # set_firewall blocks while UAC is up; the panel freezes for a
+        # second or two and that's fine — UAC is the user's signal that
+        # the request was heard.
+        ok_, msg = firewall.set_firewall(True)
+        if ok_:
+            messagebox.showinfo("Cold Fusion Robotics", msg, parent=root)
+        else:
+            messagebox.showwarning("Cold Fusion Robotics", msg, parent=root)
+
     cards = [
         (
             "Install / Setup",
@@ -205,6 +225,11 @@ def main() -> int:
             "Documentation",
             "Read the team's guides and dashboard reference.",
             lambda: _launch(["docs.py"]),
+        ),
+        (
+            "Turn Firewall Back On",
+            "Re-enable Windows Firewall (deploy turns it off for the DS).",
+            _firewall_on_clicked,
         ),
     ]
     for title, subtitle, cmd in cards:
