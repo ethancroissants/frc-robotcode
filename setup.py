@@ -482,17 +482,33 @@ def _main_logic() -> int:
     run("robotpy sync", [sys.executable, "-m", "robotpy", "sync", "--use-certifi"])
     ok("dependencies synced")
 
-    # `robotpy sync` stages the requires list for the roboRIO but doesn't always
-    # install them locally, leaving `robotpy sim` to fail on `import commands2`
-    # etc. Force-install them in the host interpreter so simulation works.
+    # Safety net for older robotpy versions: sync installs locally now (in its
+    # own elevated pip window), but historically didn't, leaving `robotpy sim`
+    # to fail on `import commands2`. We pip-install without --upgrade so we
+    # don't race the sync subprocess for already-installed packages — and we
+    # downgrade hard failures to warnings, since by the time we're here sync
+    # has typically covered everything.
     requires = read_robot_requires(repo)
+    local_install_ok = True
     if requires:
         step("Installing project requirements locally (for sim)")
-        run(
-            f"pip install {' '.join(requires)}",
-            [sys.executable, "-m", "pip", "install", "--upgrade", *requires],
-        )
-        ok(f"{len(requires)} project requirement(s) installed locally")
+        # Give sync's spawned pip window a head start before we touch site-packages,
+        # so we don't race it for cscore/__init__.py and trip WinError 32 on Windows.
+        time.sleep(3)
+        try:
+            run(
+                f"pip install {' '.join(requires)}",
+                [sys.executable, "-m", "pip", "install", *requires],
+            )
+            ok(f"{len(requires)} project requirement(s) installed locally")
+        except subprocess.CalledProcessError as e:
+            local_install_ok = False
+            warn(
+                "Local pip install failed (likely a Windows file lock from the "
+                "sync subprocess). The roboRIO install above already succeeded; "
+                "this only affects local sim. Re-run setup.py once any pip "
+                f"windows have closed if you need sim. (exit {e.returncode})"
+            )
 
     step("Running checks")
     results: dict[str, bool] = {
