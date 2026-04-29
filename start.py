@@ -20,6 +20,7 @@ import platform
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -51,7 +52,67 @@ OK_COLOR = "#16a34a"
 FAIL_COLOR = "#dc2626"
 
 DEFAULT_TEAM = "1279"
+ROBOT_SSID = "FRC-1279"
 STATUS_POLL_MS = 5000
+
+
+def _current_wifi_ssid() -> str | None:
+    """Return the SSID currently associated with the WiFi adapter, or None.
+    Windows-only — uses `netsh wlan show interfaces`."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True, text=True, timeout=8,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for raw in result.stdout.splitlines():
+        line = raw.strip()
+        # Match "SSID" but not "BSSID". netsh's localized output makes this
+        # fragile in non-English Windows, but for now we trust English.
+        if line.startswith("SSID") and not line.startswith("BSSID"):
+            _, _, value = line.partition(":")
+            value = value.strip()
+            return value or None
+    return None
+
+
+def _connect_robot_wifi(ssid: str = ROBOT_SSID) -> tuple[bool, str]:
+    """Try to associate with the robot's WiFi network.
+
+    Uses `netsh wlan connect`, which needs an existing saved profile for
+    the SSID — Windows' WiFi UI creates that the first time you connect
+    by hand. If there's no profile, the user has to connect once
+    manually (entering the password) and from then on this works.
+
+    Returns (success, message). Non-Windows is a friendly no-op.
+    """
+    if platform.system() != "Windows":
+        return False, "Skipped WiFi connect (not on Windows)."
+    current = _current_wifi_ssid()
+    if current == ssid:
+        return True, f"Already connected to {ssid}."
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "connect", f"name={ssid}", f"ssid={ssid}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return False, "netsh not found — can't manage WiFi."
+    except subprocess.TimeoutExpired:
+        return False, "WiFi connect timed out."
+    if result.returncode == 0:
+        return True, f"Connecting to {ssid}…"
+    err = (result.stderr or result.stdout or "").strip().splitlines()
+    msg = err[0] if err else "unknown error"
+    if "no such wireless" in msg.lower() or "profile" in msg.lower():
+        msg = (
+            f"No saved profile for {ssid}. "
+            "Connect to it once manually so Windows remembers it."
+        )
+    return False, f"Couldn't connect to {ssid}: {msg}"
 
 
 def _rio_addresses(team: str | None, *, include_mdns: bool = False) -> list[str]:
@@ -333,33 +394,75 @@ def main() -> int:
         else:
             messagebox.showwarning("Cold Fusion Robotics", msg, parent=root)
 
-    def _prep_bot_clicked() -> None:
-        # 1) Drop the firewall so the DS can talk to the rio. Skipped on
-        #    non-Windows since there's no Defender to drop.
-        if firewall.is_windows():
-            fw_ok, fw_msg = firewall.set_firewall(False)
-        else:
-            fw_ok, fw_msg = True, "Skipped firewall (not on Windows)."
-        # 2) Probe the rio. Use mDNS this time since the user's actively
-        #    waiting and we want every reasonable address tried.
-        bot_ok, host = _check_bot_status(include_mdns=True, timeout_s=1.0)
-        if bot_ok:
-            bot_msg = f"Connected to the robot at {host}."
-        else:
-            bot_msg = (
-                "Couldn't reach the robot on any known address.\n"
-                "Check that you're on the robot's WiFi (or USB tethered) "
-                "and the rio is fully booted."
-            )
-        # Refresh the header dot right away so the user sees the result
-        # even if the next poll is 5s out.
-        _set_status(bot_ok, host)
+    prep_running = {"v": False}
 
-        body_text = f"Firewall: {fw_msg}\n\nRobot: {bot_msg}"
-        if bot_ok and fw_ok:
-            messagebox.showinfo("Prep Bot", body_text, parent=root)
-        else:
-            messagebox.showwarning("Prep Bot", body_text, parent=root)
+    def _prep_bot_clicked() -> None:
+        # Guard against double-clicks while a prep is in flight. Each step
+        # blocks (UAC, netsh, sleep, ping) so we run on a worker thread and
+        # bounce the result dialog back to the UI thread.
+        if prep_running["v"]:
+            return
+        prep_running["v"] = True
+        _set_status(None, None)
+
+        def worker() -> None:
+            try:
+                # 1) Drop the firewall so the DS can talk to the rio.
+                if firewall.is_windows():
+                    fw_ok, fw_msg = firewall.set_firewall(False)
+                else:
+                    fw_ok, fw_msg = True, "Skipped firewall (not on Windows)."
+
+                # 2) Associate with the robot WiFi (FRC-1279).
+                wifi_ok, wifi_msg = _connect_robot_wifi(ROBOT_SSID)
+
+                # 3) Give the adapter a few seconds to associate + DHCP
+                #    before pinging. We retry the ping each second so we
+                #    don't wait the full window when association is fast.
+                bot_ok, host = False, None
+                deadline = time.monotonic() + (8.0 if wifi_ok else 1.0)
+                while time.monotonic() < deadline:
+                    bot_ok, host = _check_bot_status(
+                        include_mdns=True, timeout_s=0.8
+                    )
+                    if bot_ok:
+                        break
+                    time.sleep(1.0)
+
+                if bot_ok:
+                    bot_msg = f"Connected to the robot at {host}."
+                else:
+                    bot_msg = (
+                        "Couldn't reach the robot on any known address.\n"
+                        "Check that the rio is powered, fully booted, and "
+                        "that you're on its WiFi (or USB tethered)."
+                    )
+            except Exception as e:  # never lose the lock on a crash
+                fw_ok = wifi_ok = bot_ok = False
+                fw_msg = wifi_msg = bot_msg = ""
+                _err = f"Prep crashed: {e}"
+                root.after(0, lambda: messagebox.showerror(
+                    "Prep Bot", _err, parent=root,
+                ))
+                prep_running["v"] = False
+                return
+
+            def show() -> None:
+                _set_status(bot_ok, host)
+                body_text = (
+                    f"Firewall: {fw_msg}\n\n"
+                    f"WiFi: {wifi_msg}\n\n"
+                    f"Robot: {bot_msg}"
+                )
+                if bot_ok and fw_ok and wifi_ok:
+                    messagebox.showinfo("Prep Bot", body_text, parent=root)
+                else:
+                    messagebox.showwarning("Prep Bot", body_text, parent=root)
+                prep_running["v"] = False
+
+            root.after(0, show)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     sections = [
         ("Robot Code", [
