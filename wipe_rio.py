@@ -86,13 +86,13 @@ def ssh_run(host: str, command: str, *, timeout: int = 180) -> tuple[int, str]:
 # Run on the rio over SSH. We use absolute paths because non-interactive
 # SSH sessions on the rio don't get /usr/local/bin in PATH (login-shell
 # profile.d scripts don't run), so plain `python3` is "command not found".
+#
+# We don't try to bootstrap pip here — the rio's Python is a slimmed-down
+# build that omits `ensurepip`, so pip can only be (re)installed via opkg.
+# That's done by the install-python step below.
 _PREP_SCRIPT = (
     f"{RIO_KILL_ROBOT} -t 2>/dev/null || true; "
-    # Clear deployed user code so a future deploy starts clean.
     "rm -rf /home/lvuser/py /home/lvuser/.cache 2>/dev/null || true; "
-    # Defensive: if a prior buggy wipe nuked pip itself, this restores it
-    # from the wheels bundled in stdlib. No-op when pip is already healthy.
-    f"{RIO_PYTHON} -m ensurepip --upgrade --default-pip 2>&1 | tail -3; "
     "echo prep_done"
 )
 
@@ -182,6 +182,28 @@ def _logic() -> int:
         _d.fail(f"Prep script exited {rc}")
         return rc
     _d.ok("Rio prepped.")
+
+    # The rio's pip is shipped inside the python opkg package. If a previous
+    # bad wipe deleted pip itself (No module named pip), the only way to
+    # restore it is to opkg-uninstall and reinstall Python. uninstall-python
+    # is idempotent (won't error if already gone), and install-python pulls
+    # the .ipk from the laptop cache, so this works offline.
+    _d.step("Reinstalling Python on the rio (restores pip)")
+    rc = run_local([
+        sys.executable, "-m", "robotpy", "installer", "uninstall-python",
+    ])
+    if rc != 0:
+        # Don't fail hard here — uninstall may legitimately error if Python
+        # was already gone, and install-python below will surface real issues.
+        _d.warn(f"uninstall-python exited {rc} (continuing anyway)")
+    rc = run_local([
+        sys.executable, "-m", "robotpy", "installer", "install-python",
+    ])
+    if rc != 0:
+        _d.fail(f"install-python exited {rc}")
+        _d.info("If 'python ipk not downloaded', run Install/Setup once")
+        _d.info("on a machine with internet to populate the cache.")
+        return rc
 
     _d.step("Force-reinstalling packages on the rio")
     pkgs = _read_rio_packages()
