@@ -82,6 +82,32 @@ _WIPE_SCRIPT = (
 )
 
 
+def _read_rio_packages() -> list[str]:
+    """Return the list of packages to push to the rio.
+
+    Includes a pinned `robotpy==<version>` (from `[tool.robotpy].robotpy_version`)
+    plus everything in `[tool.robotpy].requires`. Reading pyproject.toml directly
+    means we never have to call out to pypi to learn what to install.
+    """
+    try:
+        import tomllib  # py3.11+
+    except ImportError:
+        import tomli as tomllib  # type: ignore
+
+    pyproject = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+    with open(pyproject, "rb") as f:
+        data = tomllib.load(f)
+    rp = data.get("tool", {}).get("robotpy", {})
+    pkgs: list[str] = []
+    version = rp.get("robotpy_version")
+    if version:
+        pkgs.append(f"robotpy=={version}")
+    else:
+        pkgs.append("robotpy")
+    pkgs.extend(rp.get("requires", []))
+    return pkgs
+
+
 def run_local(cmd: list[str]) -> int:
     """Run a host-side command, streaming output to the UI or terminal."""
     if ui_mode.is_active():
@@ -145,21 +171,25 @@ def _logic() -> int:
         return rc
     _d.ok("Rio Python tree cleared.")
 
-    _d.step("Pushing wheels to the rio (robotpy sync)")
-    _d.info("Uses the cache populated by setup.py — internet not required")
-    _d.info("as long as you've run Install/Setup at least once.")
-    # `robotpy sync` reads pyproject.toml itself (unlike `installer install -r`
-    # which expects requirements.txt syntax). --no-install skips the local
-    # pip step since setup.py already handled that. --use-certifi matches what
-    # setup.py uses so SSL works on Windows.
+    _d.step("Pushing wheels to the rio")
+    _d.info("Reading package list from pyproject.toml...")
+    pkgs = _read_rio_packages()
+    if not pkgs:
+        _d.fail("No packages found in pyproject.toml [tool.robotpy].requires")
+        return 1
+    for p in pkgs:
+        _d.info(f"- {p}")
+    # `installer install <pkgs>` pushes from the local cache without hitting
+    # pypi, so this works on the robot's WiFi (no internet). The cache is
+    # populated by `robotpy sync` during Install/Setup.
     rc = run_local([
-        sys.executable, "-m", "robotpy", "sync",
-        "--use-certifi", "--no-install",
+        sys.executable, "-m", "robotpy", "installer", "install",
+        *pkgs,
     ])
     if rc != 0:
-        _d.fail(f"robotpy sync exited {rc}")
-        _d.info("If this is a 'cannot download' error, run Install/Setup")
-        _d.info("once on a machine with internet to populate the wheel cache.")
+        _d.fail(f"installer install exited {rc}")
+        _d.info("If this is a 'no matching distribution' error, run")
+        _d.info("Install/Setup on a machine with internet to populate the cache.")
         return rc
 
     _d.banner(
