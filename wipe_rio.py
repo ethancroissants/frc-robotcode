@@ -145,24 +145,21 @@ def _logic() -> int:
         return rc
     _d.ok("Rio Python tree cleared.")
 
-    pyproject = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
-
-    _d.step("Downloading fresh wheels to the local cache")
+    _d.step("Pushing wheels to the rio (robotpy sync)")
+    _d.info("Uses the cache populated by setup.py — internet not required")
+    _d.info("as long as you've run Install/Setup at least once.")
+    # `robotpy sync` reads pyproject.toml itself (unlike `installer install -r`
+    # which expects requirements.txt syntax). --no-install skips the local
+    # pip step since setup.py already handled that. --use-certifi matches what
+    # setup.py uses so SSL works on Windows.
     rc = run_local([
-        sys.executable, "-m", "robotpy", "installer", "download",
-        "-r", pyproject,
+        sys.executable, "-m", "robotpy", "sync",
+        "--use-certifi", "--no-install",
     ])
     if rc != 0:
-        _d.fail(f"installer download exited {rc}")
-        return rc
-
-    _d.step("Installing wheels onto the rio")
-    rc = run_local([
-        sys.executable, "-m", "robotpy", "installer", "install",
-        "-r", pyproject,
-    ])
-    if rc != 0:
-        _d.fail(f"installer install exited {rc}")
+        _d.fail(f"robotpy sync exited {rc}")
+        _d.info("If this is a 'cannot download' error, run Install/Setup")
+        _d.info("once on a machine with internet to populate the wheel cache.")
         return rc
 
     _d.banner(
