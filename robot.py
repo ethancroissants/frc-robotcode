@@ -12,6 +12,7 @@ from wpilib import DriverStation
 
 import gamepads
 import tunables
+import vision
 from generated import tuner_constants
 from robotcontainer import RobotContainer
 
@@ -43,6 +44,9 @@ class MyRobot(wpilib.TimedRobot):
         self.m_timeAndJoystickReplay = (
             HootAutoReplay().with_timestamp_replay().with_joystick_replay()
         )
+
+        # USB camera with overlaid aim line; operator D-pad ramps shot distance.
+        vision.start()
 
     def robotPeriodic(self) -> None:
         self.m_timeAndJoystickReplay.update()

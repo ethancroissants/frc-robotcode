@@ -6,7 +6,7 @@ the WPILib BSD license file in the root directory of this project.
 
 import math
 
-from commands2 import DeferredCommand
+from commands2 import DeferredCommand, InstantCommand
 from commands2.button import CommandXboxController, Trigger
 from commands2.sysid import SysIdRoutine
 from pathplannerlib.auto import AutoBuilder, NamedCommands
@@ -18,6 +18,7 @@ from wpimath.geometry import Rotation2d
 import constants
 import gamepads
 import motorcontrollers
+import tunables
 from commands.auto_fire import AutoFire
 from commands.cease_fire import CeaseFire
 from commands.clear_out import ClearOut
@@ -242,6 +243,16 @@ class RobotContainer:
         gamepads.operator_rightStickButton.debounce(
             0.1, Debouncer.DebounceType.kBoth
         ).whileTrue(self.feederIn).onFalse(self.stopFeeder)
+
+        # Camera-sight distance ramp: D-pad up/down on the operator stick steps
+        # the shooter distance ±0.5 ft, which moves the aim line on the camera
+        # overlay. ignoringDisable so the driver can dial in pre-match.
+        gamepads.operatorController.povUp().onTrue(
+            InstantCommand(lambda: tunables.bump_shooter_distance(0.5)).ignoringDisable(True)
+        )
+        gamepads.operatorController.povDown().onTrue(
+            InstantCommand(lambda: tunables.bump_shooter_distance(-0.5)).ignoringDisable(True)
+        )
 
         self.drivetrain.register_telemetry(self.logger.telemeterize)
 

@@ -13,4 +13,7 @@ requires = [
     "robotpy-commands-v2",
     "phoenix6",
     "robotpy-pathplannerlib",
+    "robotpy-cscore",
+    "opencv-python",
+    "numpy",
 ]

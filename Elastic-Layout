@@ -143,6 +143,160 @@
       }
     },
     {
+      "name": "Sight",
+      "grid_layout": {
+        "layouts": [],
+        "containers": [
+          {
+            "title": "Shooter Sight",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 768.0,
+            "height": 576.0,
+            "type": "Camera Stream",
+            "properties": {
+              "topic": "/CameraPublisher/Shooter Sight",
+              "period": 0.06,
+              "rotation_turns": 0,
+              "compression": 0,
+              "fps": 30,
+              "resolution": [640.0, 480.0]
+            }
+          },
+          {
+            "title": "Calibrate Sight",
+            "x": 768.0,
+            "y": 0.0,
+            "width": 384.0,
+            "height": 192.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Calibrate Sight",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070
+            }
+          },
+          {
+            "title": "Calibrate Sight True Distance (ft)",
+            "x": 768.0,
+            "y": 192.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Calibrate Sight True Distance (ft)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Shooter Distance (ft)",
+            "x": 768.0,
+            "y": 320.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Number Slider",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Shooter Distance (ft)",
+              "period": 0.06,
+              "data_type": "double",
+              "min_value": 0.0,
+              "max_value": 25.0,
+              "divisions": 25,
+              "update_continuously": true
+            }
+          },
+          {
+            "title": "Sight Camera FOV (deg)",
+            "x": 0.0,
+            "y": 576.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Camera FOV (deg)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Sight Camera Height (m)",
+            "x": 256.0,
+            "y": 576.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Camera Height (m)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Sight Camera Tilt (rad)",
+            "x": 512.0,
+            "y": 576.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Camera Tilt (rad)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Sight Shooter Exit Angle (deg)",
+            "x": 768.0,
+            "y": 448.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Shooter Exit Angle (deg)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Sight Shooter Release Height (m)",
+            "x": 768.0,
+            "y": 576.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Shooter Release Height (m)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          },
+          {
+            "title": "Sight Ball Speed Per RPS (m)",
+            "x": 0.0,
+            "y": 704.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Ball Speed Per RPS (m)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": true
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "Autonomous",
       "grid_layout": {
         "layouts": [],
