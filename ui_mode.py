@@ -510,9 +510,9 @@ class App:
     # ---- subprocess streaming ----
     # stdout/stderr are captured into the hidden details log; the latest
     # non-empty line is also surfaced under the progress bar so long-running
-    # commands like `robotpy deploy` show live activity. stdin is closed so
-    # if the child tries to prompt interactively it fails fast (instead of
-    # silently hanging the UI forever).
+    # commands like `robotpy deploy` show live activity. stdin is piped and
+    # pre-fed 'y' answers so prompts like robotpy's "uninstall + install?"
+    # don't EOF and crash the deploy.
 
     def stream_subprocess(self, cmd: list[str]) -> int:
         self._buffer(f"  $ {' '.join(cmd)}\n")
@@ -521,7 +521,7 @@ class App:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 text=True,
                 bufsize=1,
             )
@@ -529,6 +529,12 @@ class App:
             self._buffer(f"Failed to launch: {e}\n")
             return 1
         assert proc.stdout is not None
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write("y\n" * 20)
+                proc.stdin.flush()
+            except (OSError, BrokenPipeError):
+                pass
         for line in proc.stdout:
             self._buffer(line)
             trimmed = line.strip()
@@ -536,4 +542,10 @@ class App:
                 # Truncate so a giant traceback line doesn't blow up the layout.
                 self._set_hint(trimmed[:90])
         self._set_hint("")
-        return proc.wait()
+        rc = proc.wait()
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        return rc
