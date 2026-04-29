@@ -513,9 +513,10 @@ def main() -> int:
         # Track the host so SSH knows where to dial; only the True branch
         # has a real host. None reverts the SSH button to disabled.
         current_host["v"] = host if reachable else None
-        ssh_card = card_refs.get("ssh")
-        if ssh_card is not None:
-            ssh_card.set_enabled(bool(reachable))
+        for cid in ("ssh", "wipe"):
+            card = card_refs.get(cid)
+            if card is not None:
+                card.set_enabled(bool(reachable))
 
     def _poll_status() -> None:
         if not alive["v"]:
@@ -716,6 +717,12 @@ def main() -> int:
                 lambda: _launch(["deploy.py", "--ui"]),
             ),
             (
+                "Wipe RoboRIO",
+                "Fresh-install Python on the rio when a deploy left it broken.",
+                lambda: _launch(["wipe_rio.py", "--ui"]),
+                "wipe",
+            ),
+            (
                 "Update from GitHub",
                 "Sync this folder with the latest team code.",
                 _update_clicked,
@@ -724,11 +731,6 @@ def main() -> int:
                 "Run Simulator",
                 "Test the robot code on your computer.",
                 lambda: _launch(["-m", "robotpy", "sim"]),
-            ),
-            (
-                "Wipe RoboRIO",
-                "Fresh-install Python on the rio when a deploy left it broken.",
-                lambda: _launch(["wipe_rio.py", "--ui"]),
             ),
         ]),
         ("Connection", [
@@ -778,9 +780,9 @@ def main() -> int:
             # tracks bot reachability.
             title, subtitle, cmd = item[0], item[1], item[2]
             card_id = item[3] if len(item) > 3 else None
-            # SSH starts disabled; the status poller flips it on once the
-            # rio answers a ping.
-            initial_enabled = card_id != "ssh"
+            # SSH and Wipe start disabled; the status poller flips them on
+            # once the rio answers a ping (both need a live SSH connection).
+            initial_enabled = card_id not in ("ssh", "wipe")
             card = Card(grid, title, subtitle, cmd, enabled=initial_enabled)
             card.grid(row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4)
             if card_id:

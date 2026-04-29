@@ -71,8 +71,10 @@ _WIPE_SCRIPT = (
     # Stop the running user program first so we don't fight a live process.
     "/usr/local/frc/bin/frcKillRobot.sh -t 2>/dev/null || true; "
     # Nuke every site-packages on the rio (covers any python3.x version).
+    # Busybox `find` on the rio has no -delete, so just rm -rf the whole
+    # dir and recreate an empty one so pip can repopulate it.
     "for d in /usr/local/lib/python*/site-packages; do "
-    "  [ -d \"$d\" ] && find \"$d\" -mindepth 1 -delete; "
+    "  [ -d \"$d\" ] && rm -rf \"$d\" && mkdir -p \"$d\"; "
     "done; "
     # Clear the deployed code dir + pip cache so the next deploy is clean.
     "rm -rf /home/lvuser/py /home/lvuser/.cache 2>/dev/null; "
@@ -143,20 +145,24 @@ def _logic() -> int:
         return rc
     _d.ok("Rio Python tree cleared.")
 
-    _d.step("Reinstalling robotpy on the rio")
-    rc = run_local([sys.executable, "-m", "robotpy", "installer", "install-robotpy"])
+    pyproject = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+
+    _d.step("Downloading fresh wheels to the local cache")
+    rc = run_local([
+        sys.executable, "-m", "robotpy", "installer", "download",
+        "-r", pyproject,
+    ])
     if rc != 0:
-        _d.fail(f"install-robotpy exited {rc}")
+        _d.fail(f"installer download exited {rc}")
         return rc
 
-    _d.step("Reinstalling project requirements on the rio")
-    pyproject = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+    _d.step("Installing wheels onto the rio")
     rc = run_local([
         sys.executable, "-m", "robotpy", "installer", "install",
         "-r", pyproject,
     ])
     if rc != 0:
-        _d.fail(f"install -r pyproject.toml exited {rc}")
+        _d.fail(f"installer install exited {rc}")
         return rc
 
     _d.banner(

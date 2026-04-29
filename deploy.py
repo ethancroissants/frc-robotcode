@@ -168,6 +168,9 @@ def ping(host: str, timeout_s: float = 1.0) -> bool:
         return False
 
 
+DEFAULT_TEAM = "1279"
+
+
 def read_team_number() -> str | None:
     for path in (
         ".deploy_cfg",
@@ -184,7 +187,15 @@ def read_team_number() -> str | None:
         if m:
             return m.group(1)
     env = os.environ.get("FRC_TEAM") or os.environ.get("TEAM")
-    return env if env and env.isdigit() else None
+    if env and env.isdigit():
+        return env
+    # Fallback to team 1279 and persist it so robotpy's own deploy doesn't
+    # prompt on stdin (which EOFs in our chained subprocess setup).
+    try:
+        save_team_number(DEFAULT_TEAM)
+    except Exception:
+        pass
+    return DEFAULT_TEAM
 
 
 def save_team_number(team: str) -> None:
