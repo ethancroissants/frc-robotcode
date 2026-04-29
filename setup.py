@@ -514,15 +514,17 @@ def _main_logic() -> int:
             "import commands2",
             [sys.executable, "-c", "import commands2; print(commands2.__name__)"],
         )[0],
-        # cscore + cv2 are required by vision.py (USB camera sight). Catch a broken
-        # OpenCV wheel here rather than at robotInit on the field.
+        # cscore + numpy are required by vision.py (USB camera sight). Catch a
+        # broken wheel here rather than at robotInit on the field. We deliberately
+        # do *not* depend on cv2 — WPILib's 2026 mirror ships no OpenCV wheel for
+        # cp314 linux_roborio, so vision.py draws overlays in pure numpy.
         "cscore importable": check(
             "import cscore",
             [sys.executable, "-c", "import cscore; print(cscore.__name__)"],
         )[0],
-        "cv2 importable": check(
-            "import cv2",
-            [sys.executable, "-c", "import cv2; print(cv2.__version__)"],
+        "numpy importable": check(
+            "import numpy",
+            [sys.executable, "-c", "import numpy; print(numpy.__version__)"],
         )[0],
         "robot.py compiles": check(
             "compile robot.py",

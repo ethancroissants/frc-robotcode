@@ -47,6 +47,7 @@ _SIGHT_RELEASE_HEIGHT_M = "Tune/Sight Shooter Release Height (m)"
 _SIGHT_SPEED_PER_RPS = "Tune/Sight Ball Speed Per RPS (m)"
 _SIGHT_CALIBRATE = "Tune/Calibrate Sight"  # boolean trigger
 _SIGHT_CALIBRATE_TRUE_FT = "Tune/Calibrate Sight True Distance (ft)"
+_SIGHT_PREDICTED_LANDING_FT = "Tune/Sight Predicted Landing (ft)"
 
 
 # Defaults that don't live in constants.py yet — keep them here as the single
@@ -94,6 +95,7 @@ def publish_defaults() -> None:
     SmartDashboard.putNumber(_SIGHT_SPEED_PER_RPS, _DEFAULT_SIGHT_SPEED_PER_RPS)
     SmartDashboard.putBoolean(_SIGHT_CALIBRATE, False)
     SmartDashboard.putNumber(_SIGHT_CALIBRATE_TRUE_FT, _DEFAULT_SIGHT_CALIBRATE_TRUE_FT)
+    SmartDashboard.putNumber(_SIGHT_PREDICTED_LANDING_FT, 0.0)
 
 
 def shooter_spin_up_seconds() -> float:
@@ -191,6 +193,10 @@ def sight_calibrate_true_distance_ft() -> float:
     return SmartDashboard.getNumber(
         _SIGHT_CALIBRATE_TRUE_FT, _DEFAULT_SIGHT_CALIBRATE_TRUE_FT
     )
+
+
+def set_sight_predicted_landing_ft(value: float) -> None:
+    SmartDashboard.putNumber(_SIGHT_PREDICTED_LANDING_FT, value)
 
 
 # All dashboard keys to watch, with their fallback default for the read-back.

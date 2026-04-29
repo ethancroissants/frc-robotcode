@@ -292,6 +292,20 @@
               "data_type": "double",
               "show_submit_button": true
             }
+          },
+          {
+            "title": "Predicted Landing (ft)",
+            "x": 384.0,
+            "y": 704.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tune/Sight Predicted Landing (ft)",
+              "period": 0.06,
+              "data_type": "double",
+              "show_submit_button": false
+            }
           }
         ]
       }

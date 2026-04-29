@@ -14,6 +14,5 @@ requires = [
     "phoenix6",
     "robotpy-pathplannerlib",
     "robotpy-cscore",
-    "opencv-python",
     "numpy",
 ]
