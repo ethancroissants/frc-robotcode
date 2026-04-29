@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
-"""Wipe the roboRIO's Python install, then reinstall robotpy + project deps.
+"""Forcibly reinstall RobotPy + project deps on the roboRIO.
 
 Use this when a previous deploy left the rio in a broken state — e.g. the
-site-packages tree is half-populated and `import wpilib` fails with
-"libwpiHal.so: cannot open shared object file". Wiping forces robotpy to
-push fresh wheels for everything in pyproject.toml.
+`robotpy-native-wpihal` package has version `None` so `import wpilib` fails
+with "libwpiHal.so: cannot open shared object file".
+
+The flow mirrors what `robotpy deploy` does internally when packages
+mismatch (see robotpy_installer.cli_deploy._ensure_requirements):
+
+  1. Kill the running robot program.
+  2. Run `ensurepip` over SSH — defensive recovery in case a prior wipe
+     deleted pip itself. ensurepip is in stdlib so it always works.
+  3. `python -m robotpy installer install --force-reinstall --ignore-installed`
+     pushes wheels from the local cache (populated by setup.py's
+     `robotpy sync`) and overwrites any corrupt/half-installed packages.
+
+We deliberately do NOT `rm -rf` site-packages anymore — that wiped pip
+itself and made future `installer install` calls fail with
+"No module named pip". `pip --force-reinstall` handles corrupt installs
+cleanly without ever needing to bootstrap pip from scratch.
 
 After this finishes, run Deploy to push the actual robot code.
 """
@@ -21,6 +35,8 @@ import ui_mode
 
 SSH_USER = "admin"
 SSH_PASSWORD = ""  # default for the rio admin account
+RIO_PYTHON = "/usr/local/bin/python3"
+RIO_KILL_ROBOT = "/usr/local/frc/bin/frcKillRobot.sh"
 
 
 def find_rio(team: str | None) -> str | None:
@@ -38,7 +54,7 @@ def find_rio(team: str | None) -> str | None:
     return None
 
 
-def ssh_run(host: str, command: str) -> tuple[int, str]:
+def ssh_run(host: str, command: str, *, timeout: int = 180) -> tuple[int, str]:
     """Run a command on the rio over SSH; return (exit_code, combined_output).
 
     Uses paramiko (ships with robotpy) so we don't need an OpenSSH client on
@@ -57,7 +73,7 @@ def ssh_run(host: str, command: str) -> tuple[int, str]:
         timeout=10,
     )
     try:
-        stdin, stdout, stderr = client.exec_command(command, timeout=120)
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         out = stdout.read().decode("utf-8", "replace")
         err = stderr.read().decode("utf-8", "replace")
         rc = stdout.channel.recv_exit_status()
@@ -67,22 +83,17 @@ def ssh_run(host: str, command: str) -> tuple[int, str]:
         client.close()
 
 
-_WIPE_SCRIPT = (
-    # Stop the running user program first so we don't fight a live process.
-    "/usr/local/frc/bin/frcKillRobot.sh -t 2>/dev/null || true; "
-    # Nuke every site-packages on the rio (covers any python3.x version).
-    # Busybox `find` on the rio has no -delete, so just rm -rf the whole
-    # dir and recreate an empty one so pip can repopulate it.
-    "for d in /usr/local/lib/python*/site-packages; do "
-    "  [ -d \"$d\" ] && rm -rf \"$d\" && mkdir -p \"$d\"; "
-    "done; "
-    # Restore pip — wiping site-packages also removed pip itself, and the
-    # rio's `rpip` wrapper crashes with 'No module named pip' without it.
-    # ensurepip lives in stdlib so it survives the wipe.
-    "python3 -m ensurepip --upgrade --default-pip 2>&1 | tail -3; "
-    # Clear the deployed code dir + pip cache so the next deploy is clean.
-    "rm -rf /home/lvuser/py /home/lvuser/.cache 2>/dev/null; "
-    "echo done"
+# Run on the rio over SSH. We use absolute paths because non-interactive
+# SSH sessions on the rio don't get /usr/local/bin in PATH (login-shell
+# profile.d scripts don't run), so plain `python3` is "command not found".
+_PREP_SCRIPT = (
+    f"{RIO_KILL_ROBOT} -t 2>/dev/null || true; "
+    # Clear deployed user code so a future deploy starts clean.
+    "rm -rf /home/lvuser/py /home/lvuser/.cache 2>/dev/null || true; "
+    # Defensive: if a prior buggy wipe nuked pip itself, this restores it
+    # from the wheels bundled in stdlib. No-op when pip is already healthy.
+    f"{RIO_PYTHON} -m ensurepip --upgrade --default-pip 2>&1 | tail -3; "
+    "echo prep_done"
 )
 
 
@@ -104,10 +115,7 @@ def _read_rio_packages() -> list[str]:
     rp = data.get("tool", {}).get("robotpy", {})
     pkgs: list[str] = []
     version = rp.get("robotpy_version")
-    if version:
-        pkgs.append(f"robotpy=={version}")
-    else:
-        pkgs.append("robotpy")
+    pkgs.append(f"robotpy=={version}" if version else "robotpy")
     pkgs.extend(rp.get("requires", []))
     return pkgs
 
@@ -135,7 +143,7 @@ def main() -> int:
 def _logic() -> int:
     _d.banner(
         "Wipe RoboRIO",
-        "fresh-install python on the rio",
+        "force-reinstall robotpy + project deps",
         color=_d.red,
     )
 
@@ -146,8 +154,8 @@ def _logic() -> int:
         _d.fail("No team number configured. Run Install/Setup first.")
         return 1
 
-    _d.warn("This will UNINSTALL every Python package on the roboRIO,")
-    _d.warn("then reinstall robotpy + your pyproject.toml requirements.")
+    _d.warn("This will force-reinstall every Python package on the roboRIO,")
+    _d.warn("overwriting any corrupt or half-installed packages from a prior deploy.")
     if not _d.ask_yn("Continue?", default=False):
         _d.info("Aborted.")
         return 1
@@ -160,10 +168,10 @@ def _logic() -> int:
         return 1
     _d.ok(f"Robot at {_d.bold(host)}")
 
-    _d.step("Wiping Python on the rio")
-    _d.info("(stopping robot program + clearing site-packages)")
+    _d.step("Preparing the rio")
+    _d.info("(killing robot, clearing /home/lvuser/py, ensuring pip is alive)")
     try:
-        rc, out = ssh_run(host, _WIPE_SCRIPT)
+        rc, out = ssh_run(host, _PREP_SCRIPT)
     except Exception as e:
         _d.fail(f"SSH failed: {e}")
         return 1
@@ -171,29 +179,32 @@ def _logic() -> int:
         for line in out.splitlines():
             _d.info(line)
     if rc != 0:
-        _d.fail(f"Wipe command exited {rc}")
+        _d.fail(f"Prep script exited {rc}")
         return rc
-    _d.ok("Rio Python tree cleared.")
+    _d.ok("Rio prepped.")
 
-    _d.step("Pushing wheels to the rio")
-    _d.info("Reading package list from pyproject.toml...")
+    _d.step("Force-reinstalling packages on the rio")
     pkgs = _read_rio_packages()
     if not pkgs:
-        _d.fail("No packages found in pyproject.toml [tool.robotpy].requires")
+        _d.fail("No packages found in pyproject.toml [tool.robotpy]")
         return 1
     for p in pkgs:
         _d.info(f"- {p}")
-    # `installer install <pkgs>` pushes from the local cache without hitting
-    # pypi, so this works on the robot's WiFi (no internet). The cache is
-    # populated by `robotpy sync` during Install/Setup.
+    # --force-reinstall: pip wipes each package's existing files before
+    #   writing the new ones, fixing any half-installed metadata.
+    # --ignore-installed: don't trust metadata that says a package is up to
+    #   date; reinstall regardless.
+    # No pypi calls — wheels come from the local cache that setup.py
+    # populates via `robotpy sync`.
     rc = run_local([
         sys.executable, "-m", "robotpy", "installer", "install",
+        "--force-reinstall", "--ignore-installed",
         *pkgs,
     ])
     if rc != 0:
         _d.fail(f"installer install exited {rc}")
         _d.info("If this is a 'no matching distribution' error, run")
-        _d.info("Install/Setup on a machine with internet to populate the cache.")
+        _d.info("Install/Setup once on a machine with internet to populate the cache.")
         return rc
 
     _d.banner(
