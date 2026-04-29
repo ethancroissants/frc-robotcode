@@ -23,7 +23,7 @@ from pathlib import Path
 
 try:
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import messagebox, ttk
     HAS_TK = True
 except ImportError:
     HAS_TK = False
@@ -88,7 +88,7 @@ class Card(tk.Frame):
         self._normal_bg = PANEL
         self._hover_bg = CARD_HOVER
 
-        inner = tk.Frame(self, bg=PANEL, padx=18, pady=14)
+        inner = tk.Frame(self, bg=PANEL, padx=14, pady=9)
         inner.pack(fill="x")
         self._inner = inner
 
@@ -97,7 +97,7 @@ class Card(tk.Frame):
             text=title,
             bg=PANEL,
             fg=FG,
-            font=("Helvetica", 13, "bold"),
+            font=("Helvetica", 11, "bold"),
             anchor="w",
         )
         self._title.pack(anchor="w")
@@ -106,10 +106,10 @@ class Card(tk.Frame):
             text=subtitle,
             bg=PANEL,
             fg=DIM,
-            font=("Helvetica", 10),
+            font=("Helvetica", 9),
             anchor="w",
         )
-        self._subtitle.pack(anchor="w", pady=(2, 0))
+        self._subtitle.pack(anchor="w", pady=(1, 0))
 
         for w in (self, inner, self._title, self._subtitle):
             w.bind("<Button-1>", self._click)
@@ -147,33 +147,77 @@ def main() -> int:
     root = tk.Tk()
     root.title("Cold Fusion Robotics — Control Panel")
     root.configure(bg=BG)
-    root.geometry("580x600")
-    root.minsize(500, 540)
+    root.geometry("520x520")
+    root.minsize(440, 360)
 
     # ----- header -----
     header = tk.Frame(root, bg=PANEL)
     header.pack(fill="x", side="top")
-    hinner = tk.Frame(header, bg=PANEL, padx=24, pady=20)
+    hinner = tk.Frame(header, bg=PANEL, padx=20, pady=12)
     hinner.pack(fill="x")
     tk.Label(
         hinner,
         text="COLD FUSION ROBOTICS",
         bg=PANEL,
         fg=ACCENT,
-        font=("Helvetica", 16, "bold"),
+        font=("Helvetica", 14, "bold"),
     ).pack(anchor="w")
     tk.Label(
         hinner,
         text="Team 1279 — Robot Code Control Panel",
         bg=PANEL,
         fg=DIM,
-        font=("Helvetica", 11),
-    ).pack(anchor="w", pady=(2, 0))
+        font=("Helvetica", 10),
+    ).pack(anchor="w", pady=(1, 0))
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x")
 
-    # ----- body -----
-    body = tk.Frame(root, bg=BG)
-    body.pack(fill="both", expand=True, padx=22, pady=18)
+    # ----- scrollable body -----
+    # Tk has no native scrollable frame, so we wrap a Frame inside a Canvas
+    # and keep them in sync via <Configure>. Mousewheel binds use bind_all
+    # but only while the cursor is over our canvas (Enter/Leave).
+    body_outer = tk.Frame(root, bg=BG)
+    body_outer.pack(fill="both", expand=True)
+    canvas = tk.Canvas(body_outer, bg=BG, highlightthickness=0, borderwidth=0)
+    scrollbar = ttk.Scrollbar(body_outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    body = tk.Frame(canvas, bg=BG)
+    inner_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+    def _on_canvas_resize(event: "tk.Event") -> None:
+        canvas.itemconfigure(inner_id, width=event.width)
+
+    def _on_body_resize(_event=None) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    canvas.bind("<Configure>", _on_canvas_resize)
+    body.bind("<Configure>", _on_body_resize)
+
+    def _on_mousewheel(event: "tk.Event") -> None:
+        # On Windows/macOS event.delta is +/-120 per notch; on X11 we get
+        # Button-4/Button-5 events instead (handled below).
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _bind_wheel(_e=None) -> None:
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+    def _unbind_wheel(_e=None) -> None:
+        canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
+
+    canvas.bind("<Enter>", _bind_wheel)
+    canvas.bind("<Leave>", _unbind_wheel)
+
+    # Pad inside the scrollable area, not on the canvas, so the scrollbar
+    # hugs the right edge of the window.
+    body_padded = tk.Frame(body, bg=BG)
+    body_padded.pack(fill="both", expand=True, padx=18, pady=12)
+    body = body_padded
 
     def _update_clicked() -> None:
         # Close the panel so only the update window stays on screen; the
@@ -200,46 +244,59 @@ def main() -> int:
         else:
             messagebox.showwarning("Cold Fusion Robotics", msg, parent=root)
 
-    cards = [
-        (
-            "Install / Setup",
-            "Install RobotPy and project dependencies.",
-            lambda: _launch(["setup.py", "--ui"]),
-        ),
-        (
-            "Deploy to Robot",
-            "Push the latest code onto the roboRIO.",
-            lambda: _launch(["deploy.py", "--ui"]),
-        ),
-        (
-            "Update from GitHub",
-            "Sync this folder with the latest team code.",
-            _update_clicked,
-        ),
-        (
-            "Run Simulator",
-            "Test the robot code on your computer.",
-            lambda: _launch(["-m", "robotpy", "sim"]),
-        ),
-        (
-            "Documentation",
-            "Read the team's guides and dashboard reference.",
-            lambda: _launch(["docs.py"]),
-        ),
-        (
-            "Turn Firewall Back On",
-            "Re-enable Windows Firewall (deploy turns it off for the DS).",
-            _firewall_on_clicked,
-        ),
+    sections = [
+        ("Robot Code", [
+            (
+                "Install / Setup",
+                "Install RobotPy and project dependencies.",
+                lambda: _launch(["setup.py", "--ui"]),
+            ),
+            (
+                "Deploy to Robot",
+                "Push the latest code onto the roboRIO.",
+                lambda: _launch(["deploy.py", "--ui"]),
+            ),
+            (
+                "Update from GitHub",
+                "Sync this folder with the latest team code.",
+                _update_clicked,
+            ),
+            (
+                "Run Simulator",
+                "Test the robot code on your computer.",
+                lambda: _launch(["-m", "robotpy", "sim"]),
+            ),
+        ]),
+        ("Tools", [
+            (
+                "Documentation",
+                "Read the team's guides and dashboard reference.",
+                lambda: _launch(["docs.py"]),
+            ),
+            (
+                "Turn Firewall Back On",
+                "Re-enable Windows Firewall (deploy turns it off for the DS).",
+                _firewall_on_clicked,
+            ),
+        ]),
     ]
-    for title, subtitle, cmd in cards:
-        Card(body, title, subtitle, cmd).pack(fill="x", pady=6)
+    for i, (section_title, section_cards) in enumerate(sections):
+        tk.Label(
+            body,
+            text=section_title.upper(),
+            bg=BG,
+            fg=DIM,
+            font=("Helvetica", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0 if i == 0 else 10, 4))
+        for title, subtitle, cmd in section_cards:
+            Card(body, title, subtitle, cmd).pack(fill="x", pady=3)
 
     # ----- footer -----
     footer = tk.Frame(root, bg=PANEL)
     footer.pack(fill="x", side="bottom")
     tk.Frame(footer, bg=BORDER, height=1).pack(fill="x", side="top")
-    finner = tk.Frame(footer, bg=PANEL, padx=14, pady=10)
+    finner = tk.Frame(footer, bg=PANEL, padx=12, pady=6)
     finner.pack(fill="x")
     left = tk.Frame(finner, bg=PANEL)
     left.pack(side="left", fill="x", expand=True)
@@ -248,17 +305,17 @@ def main() -> int:
         text=f"Working in: {REPO}",
         bg=PANEL,
         fg=DIM,
-        font=("Helvetica", 9),
+        font=("Helvetica", 8),
         anchor="w",
     ).pack(anchor="w")
     tk.Label(
         left,
-        text="Code & GUI written, designed and maintained by Ethan Canterbury",
+        text="Code & GUI by Ethan Canterbury",
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 8),
         anchor="w",
-    ).pack(anchor="w", pady=(2, 0))
+    ).pack(anchor="w", pady=(1, 0))
     tk.Button(
         finner,
         text="Quit",
@@ -266,7 +323,7 @@ def main() -> int:
         fg=FG,
         relief="flat",
         borderwidth=0,
-        font=("Helvetica", 10),
+        font=("Helvetica", 9),
         activebackground=PANEL,
         activeforeground=ACCENT,
         cursor="hand2",
