@@ -76,6 +76,10 @@ _WIPE_SCRIPT = (
     "for d in /usr/local/lib/python*/site-packages; do "
     "  [ -d \"$d\" ] && rm -rf \"$d\" && mkdir -p \"$d\"; "
     "done; "
+    # Restore pip — wiping site-packages also removed pip itself, and the
+    # rio's `rpip` wrapper crashes with 'No module named pip' without it.
+    # ensurepip lives in stdlib so it survives the wipe.
+    "python3 -m ensurepip --upgrade --default-pip 2>&1 | tail -3; "
     # Clear the deployed code dir + pip cache so the next deploy is clean.
     "rm -rf /home/lvuser/py /home/lvuser/.cache 2>/dev/null; "
     "echo done"
