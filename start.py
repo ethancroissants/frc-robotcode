@@ -19,6 +19,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 try:
@@ -29,6 +30,10 @@ except ImportError:
     HAS_TK = False
 
 import firewall
+# Reuse the deploy module's ping + team-number helpers so we have one source
+# of truth for "how do we find the rio". Importing it is side-effect-free
+# beyond enabling ANSI on Windows stdout.
+from deploy import ping, read_team_number
 
 
 REPO = Path(__file__).resolve().parent
@@ -42,6 +47,33 @@ ACCENT = "#0066cc"
 BORDER = "#e2e6ec"
 CARD_HOVER = "#f0f6ff"
 HOVER_BORDER = "#9cc4ee"
+OK_COLOR = "#16a34a"
+FAIL_COLOR = "#dc2626"
+
+DEFAULT_TEAM = "1279"
+STATUS_POLL_MS = 5000
+
+
+def _rio_addresses(team: str | None, *, include_mdns: bool = False) -> list[str]:
+    """Candidate addresses for the rio. mDNS is slow when it fails, so it's
+    off by default — we use it only for the explicit Prep Bot button."""
+    t = team or DEFAULT_TEAM
+    if not t.isdigit():
+        t = DEFAULT_TEAM
+    n = int(t)
+    addrs = [f"10.{n // 100}.{n % 100}.2", "172.22.11.2"]
+    if include_mdns:
+        addrs.insert(0, f"roborio-{t}-FRC.local")
+    return addrs
+
+
+def _check_bot_status(*, include_mdns: bool = False, timeout_s: float = 0.6) -> tuple[bool, str | None]:
+    """Try each candidate IP; return (reachable, host_that_worked)."""
+    team = read_team_number() or DEFAULT_TEAM
+    for host in _rio_addresses(team, include_mdns=include_mdns):
+        if ping(host, timeout_s=timeout_s):
+            return True, host
+    return False, None
 
 
 def _launch(args: list[str], *, restart_panel: bool = False) -> None:
@@ -155,21 +187,78 @@ def main() -> int:
     header.pack(fill="x", side="top")
     hinner = tk.Frame(header, bg=PANEL, padx=20, pady=12)
     hinner.pack(fill="x")
+
+    htitles = tk.Frame(hinner, bg=PANEL)
+    htitles.pack(side="left", fill="x", expand=True)
     tk.Label(
-        hinner,
+        htitles,
         text="COLD FUSION ROBOTICS",
         bg=PANEL,
         fg=ACCENT,
         font=("Helvetica", 14, "bold"),
     ).pack(anchor="w")
     tk.Label(
-        hinner,
+        htitles,
         text="Team 1279 — Robot Code Control Panel",
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 10),
     ).pack(anchor="w", pady=(1, 0))
+
+    # Live connection indicator. The dot recolors as we re-poll every
+    # STATUS_POLL_MS milliseconds. Pinging happens on a background thread
+    # so the UI stays responsive while ICMP times out.
+    hstatus = tk.Frame(hinner, bg=PANEL)
+    hstatus.pack(side="right", padx=(12, 0))
+    status_dot = tk.Label(
+        hstatus, text="●", bg=PANEL, fg=DIM, font=("Helvetica", 14)
+    )
+    status_dot.pack(side="left")
+    status_text = tk.Label(
+        hstatus,
+        text="Checking…",
+        bg=PANEL,
+        fg=DIM,
+        font=("Helvetica", 10),
+    )
+    status_text.pack(side="left", padx=(4, 0))
+
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x")
+
+    alive = {"v": True}
+
+    def _set_status(reachable: bool | None, host: str | None) -> None:
+        if not alive["v"]:
+            return
+        if reachable is None:
+            status_dot.configure(fg=DIM)
+            status_text.configure(text="Checking…", fg=DIM)
+        elif reachable:
+            status_dot.configure(fg=OK_COLOR)
+            status_text.configure(text=f"Connected ({host})", fg=FG)
+        else:
+            status_dot.configure(fg=FAIL_COLOR)
+            status_text.configure(text="No bot connection", fg=FG)
+
+    def _poll_status() -> None:
+        if not alive["v"]:
+            return
+
+        def worker() -> None:
+            ok_, host = _check_bot_status()
+            if alive["v"]:
+                root.after(0, lambda: _set_status(ok_, host))
+
+        threading.Thread(target=worker, daemon=True).start()
+        root.after(STATUS_POLL_MS, _poll_status)
+
+    def _on_close() -> None:
+        alive["v"] = False
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
+    # First check fires immediately, then every STATUS_POLL_MS thereafter.
+    root.after(100, _poll_status)
 
     # ----- scrollable body -----
     # Tk has no native scrollable frame, so we wrap a Frame inside a Canvas
@@ -244,6 +333,34 @@ def main() -> int:
         else:
             messagebox.showwarning("Cold Fusion Robotics", msg, parent=root)
 
+    def _prep_bot_clicked() -> None:
+        # 1) Drop the firewall so the DS can talk to the rio. Skipped on
+        #    non-Windows since there's no Defender to drop.
+        if firewall.is_windows():
+            fw_ok, fw_msg = firewall.set_firewall(False)
+        else:
+            fw_ok, fw_msg = True, "Skipped firewall (not on Windows)."
+        # 2) Probe the rio. Use mDNS this time since the user's actively
+        #    waiting and we want every reasonable address tried.
+        bot_ok, host = _check_bot_status(include_mdns=True, timeout_s=1.0)
+        if bot_ok:
+            bot_msg = f"Connected to the robot at {host}."
+        else:
+            bot_msg = (
+                "Couldn't reach the robot on any known address.\n"
+                "Check that you're on the robot's WiFi (or USB tethered) "
+                "and the rio is fully booted."
+            )
+        # Refresh the header dot right away so the user sees the result
+        # even if the next poll is 5s out.
+        _set_status(bot_ok, host)
+
+        body_text = f"Firewall: {fw_msg}\n\nRobot: {bot_msg}"
+        if bot_ok and fw_ok:
+            messagebox.showinfo("Prep Bot", body_text, parent=root)
+        else:
+            messagebox.showwarning("Prep Bot", body_text, parent=root)
+
     sections = [
         ("Robot Code", [
             (
@@ -267,19 +384,28 @@ def main() -> int:
                 lambda: _launch(["-m", "robotpy", "sim"]),
             ),
         ]),
+        ("Connection", [
+            (
+                "Prep Bot",
+                "Disable firewall and check the robot connection.",
+                _prep_bot_clicked,
+            ),
+            (
+                "Turn Firewall Back On",
+                "Re-enable Windows Firewall when you're done.",
+                _firewall_on_clicked,
+            ),
+        ]),
         ("Tools", [
             (
                 "Documentation",
                 "Read the team's guides and dashboard reference.",
                 lambda: _launch(["docs.py"]),
             ),
-            (
-                "Turn Firewall Back On",
-                "Re-enable Windows Firewall (deploy turns it off for the DS).",
-                _firewall_on_clicked,
-            ),
         ]),
     ]
+    # Two-column grid per section. Cards have uniform width via grid_columnconfigure
+    # with weight=1 + uniform="cards", so they stay the same size as the window grows.
     for i, (section_title, section_cards) in enumerate(sections):
         tk.Label(
             body,
@@ -288,9 +414,15 @@ def main() -> int:
             fg=DIM,
             font=("Helvetica", 9, "bold"),
             anchor="w",
-        ).pack(fill="x", pady=(0 if i == 0 else 10, 4))
-        for title, subtitle, cmd in section_cards:
-            Card(body, title, subtitle, cmd).pack(fill="x", pady=3)
+        ).pack(fill="x", pady=(0 if i == 0 else 12, 4))
+        grid = tk.Frame(body, bg=BG)
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(0, weight=1, uniform="cards")
+        grid.grid_columnconfigure(1, weight=1, uniform="cards")
+        for j, (title, subtitle, cmd) in enumerate(section_cards):
+            Card(grid, title, subtitle, cmd).grid(
+                row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4,
+            )
 
     # ----- footer -----
     footer = tk.Frame(root, bg=PANEL)
