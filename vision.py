@@ -37,7 +37,7 @@ import threading
 import time
 
 import numpy as np
-from cscore import CameraServer, VideoMode
+from cscore import CameraServer, CvSource, MjpegServer, VideoMode
 from wpilib import XboxController
 
 import gamepads
@@ -45,23 +45,27 @@ import tunables
 
 
 # ===== Stream config =====
-# 800x600 MJPEG is universal on USB webcams and stays inside the rio's
-# decode→numpy-overlay→re-encode budget. 720p worked but the rio's Cortex-A9
-# couldn't sustain it (~0.5 fps measured). 800x600 was also what the driver
-# asked for ("like 800p, 20fps-ish").
-_FRAME_WIDTH = 800
-_FRAME_HEIGHT = 600
-_FRAME_FPS = 20
-# 0..100 JPEG quality on the output stream. 25 keeps a 600-line stream under
-# the FRC field's 4 Mbps cap; without this pin the field throttles to ~1 fps.
-_JPEG_QUALITY = 25
+# 640x480 MJPEG is the *universal* hardware-encode mode on USB webcams. 800x600
+# isn't always supported in MJPEG, and when it isn't cscore silently falls back
+# to YUYV which is bandwidth-limited over USB 2.0 to a few fps. 720p+ blew the
+# rio's CPU budget for the decode→numpy-overlay→re-encode pipeline.
+_FRAME_WIDTH = 640
+_FRAME_HEIGHT = 480
+_FRAME_FPS = 30
+# 0..100 JPEG quality on the output stream. 35 at 480p is ~10-15 KB/frame ⇒
+# ~3.5 Mbps at 30 fps, comfortably under the FRC field's 4 Mbps cap.
+_JPEG_QUALITY = 35
 
 _FOOT_TO_M = 0.3048
 _GRAVITY_MPS2 = 9.81
 
-# 30 sample points along the trajectory is plenty visually and keeps per-frame
-# overlay work low — at 60 the python-side line drawing dominated the budget.
-_ARC_SAMPLES = 30
+# 25 sample points along the trajectory is plenty visually.
+_ARC_SAMPLES = 25
+
+# Recompute the overlay layer at most this often. The camera frame still
+# passes through at full fps; only the overlay's HUD/arc/buttons lag a couple
+# of frames. The driver can't tell the difference at 6-7 Hz overlay vs 30 Hz.
+_OVERLAY_REFRESH_S = 0.15
 _LADDER_TICKS_FT = (5, 10, 15, 20, 25)
 
 
@@ -617,32 +621,66 @@ def _draw_gamepad_panel(frame: np.ndarray) -> None:
         )
 
 
-# ===== orchestrator =====
+# ===== overlay caching =====
+# Render the entire HUD into a (H, W, 3) buffer + (H, W) bool mask off-line, on
+# a refresh interval. Per camera frame we just do one fancy-indexed write
+# (frame[mask] = buf[mask]) — sub-millisecond — instead of running every line/
+# circle/text routine. Camera frames still pass through at full fps; only the
+# HUD/arc/buttons lag _OVERLAY_REFRESH_S behind reality, which is invisible to
+# the driver at the 6-7 Hz refresh rate this implies.
 
-def _draw_overlay(frame: np.ndarray, fps: float) -> None:
+# Module-level cache so capture loop can read it cheaply.
+_overlay_buf: np.ndarray | None = None
+_overlay_mask: np.ndarray | None = None
+_overlay_last_built: float = 0.0
+_overlay_lock = threading.Lock()
+
+
+def _build_full_overlay(fps: float) -> tuple[np.ndarray, np.ndarray]:
+    """Render the HUD onto a black scratch buffer; return (buf, mask).
+
+    `mask` marks every pixel touched by the overlay so the apply step doesn't
+    blackout untouched regions. The sentinel is "any non-zero pixel" — we
+    ensure the HUD background bar uses a non-zero color (which it does;
+    _HUD_BG is (18, 18, 22), so even the dimmest non-touched pixel reads as 0).
+    """
     fov = tunables.sight_fov_deg()
     cam_h = tunables.sight_camera_height_m()
     tilt = tunables.sight_camera_tilt_rad()
     exit_angle = math.radians(tunables.sight_exit_angle_deg())
     release_h = tunables.sight_release_height_m()
     speed_per_rps = tunables.sight_speed_per_rps()
-
     rps = tunables.shooter_velocity_rps()
     dial_ft = tunables.shooter_distance_feet()
     velocity = max(0.1, rps * speed_per_rps)
     focal_y = _focal_y_px(fov)
 
-    _draw_distance_ladder(frame, cam_h, tilt, focal_y)
+    buf = np.zeros((_FRAME_HEIGHT, _FRAME_WIDTH, 3), dtype=np.uint8)
+    _draw_distance_ladder(buf, cam_h, tilt, focal_y)
     x_land_m = _draw_arc_and_reticle(
-        frame, cam_h, tilt, focal_y, velocity, exit_angle, release_h
+        buf, cam_h, tilt, focal_y, velocity, exit_angle, release_h
     )
-    _draw_dial_line(frame, cam_h, tilt, focal_y, dial_ft)
-
+    _draw_dial_line(buf, cam_h, tilt, focal_y, dial_ft)
     predicted_ft = x_land_m / _FOOT_TO_M
-    _draw_top_hud(frame, dial_ft, predicted_ft, rps, fps)
-    _draw_gamepad_panel(frame)
-
+    _draw_top_hud(buf, dial_ft, predicted_ft, rps, fps)
+    _draw_gamepad_panel(buf)
     tunables.set_sight_predicted_landing_ft(predicted_ft)
+
+    mask = buf.any(axis=2)  # any pixel where we drew anything non-black
+    return buf, mask
+
+
+def _apply_overlay(frame: np.ndarray, fps: float) -> None:
+    global _overlay_buf, _overlay_mask, _overlay_last_built
+    now = time.monotonic()
+    if _overlay_buf is None or now - _overlay_last_built >= _OVERLAY_REFRESH_S:
+        new_buf, new_mask = _build_full_overlay(fps)
+        with _overlay_lock:
+            _overlay_buf = new_buf
+            _overlay_mask = new_mask
+            _overlay_last_built = now
+    if _overlay_buf is not None and _overlay_mask is not None:
+        frame[_overlay_mask] = _overlay_buf[_overlay_mask]
 
 
 def _maybe_calibrate() -> None:
@@ -683,37 +721,57 @@ def _capture_loop(sink, source) -> None:
         if dt > 1e-3:
             fps_est = (1 - alpha) * fps_est + alpha * (1.0 / dt)
         _maybe_calibrate()
-        _draw_overlay(frame, fps_est)
+        _apply_overlay(frame, fps_est)
         source.putFrame(frame)
 
 
 _OUTPUT_NAME = "Shooter Sight"
+_OUTPUT_PORT = 1182  # 1181 is the default cscore camera server
 
 
 def start() -> None:
-    """Open USB camera 0 and start the overlay stream."""
+    """Open USB camera 0 and start the overlay stream.
+
+    Two important shortcuts vs the previous version:
+    1. `setVideoMode` is atomic. The old `setResolution`+`setFPS`+`setPixel
+       Format` triple could partially apply, leaving the camera in a slow
+       fallback (YUYV instead of MJPEG). MJPEG-on-USB is hardware-accelerated;
+       YUYV at 480p exceeds USB 2.0 bandwidth and drops to a few fps.
+    2. We construct our own `MjpegServer` for the overlay output instead of
+       relying on `putVideo`'s auto-server. That guarantees `setCompression`
+       lands on the right server — the auto-named one was hit-or-miss to
+       look up by name.
+    """
     camera = CameraServer.startAutomaticCapture()
-    camera.setResolution(_FRAME_WIDTH, _FRAME_HEIGHT)
-    camera.setFPS(_FRAME_FPS)
-    camera.setPixelFormat(VideoMode.PixelFormat.kMJPEG)
+    try:
+        camera.setVideoMode(
+            VideoMode.PixelFormat.kMJPEG, _FRAME_WIDTH, _FRAME_HEIGHT, _FRAME_FPS
+        )
+    except Exception:
+        # Fall back to the per-property setters if the atomic call isn't
+        # available on this cscore wheel.
+        camera.setResolution(_FRAME_WIDTH, _FRAME_HEIGHT)
+        camera.setFPS(_FRAME_FPS)
+        camera.setPixelFormat(VideoMode.PixelFormat.kMJPEG)
 
     sink = CameraServer.getVideo()
-    source = CameraServer.putVideo(_OUTPUT_NAME, _FRAME_WIDTH, _FRAME_HEIGHT)
 
-    # Pin output JPEG quality on every MjpegServer cscore created. Without
-    # this, dashboard's "compression: 0" lets the field bandwidth limiter
-    # silently throttle the stream to a crawl.
-    # putVideo names its server "serve_<source name>"; startAutomaticCapture
-    # for a USB camera names its server "serve_USB Camera 0" (or similar).
-    # We don't know the camera's exact server name, so dial down both: the
-    # default lookup and our explicit overlay-output server.
-    for name in (None, f"serve_{_OUTPUT_NAME}"):
-        try:
-            srv = CameraServer.getServer() if name is None else CameraServer.getServer(name)
-            srv.setCompression(_JPEG_QUALITY)
-            srv.setDefaultCompression(_JPEG_QUALITY)
-        except Exception:
-            pass
+    # Build the output stream by hand so compression definitely applies to it.
+    source = CvSource(
+        _OUTPUT_NAME,
+        VideoMode.PixelFormat.kBGR,
+        _FRAME_WIDTH,
+        _FRAME_HEIGHT,
+        _FRAME_FPS,
+    )
+    out_server = MjpegServer(f"serve_{_OUTPUT_NAME}", _OUTPUT_PORT)
+    out_server.setSource(source)
+    out_server.setCompression(_JPEG_QUALITY)
+    out_server.setDefaultCompression(_JPEG_QUALITY)
+    # Publish to NetworkTables so the dashboard finds it under
+    # /CameraPublisher/Shooter Sight (matches the Elastic widget topic).
+    CameraServer.addCamera(source)
+    CameraServer.addServer(out_server)
 
     thread = threading.Thread(
         target=_capture_loop, args=(sink, source), name="shooter-sight", daemon=True

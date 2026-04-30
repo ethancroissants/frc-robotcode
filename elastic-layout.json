@@ -158,11 +158,11 @@
               "topic": "/CameraPublisher/Shooter Sight",
               "period": 0.06,
               "rotation_turns": 0,
-              "compression": 25,
-              "fps": 20,
+              "compression": 35,
+              "fps": 30,
               "resolution": [
-                800.0,
-                600.0
+                640.0,
+                480.0
               ]
             }
           },
