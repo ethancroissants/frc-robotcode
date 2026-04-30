@@ -1,0 +1,24 @@
+[Unit]
+Description=Cold Fusion Sight (camera + control web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Installer rewrites these via `sed` at install time so the service runs as
+# whichever user holds the install dir (typically `orangepi`).
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+EnvironmentFile=-__INSTALL_DIR__/sight.env
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=3
+# v4l2 needs read access to /dev/video0; that's `video` group on Debian.
+SupplementaryGroups=video
+# Sane resource limits — the relay shouldn't ever balloon, but if it does
+# we'd rather have systemd kick it than starve the rest of the Pi.
+LimitNOFILE=4096
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

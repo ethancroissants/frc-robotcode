@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1280, initial-scale=1" />
+  <title>Cold Fusion Sight</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚡</span>
+      <span class="brand-name">COLD&nbsp;FUSION&nbsp;SIGHT</span>
+    </div>
+    <div class="status-line">
+      <span id="conn-pill" class="pill pill-bad">DISCONNECTED</span>
+      <span id="aim-pill" class="pill">AIM&nbsp;IDLE</span>
+    </div>
+    <div class="readouts">
+      <div class="readout"><span class="lbl">DIAL</span><span class="val" id="r-dial">--.- ft</span></div>
+      <div class="readout"><span class="lbl">PRED</span><span class="val" id="r-pred">--.- ft</span></div>
+      <div class="readout"><span class="lbl">RPS</span><span class="val" id="r-rps">--.-</span></div>
+      <div class="readout"><span class="lbl">LIDAR</span><span class="val" id="r-laser">-- m</span></div>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- ============ Camera + click-to-aim ============ -->
+    <section class="camera-card">
+      <div class="card-header">
+        <span>FIELD VIEW</span>
+        <span class="hint">click anywhere to fire there</span>
+      </div>
+      <div class="camera-frame" id="camera-frame">
+        <img id="stream" src="/stream.mjpg" alt="camera feed" draggable="false" />
+        <!-- Overlay layer: drawn in the browser, no rio overhead. -->
+        <svg id="overlay" preserveAspectRatio="none" viewBox="0 0 1000 1000">
+          <!-- Crosshair -->
+          <g id="crosshair" stroke="rgba(255,255,255,0.4)" stroke-width="1.5" fill="none">
+            <line x1="500" y1="0" x2="500" y2="1000" />
+            <line x1="0" y1="500" x2="1000" y2="500" />
+            <circle cx="500" cy="500" r="8" />
+          </g>
+          <!-- Last-clicked target marker (positioned by JS). -->
+          <g id="target-marker" style="display:none">
+            <circle id="target-ring" r="22" fill="none"
+                    stroke="#ffd400" stroke-width="3" />
+            <circle id="target-dot" r="3" fill="#ffd400" />
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <!-- ============ Right rail: controls ============ -->
+    <aside class="rail">
+      <!-- Dial control -->
+      <div class="card">
+        <div class="card-header">SHOT DISTANCE</div>
+        <div class="dial-row">
+          <button class="ghost square" data-dial="-1">−1</button>
+          <button class="ghost square" data-dial="-0.5">−½</button>
+          <div class="dial-display"><span id="dial-big">--.-</span><span class="unit">ft</span></div>
+          <button class="ghost square" data-dial="+0.5">+½</button>
+          <button class="ghost square" data-dial="+1">+1</button>
+        </div>
+      </div>
+
+      <!-- LaserCAN -->
+      <div class="card">
+        <div class="card-header">LIDAR (LaserCAN)</div>
+        <div class="laser-row">
+          <div class="laser-num" id="laser-big">--.--</div>
+          <div class="laser-unit">meters</div>
+          <span class="pill" id="laser-pill">NO READING</span>
+        </div>
+        <button class="primary" id="apply-laser">USE&nbsp;AS&nbsp;DIAL</button>
+      </div>
+
+      <!-- Gamepad mirror -->
+      <div class="card">
+        <div class="card-header">OPERATOR</div>
+        <div class="gamepad">
+          <div class="dpad">
+            <div class="dpad-cell empty" data-pov="NW"></div>
+            <div class="dpad-cell" data-pov="N">▲</div>
+            <div class="dpad-cell empty" data-pov="NE"></div>
+            <div class="dpad-cell" data-pov="W">◀</div>
+            <div class="dpad-cell center" data-pov="C"></div>
+            <div class="dpad-cell" data-pov="E">▶</div>
+            <div class="dpad-cell empty" data-pov="SW"></div>
+            <div class="dpad-cell" data-pov="S">▼</div>
+            <div class="dpad-cell empty" data-pov="SE"></div>
+          </div>
+          <div class="buttons">
+            <div class="bumpers">
+              <div class="bump" data-btn="LB">LB</div>
+              <div class="bump" data-btn="RB">RB</div>
+            </div>
+            <div class="face">
+              <div class="face-btn face-y" data-btn="Y">Y</div>
+              <div class="face-btn face-x" data-btn="X">X</div>
+              <div class="face-btn face-b" data-btn="B">B</div>
+              <div class="face-btn face-a" data-btn="A">A</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Calibrate -->
+      <div class="card">
+        <div class="card-header">CALIBRATE SIGHT</div>
+        <p class="card-help">Dial the green line onto a real target, enter that target's true distance, hit calibrate.</p>
+        <div class="cal-row">
+          <input id="cal-true" type="number" inputmode="decimal" step="0.1" placeholder="true distance (ft)" />
+          <button class="primary" id="cal-go">CALIBRATE</button>
+        </div>
+      </div>
+
+      <!-- Auto-aim status / cancel -->
+      <div class="card">
+        <div class="card-header">AUTO AIM</div>
+        <div class="aim-status" id="aim-status">IDLE</div>
+        <button class="danger" id="aim-cancel">CANCEL</button>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="bottombar">
+    <span id="fps-meter" class="dim">stream: -- fps</span>
+    <span id="ts" class="dim"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -19,6 +19,7 @@ import constants
 import gamepads
 import motorcontrollers
 import tunables
+from commands.auto_aim import AutoAim
 from commands.auto_fire import AutoFire
 from commands.cease_fire import CeaseFire
 from commands.clear_out import ClearOut
@@ -47,6 +48,7 @@ from commands.stop_kicker import StopKicker
 from commands.stop_shooter import StopShooter
 from generated import tuner_constants
 from subsystems.elevator_subsystem import ElevatorSubsystem
+from subsystems.lasercan_subsystem import LaserCanSubsystem
 from subsystems.operator_subsystem import OperatorSubsystem
 from telemetry import Telemetry
 
@@ -55,6 +57,7 @@ class RobotContainer:
     # Static (class-level) subsystems, matching the Java layout
     operator = OperatorSubsystem()
     elevator = ElevatorSubsystem()
+    lasercan = LaserCanSubsystem()
     targetingMessage = ""
 
     def __init__(self):
@@ -252,6 +255,32 @@ class RobotContainer:
         )
         gamepads.operatorController.povDown().onTrue(
             InstantCommand(lambda: tunables.bump_shooter_distance(-0.5)).ignoringDisable(True)
+        )
+
+        # Pi click-to-aim: every time the Pi increments /Sight/Aim/RequestId,
+        # schedule a fresh AutoAim. We watch the value and edge-trigger.
+        self._last_aim_request_id = 0
+
+        def _new_aim_request() -> bool:
+            from wpilib import SmartDashboard
+            rid = int(SmartDashboard.getNumber("Sight/Aim/RequestId", 0))
+            if rid > self._last_aim_request_id and SmartDashboard.getBoolean(
+                "Sight/Aim/Requested", False
+            ):
+                self._last_aim_request_id = rid
+                return True
+            return False
+
+        Trigger(_new_aim_request).onTrue(
+            DeferredCommand(
+                lambda: AutoAim(
+                    self.drivetrain,
+                    RobotContainer.operator,
+                    RobotContainer.lasercan,
+                ),
+                RobotContainer.operator,
+                self.drivetrain,
+            )
         )
 
         self.drivetrain.register_telemetry(self.logger.telemeterize)

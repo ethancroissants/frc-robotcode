@@ -48,6 +48,7 @@ NICE_TITLES: dict[str, str] = {
     "README.md": "Overview (README)",
     "guide.md": "Build / Deploy / Driver Station Guide",
     "elastic.md": "Elastic Dashboard & Tunables",
+    "orangepi.md": "Vision Pi (Orange Pi 5) — Setup Guide",
 }
 
 

@@ -441,8 +441,41 @@ def _main_logic(extra: list[str]) -> int:
     rc = run_deploy(extra)
     if rc == 0:
         disable_firewall_for_ds()
+        deploy_to_orangepi()
     result_box(rc == 0, rc)
     return rc
+
+
+def deploy_to_orangepi() -> None:
+    """After a successful rio deploy, push the latest code to the Pi too.
+
+    Skipped silently if the Pi was never set up (no .orangepi_cfg). The
+    Pi has its own code (orangepi/ folder) plus mirrors of any tunables
+    the rio just published, so it's worth keeping the two in lockstep
+    on every Deploy press.
+
+    On failure we warn but don't fail the whole deploy — the rio code
+    is already running, and the Pi can be re-pushed with `Update Vision
+    Pi` once the user investigates.
+    """
+    repo = os.path.dirname(os.path.abspath(__file__))
+    cfg_path = os.path.join(repo, ".orangepi_cfg")
+    if not os.path.exists(cfg_path):
+        info("Vision Pi not configured — skipping Pi deploy.")
+        info("(Run `python setup_orangepi.py --ui` to set it up.)")
+        return
+
+    step("Deploying to Vision Pi")
+    cmd = [sys.executable, "update_orangepi.py"]
+    if ui_mode.is_active():
+        rc = ui_mode.get_app().stream_subprocess(cmd)
+    else:
+        rc = subprocess.run(cmd, cwd=repo).returncode
+    if rc == 0:
+        ok("Pi update complete.")
+    else:
+        warn(f"Pi update failed (rc={rc}). Robot code is fine — re-run "
+             "`Update Vision Pi` to retry.")
 
 
 def disable_firewall_for_ds() -> None:

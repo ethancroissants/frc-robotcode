@@ -108,6 +108,11 @@ def shooter_distance_feet() -> float:
     return SmartDashboard.getNumber(_SHOOTER_DISTANCE, _DEFAULT_SHOOTER_DISTANCE_FEET)
 
 
+def set_shooter_distance_feet(value: float) -> None:
+    """Programmatically nudge the dial — used by AutoAim and the Pi UI."""
+    SmartDashboard.putNumber(_SHOOTER_DISTANCE, max(0.0, value))
+
+
 def bump_shooter_distance(delta_feet: float) -> None:
     """Nudge the dashboard shot distance. Used by the camera-sight POV bindings."""
     new_value = max(0.0, shooter_distance_feet() + delta_feet)

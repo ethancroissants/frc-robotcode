@@ -13,6 +13,10 @@ requires = [
     "robotpy-commands-v2",
     "phoenix6",
     "robotpy-pathplannerlib",
+    # grapplefrc: vendor SDK for the Grapple Robotics LaserCAN sensor.
+    "grapplefrc",
+    # cscore + numpy stay in the requires list because tests / sim still
+    # reference vision.py; the rio no longer publishes a stream itself.
     "robotpy-cscore",
     "numpy",
 ]

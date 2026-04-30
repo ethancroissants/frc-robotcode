@@ -8,13 +8,43 @@ import wpilib
 from commands2 import CommandScheduler
 from phoenix6 import HootAutoReplay
 from phoenix6.controls import NeutralOut
-from wpilib import DriverStation
+from wpilib import DriverStation, SmartDashboard, XboxController
 
 import gamepads
 import tunables
-import vision
 from generated import tuner_constants
 from robotcontainer import RobotContainer
+
+
+# Gamepad-state mirror for the Pi UI — published every robotPeriodic so the
+# web client's "OPERATOR" panel stays in sync with reality without the Pi
+# having to know which buttons are which.
+_OP_BUTTONS = (
+    ("A", int(XboxController.Button.kA)),
+    ("B", int(XboxController.Button.kB)),
+    ("X", int(XboxController.Button.kX)),
+    ("Y", int(XboxController.Button.kY)),
+    ("LB", int(XboxController.Button.kLeftBumper)),
+    ("RB", int(XboxController.Button.kRightBumper)),
+)
+
+
+def _publish_operator_state() -> None:
+    """Mirror the operator joystick to /SmartDashboard/Sight/Buttons/*.
+
+    Cheap (1 POV read + 6 raw button reads); runs from robotPeriodic so it
+    matches the loop rate the Pi expects.
+    """
+    js = gamepads.operatorJoyStick
+    try:
+        SmartDashboard.putNumber("Sight/Buttons/POV", js.getPOV())
+    except Exception:
+        SmartDashboard.putNumber("Sight/Buttons/POV", -1)
+    for label, idx in _OP_BUTTONS:
+        try:
+            SmartDashboard.putBoolean(f"Sight/Buttons/{label}", js.getRawButton(idx))
+        except Exception:
+            SmartDashboard.putBoolean(f"Sight/Buttons/{label}", False)
 
 
 class MyRobot(wpilib.TimedRobot):
@@ -45,13 +75,15 @@ class MyRobot(wpilib.TimedRobot):
             HootAutoReplay().with_timestamp_replay().with_joystick_replay()
         )
 
-        # USB camera with overlaid aim line; operator D-pad ramps shot distance.
-        vision.start()
+        # Camera + overlay live on the Orange Pi 5 now (see orangepi/server.py).
+        # The Pi connects to NetworkTables and reads the same tunables we publish;
+        # we just need to mirror the operator gamepad so its UI lights up.
 
     def robotPeriodic(self) -> None:
         self.m_timeAndJoystickReplay.update()
         CommandScheduler.getInstance().run()
         tunables.update(self.isEnabled())
+        _publish_operator_state()
 
     def disabledInit(self) -> None:
         # Phoenix 6 caches the last control request and resumes it on re-enable. Without this,

@@ -630,6 +630,81 @@ def main() -> int:
         if not ok_:
             messagebox.showerror("SSH", msg, parent=root)
 
+    def _orangepi_target() -> tuple[str, str] | None:
+        """Resolve the saved Pi user/host from .orangepi_cfg."""
+        cfg_path = REPO / ".orangepi_cfg"
+        if not cfg_path.exists():
+            return None
+        try:
+            import json
+            data = json.loads(cfg_path.read_text())
+        except Exception:
+            return None
+        host = data.get("host")
+        user = data.get("user", "orangepi")
+        if not host:
+            return None
+        return user, host
+
+    def _open_sight_ui_clicked() -> None:
+        target = _orangepi_target()
+        if target is None:
+            messagebox.showinfo(
+                "Sight UI",
+                "Vision Pi isn't set up yet. Click \"Set up Vision Pi\" first.",
+                parent=root,
+            )
+            return
+        _, host = target
+        url = f"http://{host}:8080/"
+        import webbrowser
+        webbrowser.open(url)
+
+    def _ssh_pi_clicked() -> None:
+        target = _orangepi_target()
+        if target is None:
+            messagebox.showinfo(
+                "SSH",
+                "Vision Pi isn't set up yet. Click \"Set up Vision Pi\" first.",
+                parent=root,
+            )
+            return
+        user, host = target
+        # _open_ssh_terminal hardcodes admin@host for the rio; Pi uses orangepi.
+        # Build the same per-platform spawning logic but with the right user.
+        target_str = f"{user}@{host}"
+        try:
+            if platform.system() == "Windows":
+                wt = shutil.which("wt.exe") or shutil.which("wt")
+                if wt:
+                    subprocess.Popen([wt, "ssh", target_str])
+                else:
+                    subprocess.Popen(f'start "" cmd /k ssh {target_str}', shell=True)
+            elif platform.system() == "Darwin":
+                script = (
+                    f'tell application "Terminal" to do script "ssh {target_str}"\n'
+                    'tell application "Terminal" to activate'
+                )
+                subprocess.Popen(["osascript", "-e", script])
+            else:
+                for term, args in (
+                    ("gnome-terminal", ["--", "ssh", target_str]),
+                    ("konsole", ["-e", "ssh", target_str]),
+                    ("xfce4-terminal", ["-e", f"ssh {target_str}"]),
+                    ("kitty", ["ssh", target_str]),
+                    ("alacritty", ["-e", "ssh", target_str]),
+                    ("xterm", ["-e", f"ssh {target_str}"]),
+                ):
+                    if shutil.which(term):
+                        subprocess.Popen([term, *args])
+                        break
+                else:
+                    messagebox.showerror(
+                        "SSH", "No supported terminal emulator found.", parent=root,
+                    )
+        except Exception as e:
+            messagebox.showerror("SSH", f"Failed to open terminal: {e}", parent=root)
+
     prep_running = {"v": False}
 
     def _prep_bot_clicked() -> None:
@@ -749,6 +824,28 @@ def main() -> int:
                 "Open a terminal connected to the rio over SSH.",
                 _ssh_clicked,
                 "ssh",
+            ),
+        ]),
+        ("Vision Pi", [
+            (
+                "Set up Vision Pi",
+                "Install the camera + sight web UI on the Orange Pi 5.",
+                lambda: _launch(["setup_orangepi.py", "--ui"]),
+            ),
+            (
+                "Update Vision Pi",
+                "Push the latest sight code to the Pi and restart.",
+                lambda: _launch(["update_orangepi.py", "--ui"]),
+            ),
+            (
+                "Open Sight UI",
+                "Open the Pi's camera/control web page in your browser.",
+                _open_sight_ui_clicked,
+            ),
+            (
+                "SSH to Vision Pi",
+                "Open a terminal connected to the Pi over SSH.",
+                _ssh_pi_clicked,
             ),
         ]),
         ("Tools", [

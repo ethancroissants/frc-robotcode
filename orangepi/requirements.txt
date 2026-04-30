@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+# pyntcore ships the same NT4 client the rio uses, so the Pi speaks the
+# protocol Elastic/Shuffleboard already speak.
+pyntcore>=2026.1.0

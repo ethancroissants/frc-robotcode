@@ -55,6 +55,17 @@ class ControllerIDs:
     TEST_DRIVE_ID = 40
 
 
+class CANIDs:
+    """Non-motor CAN device IDs.
+
+    Keep these out of ControllerIDs (motors) and CancoderIDs (steer encoders)
+    so the table reads as "what's on the bus" instead of "all motor numbers".
+    """
+    # Grapple Robotics LaserCAN — 1D time-of-flight distance sensor used for
+    # range-to-target. Configure this ID with Grapple's web flasher.
+    LASERCAN = 36
+
+
 class CancoderIDs:
     FRONT_LEFT_CANCODER_ID = 32
     FRONT_RIGHT_CANCODER_ID = 34
