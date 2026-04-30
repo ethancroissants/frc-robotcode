@@ -444,13 +444,14 @@ def _draw_top_hud(
 # used by the underlying HAL, so we can just read .getRawButton(int) on the
 # operatorJoyStick (which is what the bindings already do via JoystickButton).
 _XB = XboxController.Button
+# .value isn't available — robotpy 2026 exposes these as plain ints already.
 _BUTTON_LAYOUT: list[tuple[str, int]] = [
-    ("LB", _XB.kLeftBumper.value),
-    ("RB", _XB.kRightBumper.value),
-    ("A", _XB.kA.value),
-    ("B", _XB.kB.value),
-    ("X", _XB.kX.value),
-    ("Y", _XB.kY.value),
+    ("LB", int(_XB.kLeftBumper)),
+    ("RB", int(_XB.kRightBumper)),
+    ("A", int(_XB.kA)),
+    ("B", int(_XB.kB)),
+    ("X", int(_XB.kX)),
+    ("Y", int(_XB.kY)),
 ]
 
 
