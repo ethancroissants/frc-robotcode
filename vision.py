@@ -45,18 +45,23 @@ import tunables
 
 
 # ===== Stream config =====
-_FRAME_WIDTH = 1280
-_FRAME_HEIGHT = 720
+# 800x600 MJPEG is universal on USB webcams and stays inside the rio's
+# decode→numpy-overlay→re-encode budget. 720p worked but the rio's Cortex-A9
+# couldn't sustain it (~0.5 fps measured). 800x600 was also what the driver
+# asked for ("like 800p, 20fps-ish").
+_FRAME_WIDTH = 800
+_FRAME_HEIGHT = 600
 _FRAME_FPS = 20
-# 0..100 JPEG quality. ~30 keeps a 720p stream comfortably under the FRC
-# field's 4 Mbps cap while still being legible — at -1 (default) cscore lets
-# the dashboard request whatever it wants and the field arbitrarily throttles.
-_JPEG_QUALITY = 30
+# 0..100 JPEG quality on the output stream. 25 keeps a 600-line stream under
+# the FRC field's 4 Mbps cap; without this pin the field throttles to ~1 fps.
+_JPEG_QUALITY = 25
 
 _FOOT_TO_M = 0.3048
 _GRAVITY_MPS2 = 9.81
 
-_ARC_SAMPLES = 60
+# 30 sample points along the trajectory is plenty visually and keeps per-frame
+# overlay work low — at 60 the python-side line drawing dominated the budget.
+_ARC_SAMPLES = 30
 _LADDER_TICKS_FT = (5, 10, 15, 20, 25)
 
 
@@ -122,18 +127,35 @@ _GLYPH_W, _GLYPH_H = 5, 7
 _GLYPH_KERN = 1
 
 
-def _build_glyph_table() -> tuple[dict[str, np.ndarray], np.ndarray]:
-    """Pre-bake glyphs into bool arrays so render is just a slice copy."""
-    table: dict[str, np.ndarray] = {}
+_PRE_SCALE_LEVELS = (1, 2, 3)
+
+
+def _build_glyph_table() -> tuple[
+    dict[int, dict[str, np.ndarray]], dict[int, np.ndarray]
+]:
+    """Pre-bake glyphs at every scale we use so render is one slice copy.
+
+    We rebuild glyph masks per-frame in the old code via np.kron, which costs
+    real time at 20 fps × dozens of glyphs. Baking once at module load reduces
+    each text draw to a fancy-indexed write.
+    """
+    base: dict[str, np.ndarray] = {}
     for ch, rows in _FONT_5X7.items():
         arr = np.zeros((_GLYPH_H, _GLYPH_W), dtype=bool)
         for r, row in enumerate(rows):
             for c, px in enumerate(row):
                 arr[r, c] = px == "#"
-        table[ch] = arr
-    fallback = np.zeros((_GLYPH_H, _GLYPH_W), dtype=bool)
-    fallback[1:-1, 1:-1] = True  # solid block for missing chars
-    return table, fallback
+        base[ch] = arr
+    base_fallback = np.zeros((_GLYPH_H, _GLYPH_W), dtype=bool)
+    base_fallback[1:-1, 1:-1] = True
+
+    scaled: dict[int, dict[str, np.ndarray]] = {}
+    fallbacks: dict[int, np.ndarray] = {}
+    for s in _PRE_SCALE_LEVELS:
+        block = np.ones((s, s), dtype=bool)
+        scaled[s] = {ch: np.kron(arr, block) for ch, arr in base.items()}
+        fallbacks[s] = np.kron(base_fallback, block)
+    return scaled, fallbacks
 
 
 _GLYPHS, _GLYPH_FALLBACK = _build_glyph_table()
@@ -160,13 +182,12 @@ def _draw_text(
     h, w = frame.shape[:2]
     cell_w = _GLYPH_W * scale
     cell_h = _GLYPH_H * scale
+    glyphs = _GLYPHS[scale]
+    fallback = _GLYPH_FALLBACK[scale]
     cx = x
     for ch in text.upper():
-        glyph = _GLYPHS.get(ch, _GLYPH_FALLBACK)
-        # Skip work entirely if glyph is offscreen.
         if cx + cell_w > 0 and cx < w and y + cell_h > 0 and y < h:
-            # Block-pixel scale via kron, then mask into frame.
-            mask = np.kron(glyph, np.ones((scale, scale), dtype=bool))
+            mask = glyphs.get(ch, fallback)
             mh, mw = mask.shape
             x0 = max(cx, 0)
             y0 = max(y, 0)
@@ -214,6 +235,13 @@ def _draw_segment(
     color: np.ndarray,
     thickness: int,
 ) -> None:
+    """Bresenham-ish line; thickness is stamped via broadcasted offsets.
+
+    The old version had a python-level double loop over (dy, dx), one fancy-
+    indexed numpy write per offset. At thickness=5 with 30 segments per arc
+    that was 30×25 = 750 writes per arc. Broadcasting collapses it to a
+    single fancy-indexed write per segment.
+    """
     h, w = frame.shape[:2]
     x0, y0 = p0
     x1, y1 = p1
@@ -223,11 +251,19 @@ def _draw_segment(
     xs = np.linspace(x0, x1, n).round().astype(np.int32)
     ys = np.linspace(y0, y1, n).round().astype(np.int32)
     half = thickness // 2
-    for dy in range(-half, half + 1):
-        yy = np.clip(ys + dy, 0, h - 1)
-        for dx in range(-half, half + 1):
-            xx = np.clip(xs + dx, 0, w - 1)
-            frame[yy, xx] = color
+    if thickness <= 1:
+        yy = np.clip(ys, 0, h - 1)
+        xx = np.clip(xs, 0, w - 1)
+        frame[yy, xx] = color
+        return
+    offs = np.arange(-half, half + 1, dtype=np.int32)
+    # (n, 1) + (1, k) → (n, k) of pixel rows; same for cols.
+    yy = np.clip(ys[:, None] + offs[None, :], 0, h - 1)
+    xx = np.clip(xs[:, None] + offs[None, :], 0, w - 1)
+    # Outer-product the row/col offsets to cover the kxk stamp.
+    yy_full = np.broadcast_to(yy[:, :, None], (n, offs.size, offs.size)).reshape(-1)
+    xx_full = np.broadcast_to(xx[:, None, :], (n, offs.size, offs.size)).reshape(-1)
+    frame[yy_full, xx_full] = color
 
 
 def _draw_polyline(
@@ -376,20 +412,16 @@ def _draw_arc_and_reticle(
         if proj is not None:
             pts.append(proj)
     if len(pts) >= 2:
-        # Draw shadow underneath for readability against bright backgrounds.
-        _draw_polyline(frame, pts, _BLACK, 5)
         _draw_polyline(frame, pts, _ARC_COLOR, 3)
 
     landing = _project_to_pixel(x_land_m, 0.0, cam_h, tilt, focal_y)
     if landing is not None:
         cx, cy = landing
-        # Crosshair reticle: outer ring + inner cross + small center dot.
-        _draw_circle(frame, landing, 18, _BLACK, 4)
-        _draw_circle(frame, landing, 18, _RETICLE_COLOR, 2)
-        _draw_segment(frame, (cx - 24, cy), (cx - 8, cy), _RETICLE_COLOR, 2)
-        _draw_segment(frame, (cx + 8, cy), (cx + 24, cy), _RETICLE_COLOR, 2)
-        _draw_segment(frame, (cx, cy - 24), (cx, cy - 8), _RETICLE_COLOR, 2)
-        _draw_segment(frame, (cx, cy + 8), (cx, cy + 24), _RETICLE_COLOR, 2)
+        _draw_circle(frame, landing, 16, _RETICLE_COLOR, 2)
+        _draw_segment(frame, (cx - 22, cy), (cx - 8, cy), _RETICLE_COLOR, 2)
+        _draw_segment(frame, (cx + 8, cy), (cx + 22, cy), _RETICLE_COLOR, 2)
+        _draw_segment(frame, (cx, cy - 22), (cx, cy - 8), _RETICLE_COLOR, 2)
+        _draw_segment(frame, (cx, cy + 8), (cx, cy + 22), _RETICLE_COLOR, 2)
         _fill_rect(frame, cx - 1, cy - 1, 3, 3, _RETICLE_COLOR)
     return x_land_m
 
@@ -401,7 +433,6 @@ def _draw_dial_line(
     if proj is None:
         return
     _, py = proj
-    _draw_horizontal_line(frame, py, _BLACK, 5)
     _draw_horizontal_line(frame, py, _DIAL_COLOR, 3)
     label = f"DIAL {dial_ft:.1f}FT".replace(".", ".")
     _draw_text(frame, label, 12, py - 22, _DIAL_COLOR, scale=2)
@@ -414,22 +445,21 @@ def _draw_top_hud(
     rps: float,
     fps: float,
 ) -> None:
-    bar_h = 56
+    bar_h = 38
     _fill_rect(frame, 0, 0, _FRAME_WIDTH, bar_h, _HUD_BG)
     _fill_rect(frame, 0, bar_h, _FRAME_WIDTH, 2, _HUD_BORDER)
 
     title = "SHOOTER SIGHT"
-    _draw_text(frame, title, 16, 14, _ACCENT, scale=3)
+    _draw_text(frame, title, 12, 9, _ACCENT, scale=2)
 
-    # Right-aligned cluster of three readouts.
     items = [
-        (f"DIAL {dial_ft:5.1f} FT", _DIAL_COLOR),
-        (f"PRED {predicted_ft:5.1f} FT", _ARC_COLOR),
-        (f"RPS {rps:5.1f}", _WHITE),
+        (f"DIAL {dial_ft:4.1f}FT", _DIAL_COLOR),
+        (f"PRED {predicted_ft:4.1f}FT", _ARC_COLOR),
+        (f"RPS {rps:4.1f}", _WHITE),
         (f"FPS {fps:4.1f}", _DIM),
     ]
-    pad = 24
-    x = _FRAME_WIDTH - 16
+    pad = 14
+    x = _FRAME_WIDTH - 8
     for text, color in reversed(items):
         tw, th = _measure_text(text, scale=2)
         x -= tw
@@ -487,20 +517,20 @@ def _draw_gamepad_panel(frame: np.ndarray) -> None:
     """Bottom-right cluster: D-pad cross + LB/RB + ABXY badges."""
     pov, pressed = _read_operator_state()
 
-    panel_w = 280
-    panel_h = 200
-    panel_x = _FRAME_WIDTH - panel_w - 16
-    panel_y = _FRAME_HEIGHT - panel_h - 16
+    panel_w = 220
+    panel_h = 156
+    panel_x = _FRAME_WIDTH - panel_w - 10
+    panel_y = _FRAME_HEIGHT - panel_h - 10
 
     _fill_rect(frame, panel_x, panel_y, panel_w, panel_h, _HUD_BG)
     _stroke_rect(frame, panel_x, panel_y, panel_w, panel_h, _HUD_BORDER, 2)
 
-    _draw_text(frame, "OPERATOR", panel_x + 12, panel_y + 10, _ACCENT, scale=2)
+    _draw_text(frame, "OPERATOR", panel_x + 8, panel_y + 7, _ACCENT, scale=1)
 
     # ----- D-pad (3x3) on the left half -----
-    cell = 36
-    dpad_x = panel_x + 18
-    dpad_y = panel_y + 50
+    cell = 28
+    dpad_x = panel_x + 12
+    dpad_y = panel_y + 30
     grid = [
         ("NW", "N", "NE"),
         ("W", "C", "E"),
@@ -542,33 +572,33 @@ def _draw_gamepad_panel(frame: np.ndarray) -> None:
                     _draw_segment(frame, (cx + 6, cy - 6), (cx - 6, cy + 6), mark_color, 3)
 
     # ----- Bumper + face buttons on the right half -----
-    badge_x = panel_x + 150
-    badge_y = panel_y + 50
+    badge_x = panel_x + 116
+    badge_y = panel_y + 30
 
     # LB / RB across the top of this column.
     for i, label in enumerate(["LB", "RB"]):
-        x = badge_x + i * 56
+        x = badge_x + i * 46
         y = badge_y
         on = pressed.get(label, False)
         color = _BTN_ON if on else _BTN_OFF
-        _fill_rect(frame, x, y, 48, 24, color)
-        _stroke_rect(frame, x, y, 48, 24, _BTN_BORDER, 1)
+        _fill_rect(frame, x, y, 40, 20, color)
+        _stroke_rect(frame, x, y, 40, 20, _BTN_BORDER, 1)
         tw, th = _measure_text(label, scale=2)
         _draw_text(
             frame,
             label,
-            x + (48 - tw) // 2,
-            y + (24 - th) // 2,
+            x + (40 - tw) // 2,
+            y + (20 - th) // 2,
             _BLACK if on else _BTN_LABEL,
             scale=2,
         )
 
-    # A/B/X/Y as a 2x2 grid of round-ish square badges.
+    # A/B/X/Y as a 2x2 grid of square badges.
     grid_x = badge_x
-    grid_y = badge_y + 36
+    grid_y = badge_y + 28
     badges = [("Y", 0, 0), ("X", 1, 0), ("B", 0, 1), ("A", 1, 1)]
-    badge_size = 40
-    spacing = 8
+    badge_size = 32
+    spacing = 6
     for label, gx, gy in badges:
         x = grid_x + gx * (badge_size + spacing)
         y = grid_y + gy * (badge_size + spacing)
@@ -576,14 +606,14 @@ def _draw_gamepad_panel(frame: np.ndarray) -> None:
         color = _BTN_ON if on else _BTN_OFF
         _fill_rect(frame, x, y, badge_size, badge_size, color)
         _stroke_rect(frame, x, y, badge_size, badge_size, _BTN_BORDER, 1)
-        tw, th = _measure_text(label, scale=3)
+        tw, th = _measure_text(label, scale=2)
         _draw_text(
             frame,
             label,
             x + (badge_size - tw) // 2,
             y + (badge_size - th) // 2,
             _BLACK if on else _BTN_LABEL,
-            scale=3,
+            scale=2,
         )
 
 
@@ -657,6 +687,9 @@ def _capture_loop(sink, source) -> None:
         source.putFrame(frame)
 
 
+_OUTPUT_NAME = "Shooter Sight"
+
+
 def start() -> None:
     """Open USB camera 0 and start the overlay stream."""
     camera = CameraServer.startAutomaticCapture()
@@ -665,18 +698,22 @@ def start() -> None:
     camera.setPixelFormat(VideoMode.PixelFormat.kMJPEG)
 
     sink = CameraServer.getVideo()
-    source = CameraServer.putVideo("Shooter Sight", _FRAME_WIDTH, _FRAME_HEIGHT)
+    source = CameraServer.putVideo(_OUTPUT_NAME, _FRAME_WIDTH, _FRAME_HEIGHT)
 
-    # Pin output JPEG quality. Without this, the dashboard's "compression: 0"
-    # request lets the field bandwidth limiter drop us to ~1 fps under load.
-    try:
-        out_server = CameraServer.getServer()
-        out_server.setCompression(_JPEG_QUALITY)
-        out_server.setDefaultCompression(_JPEG_QUALITY)
-    except Exception:
-        # Older cscore wheels don't expose getServer(); the stream still works,
-        # just at whatever quality the dashboard requests.
-        pass
+    # Pin output JPEG quality on every MjpegServer cscore created. Without
+    # this, dashboard's "compression: 0" lets the field bandwidth limiter
+    # silently throttle the stream to a crawl.
+    # putVideo names its server "serve_<source name>"; startAutomaticCapture
+    # for a USB camera names its server "serve_USB Camera 0" (or similar).
+    # We don't know the camera's exact server name, so dial down both: the
+    # default lookup and our explicit overlay-output server.
+    for name in (None, f"serve_{_OUTPUT_NAME}"):
+        try:
+            srv = CameraServer.getServer() if name is None else CameraServer.getServer(name)
+            srv.setCompression(_JPEG_QUALITY)
+            srv.setDefaultCompression(_JPEG_QUALITY)
+        except Exception:
+            pass
 
     thread = threading.Thread(
         target=_capture_loop, args=(sink, source), name="shooter-sight", daemon=True
