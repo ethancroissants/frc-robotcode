@@ -558,6 +558,21 @@ def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
         "sudo apt-get update",
         f"echo '[bridge] installing: {' '.join(apt_missing)}'",
         f"sudo apt-get install -y {pkgs_q}",
+        # Top up the wheel cache from PyPI while we're online. Laptop-side
+        # `pip download --platform/--abi` can miss wheels for extras like
+        # `uvicorn[standard]` (uvloop, httptools) due to strict tag filters;
+        # running pip on the Pi itself avoids that — it picks the exact
+        # tags Python here can use. Idempotent: pip skips wheels already
+        # present in the destination dir.
+        f"if [ -f {shlex.quote(INSTALL_DIR)}/requirements.txt ]; then",
+        "  echo '[bridge] topping up Pi wheel cache from PyPI…'",
+        f"  mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
+        f"  python3 -m pip download --only-binary=:all: "
+        f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
+        f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels "
+        "|| echo '[bridge] wheel top-up had errors; continuing — '"
+        "'install.sh will surface anything still missing' >&2",
+        "fi",
         "echo '[bridge] done — disconnecting'",
     ]
     script = "\n".join(script_lines) + "\n"
