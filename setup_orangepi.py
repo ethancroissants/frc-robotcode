@@ -435,10 +435,23 @@ def push_files(cfg: dict) -> bool:
     return True
 
 
-def run_remote_install(cfg: dict) -> bool:
+def run_remote_install(cfg: dict, password: str | None = None) -> bool:
     _step("Installing on the Pi (apt + venv + systemd + static IP)")
     target = ssh_target(cfg)
     team = _read_team_number() or "1279"
+
+    # install.sh runs `sudo apt-get`, `sudo systemctl`, etc. — and most Pi
+    # default users (pi/orangepi) require a password for sudo. The SSH
+    # subprocess has piped stdin (no tty), so sudo can't prompt; we need to
+    # arrange passwordless sudo for the duration of the setup. The matching
+    # _remove_temp_nopasswd() call runs once *all* setup steps that need
+    # sudo are done (write_team, setup_cross_ssh).
+    if not _try_install_temp_nopasswd(cfg, password) and password is None:
+        _info(
+            "Tip: if install.sh fails on 'sudo: a password is required', "
+            "re-run setup and type the Pi user's password."
+        )
+
     # install.sh reads $TEAM and pins the static IP at 10.TE.AM.11.
     install_cmd = (
         f"cd {shlex.quote(INSTALL_DIR)} && "
@@ -449,6 +462,100 @@ def run_remote_install(cfg: dict) -> bool:
         _fail("Remote install failed; check the details panel.")
         return False
     _ok("Service installed and started.")
+    return True
+
+
+def _remove_temp_nopasswd(cfg: dict) -> None:
+    """Remove the temp sudoers rule we created in _try_install_temp_nopasswd.
+
+    Idempotent — does nothing if the file isn't there. Safe to call even if
+    we never installed a rule (the `sudo rm -f` either succeeds against an
+    existing file, or no-ops because the file's missing).
+    """
+    user = cfg.get("user", DEFAULT_USER)
+    target = ssh_target(cfg)
+    _info("Removing temporary sudoers rule…")
+    _stream([
+        "ssh", target,
+        f"sudo rm -f /etc/sudoers.d/cf-install-{user}",
+    ])
+
+
+def _try_install_temp_nopasswd(cfg: dict, password: str | None) -> bool:
+    """Install a temporary `NOPASSWD: ALL` sudoers entry for the install user.
+
+    install.sh will sudo many times (apt, systemctl, tee /etc/...). We don't
+    want to plumb the password through every shell prompt, and the user's
+    default sudo config almost always requires a password. Solution: use the
+    password ONCE via paramiko (so it doesn't leak into shell logs) to drop
+    a sudoers.d snippet that grants this user passwordless sudo for the rest
+    of the run. The caller is responsible for removing it after install.sh
+    finishes — we wire that into the cleanup tail of the install command.
+
+    Returns True if the rule was installed, False otherwise (e.g. no password
+    provided, paramiko unavailable, or sudo refused). On False the caller
+    falls back to running install.sh straight; sudo will prompt and likely
+    fail, but the user gets a clear error.
+    """
+    user = cfg.get("user", DEFAULT_USER)
+    host = cfg["host"]
+
+    if password is None:
+        _info(
+            "No password on hand — install.sh will need passwordless sudo "
+            "configured on the Pi, or it'll fail. (Re-run setup with the "
+            "password if it does.)"
+        )
+        return False
+
+    paramiko = _ensure_paramiko()
+    if paramiko is None:
+        return False
+
+    _info("Granting temporary passwordless sudo for the install…")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        # Use key auth (already bootstrapped) so we don't have to re-send the
+        # password over the wire — but the *target* command does need it once,
+        # to authenticate the initial sudo. We pipe it via stdin to `sudo -S`,
+        # which keeps it out of any process listing.
+        client.connect(
+            hostname=host, username=user, timeout=10,
+            allow_agent=True, look_for_keys=True,
+        )
+    except Exception as e:
+        _fail(f"Couldn't connect to {host} to set up sudo: {e}")
+        return False
+
+    rule = f"{user} ALL=(ALL) NOPASSWD:ALL\n"
+    # `sudo -S -p ''` reads password from stdin with no prompt; we then have
+    # sudo write the sudoers fragment via tee. visudo would be safer but is
+    # interactive — we sanity-check our own input and use `chmod 0440` after.
+    sudo_cmd = (
+        "sudo -S -p '' tee /etc/sudoers.d/cf-install-" + user + " >/dev/null "
+        "&& sudo -S -p '' chmod 0440 /etc/sudoers.d/cf-install-" + user
+    )
+    try:
+        stdin, stdout, stderr = client.exec_command(sudo_cmd, timeout=15)
+        stdin.write(password + "\n")  # for the first sudo -S
+        stdin.write(rule)
+        stdin.write(password + "\n")  # for the chmod sudo -S
+        stdin.flush()
+        stdin.channel.shutdown_write()
+        rc = stdout.channel.recv_exit_status()
+        err = stderr.read().decode(errors="replace").strip()
+    except Exception as e:
+        client.close()
+        _fail(f"Failed to install temp sudoers rule: {e}")
+        return False
+    finally:
+        client.close()
+
+    if rc != 0:
+        _fail(f"Couldn't install temp sudoers rule (rc={rc}): {err}")
+        return False
+    _ok("Temporary passwordless sudo installed (will be removed after install).")
     return True
 
 
@@ -647,10 +754,13 @@ def write_team(cfg: dict) -> None:
     target = ssh_target(cfg)
     team = _read_team_number() or "1279"
     env_line = f"TEAM={team}"
-    # Replace any existing TEAM= line atomically; create if missing.
+    # sight.env is created by install.sh as the login user (`cat > ... <<EOF`),
+    # so it's user-owned — no sudo needed for sed/tee. The `systemctl restart`
+    # is the one privileged op, and install.sh installs a NOPASSWD sudoers
+    # rule scoped to exactly that command, so it works without a password.
     cmd = (
-        f"sudo sed -i.bak '/^TEAM=/d' {INSTALL_DIR}/sight.env && "
-        f"echo {shlex.quote(env_line)} | sudo tee -a {INSTALL_DIR}/sight.env >/dev/null && "
+        f"sed -i.bak '/^TEAM=/d' {INSTALL_DIR}/sight.env && "
+        f"echo {shlex.quote(env_line)} >> {INSTALL_DIR}/sight.env && "
         f"sudo systemctl restart cold-fusion-sight"
     )
     _stream(["ssh", "-t", target, cmd])
@@ -686,18 +796,28 @@ def _logic() -> int:
     # passwordless ssh / rsync.
     if not bootstrap_ssh_key(cfg, password):
         return 1
-    # Drop the password from memory now that keys are in place.
-    password = None  # noqa: F841
 
     if not push_files(cfg):
         return 1
 
-    if not run_remote_install(cfg):
+    # Pass the password through to the install step so we can grant
+    # temporary passwordless sudo for apt/systemctl. Drop it from memory
+    # immediately afterwards — _remove_temp_nopasswd uses key auth, not
+    # the password.
+    install_ok = run_remote_install(cfg, password=password)
+    password = None  # noqa: F841
+    if not install_ok:
+        # Best effort: still try to clean up the NOPASSWD rule even if
+        # install.sh itself failed midway.
+        _remove_temp_nopasswd(cfg)
         return 1
 
     write_team(cfg)
     write_target_file(cfg)
     setup_cross_ssh(cfg)
+
+    # All sudo-using steps are done; revoke the temporary NOPASSWD rule.
+    _remove_temp_nopasswd(cfg)
 
     url = f"http://{cfg['host']}:8080/"
     _ok(f"Pi running. Open {url} in a browser.")
