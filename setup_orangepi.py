@@ -499,6 +499,12 @@ def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
         "  echo 'nmcli not installed — Pi OS Bookworm/Trixie should have it; aborting' >&2",
         "  exit 2",
         "fi",
+        # If wifi was previously toggled off (nmcli radio wifi off, or a
+        # soft rfkill), wlan0 shows up as 'unavailable' and `connection up`
+        # fails with a confusing "No suitable device" error. Force it on.
+        "if command -v rfkill >/dev/null; then sudo rfkill unblock wifi || true; fi",
+        "sudo nmcli radio wifi on || true",
+        "sleep 1",
         f"sudo nmcli connection add type wifi con-name cf-temp-install "
         f"ifname wlan0 ssid {ssid_q} >/dev/null",
     ]
@@ -509,9 +515,25 @@ def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
         )
     script_lines += [
         "sudo nmcli connection modify cf-temp-install connection.autoconnect no",
+        # The robot ethernet has no internet. Force wlan0's default route to win
+        # over eth0's by giving it a lower (better) route-metric than the
+        # default ethernet metric (100). Otherwise apt traffic goes out eth0
+        # and dies with "No route to host".
+        "sudo nmcli connection modify cf-temp-install "
+        "ipv4.route-metric 50 ipv6.route-metric 50",
         "echo '[bridge] connecting wlan0 to the temp WiFi…'",
         "sudo nmcli connection up cf-temp-install",
-        "sleep 3",  # let DHCP / DNS settle
+        "sleep 5",  # let DHCP / DNS / route table settle
+        "echo '[bridge] verifying internet via wlan0…'",
+        # Quick reachability + route check so we fail fast with a clear message
+        # rather than letting apt produce a wall of errors.
+        "if ! curl -s --max-time 8 --interface wlan0 -o /dev/null "
+        "http://archive.raspberrypi.com/debian/dists/trixie/InRelease; then",
+        "  echo '[bridge] wlan0 cannot reach the package mirror.' >&2",
+        "  echo '[bridge] route table:' >&2",
+        "  ip route >&2 || true",
+        "  exit 3",
+        "fi",
         "echo '[bridge] running apt-get update'",
         "sudo apt-get update",
         f"echo '[bridge] installing: {' '.join(apt_missing)}'",
