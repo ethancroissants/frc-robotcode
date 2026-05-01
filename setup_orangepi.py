@@ -411,12 +411,26 @@ def push_files(cfg: dict) -> bool:
             return False
         rc = _stream([
             "scp", "-r",
-            *(str(p) for p in ORANGEPI_DIR.iterdir() if p.name != ".venv"),
+            *(str(p) for p in ORANGEPI_DIR.iterdir()
+              if p.name not in (".venv", "__pycache__")),
             f"{target}:{INSTALL_DIR}/",
         ])
     if rc != 0:
         _fail("File transfer failed.")
         return False
+
+    # Strip CRLF line endings on shell scripts. Windows checkouts often save
+    # *.sh with \r\n, and bash chokes with `$'\r': command not found` on the
+    # very first line. Fixing it here means we don't have to police
+    # .gitattributes / line-ending settings on every contributor's laptop.
+    _info("Normalizing line endings on shell scripts…")
+    fix_cmd = (
+        f"find {shlex.quote(INSTALL_DIR)} -type f "
+        f"\\( -name '*.sh' -o -name 'install.sh' \\) "
+        f"-exec sed -i 's/\\r$//' {{}} +"
+    )
+    _stream(["ssh", target, fix_cmd])
+
     _ok("Files copied.")
     return True
 
