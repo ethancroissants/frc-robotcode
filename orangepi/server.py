@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import cv2
-import ntcore
+import nt4_client
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
@@ -269,43 +269,45 @@ class NTBridge:
     }
 
     def __init__(self) -> None:
-        self.inst = ntcore.NetworkTableInstance.getDefault()
-        self.inst.startClient4("OrangePi-Sight")
+        # Pure-Python NT4 client (see nt4_client.py for the why). API is
+        # shaped like a slimmed-down ntcore so this code stays familiar.
+        self.inst = nt4_client.Client("OrangePi-Sight")
         if NT_SERVER:
-            self.inst.setServer(NT_SERVER)
+            self.inst.set_server(NT_SERVER)
             log.info("NT4: connecting to %s", NT_SERVER)
         else:
-            self.inst.setServerTeam(TEAM)
+            self.inst.set_server_team(TEAM)
             log.info("NT4: connecting to team %d", TEAM)
+        self.inst.start()
 
-        self._d_pubs: dict[str, ntcore.DoublePublisher] = {}
-        self._i_pubs: dict[str, ntcore.IntegerPublisher] = {}
-        self._b_pubs: dict[str, ntcore.BooleanPublisher] = {}
-        self._d_subs: dict[str, ntcore.DoubleSubscriber] = {}
-        self._i_subs: dict[str, ntcore.IntegerSubscriber] = {}
-        self._b_subs: dict[str, ntcore.BooleanSubscriber] = {}
-        self._s_subs: dict[str, ntcore.StringSubscriber] = {}
+        self._d_pubs: dict[str, nt4_client.Publisher] = {}
+        self._i_pubs: dict[str, nt4_client.Publisher] = {}
+        self._b_pubs: dict[str, nt4_client.Publisher] = {}
+        self._d_subs: dict[str, nt4_client.Subscriber] = {}
+        self._i_subs: dict[str, nt4_client.Subscriber] = {}
+        self._b_subs: dict[str, nt4_client.Subscriber] = {}
+        self._s_subs: dict[str, nt4_client.Subscriber] = {}
 
         for key, path in self.READ_DOUBLE.items():
-            self._d_subs[key] = self.inst.getDoubleTopic(path).subscribe(0.0)
+            self._d_subs[key] = self.inst.subscribe(path, "double", 0.0)
         for key, path in self.READ_BOOL.items():
-            self._b_subs[key] = self.inst.getBooleanTopic(path).subscribe(False)
+            self._b_subs[key] = self.inst.subscribe(path, "boolean", False)
         for key, path in self.READ_INT.items():
-            self._i_subs[key] = self.inst.getIntegerTopic(path).subscribe(0)
+            self._i_subs[key] = self.inst.subscribe(path, "int", 0)
         for key, path in self.READ_STR.items():
-            self._s_subs[key] = self.inst.getStringTopic(path).subscribe("idle")
+            self._s_subs[key] = self.inst.subscribe(path, "string", "idle")
 
         for key, path in self.WRITE_DOUBLE.items():
-            self._d_pubs[key] = self.inst.getDoubleTopic(path).publish()
+            self._d_pubs[key] = self.inst.publish(path, "double")
         for key, path in self.WRITE_INT.items():
-            self._i_pubs[key] = self.inst.getIntegerTopic(path).publish()
+            self._i_pubs[key] = self.inst.publish(path, "int")
         for key, path in self.WRITE_BOOL.items():
-            self._b_pubs[key] = self.inst.getBooleanTopic(path).publish()
+            self._b_pubs[key] = self.inst.publish(path, "boolean")
 
         self._shoot_request_id = 0
 
     def snapshot(self) -> dict:
-        snap: dict[str, object] = {"connected": self.inst.isConnected()}
+        snap: dict[str, object] = {"connected": self.inst.is_connected()}
         for key, sub in self._d_subs.items():
             snap[key] = sub.get()
         for key, sub in self._b_subs.items():
