@@ -419,121 +419,6 @@ def ensure_tkinter() -> bool:
     return False
 
 
-def stage_pi_wheels(repo: Path) -> bool:
-    """Pre-download Pi-compatible wheels on the laptop into orangepi/vendor/wheels/.
-
-    The Orange Pi / Raspberry Pi 5 lives on the robot's WiFi (no internet),
-    so it can't `pip install` from PyPI. setup_orangepi.py later pushes this
-    cache to the Pi and runs `pip install --no-index --find-links vendor/wheels`.
-
-    Cached by hash of (requirements.txt + py + arch). Re-runs that don't
-    change inputs are a no-op.
-
-    Skipped silently if there's no orangepi/requirements.txt — teams that
-    don't use the Pi don't need this.
-    """
-    op_dir = repo / "orangepi"
-    req = op_dir / "requirements.txt"
-    if not req.exists():
-        return True  # not a failure — team just doesn't use a Pi
-
-    step("Staging Pi (orangepi) wheels for offline install")
-    wheels_dir = op_dir / "vendor" / "wheels"
-    wheels_dir.mkdir(parents=True, exist_ok=True)
-    stamp = wheels_dir / ".cache-stamp"
-
-    # Pi target. Default to Pi 5 + Pi OS Trixie (aarch64, Python 3.13). If a
-    # previous run of setup_orangepi.py probed a different Pi, it stashed the
-    # actual values in .orangepi_cfg — prefer those when present.
-    py, arch = "3.13", "aarch64"
-    cfg_path = repo / ".orangepi_cfg"
-    if cfg_path.exists():
-        import json
-        try:
-            cfg = json.loads(cfg_path.read_text())
-            pi_env = cfg.get("pi_env") or {}
-            py = str(pi_env.get("py") or py)
-            arch = str(pi_env.get("arch") or arch)
-        except Exception:
-            pass
-
-    cache_key = _pi_wheel_cache_key(req, py, arch)
-    if stamp.exists() and stamp.read_text().strip() == cache_key:
-        n = len(list(wheels_dir.glob("*.whl"))) + len(list(wheels_dir.glob("*.tar.gz")))
-        if n > 0:
-            ok(f"wheel cache valid for Python {py}/{arch} ({n} wheels) — skipping")
-            return True
-
-    plat_tags = {
-        "aarch64": ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
-        "arm64":   ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
-        "armv7l":  ["manylinux2014_armv7l", "linux_armv7l"],
-        "x86_64":  ["manylinux_2_28_x86_64", "manylinux2014_x86_64", "linux_x86_64"],
-    }.get(arch)
-    if not plat_tags:
-        warn(f"Unknown Pi arch '{arch}' — skipping wheel staging.")
-        return False
-
-    info(f"Target: Python {py}, {arch}")
-
-    # Wipe stale wheels so we don't ship mismatched versions if requirements
-    # changed since the last successful stage.
-    for old in wheels_dir.glob("*.whl"):
-        old.unlink()
-    for old in wheels_dir.glob("*.tar.gz"):
-        old.unlink()
-    if stamp.exists():
-        stamp.unlink()
-
-    # pyntcore (and friends) live on WPILib's jfrog mirror, not PyPI — same
-    # source `robotpy sync` pulls from. We add it as an extra index so pip
-    # can find aarch64 wheels of WPILib-published packages.
-    extra_index = (
-        "https://wpilib.jfrog.io/artifactory/api/pypi/"
-        "wpilib-python-release-2026/simple"
-    )
-    base_cmd = [
-        sys.executable, "-m", "pip", "download",
-        "--only-binary", ":all:",
-        "--python-version", py,
-        "--implementation", "cp",
-        "--extra-index-url", extra_index,
-        *sum((["--platform", t] for t in plat_tags), []),
-        "-r", str(req),
-        "-d", str(wheels_dir),
-    ]
-    abi_cmd = base_cmd + ["--abi", f"cp{py.replace('.', '')}"]
-
-    try:
-        run("pip download (Pi wheels, strict ABI)", abi_cmd)
-    except subprocess.CalledProcessError:
-        info("Strict ABI failed — retrying with looser matching for pure-python deps.")
-        try:
-            run("pip download (Pi wheels, loose)", base_cmd)
-        except subprocess.CalledProcessError as e:
-            fail(f"Pi wheel download failed (exit {e.returncode}).")
-            info(
-                "If a specific package has no aarch64 wheel, you may need to "
-                "build it on the Pi during a one-time online session, or "
-                "remove it from orangepi/requirements.txt."
-            )
-            return False
-
-    n = len(list(wheels_dir.glob("*.whl"))) + len(list(wheels_dir.glob("*.tar.gz")))
-    stamp.write_text(cache_key + "\n")
-    ok(f"staged {n} wheel(s) in orangepi/vendor/wheels/ (cached for next run)")
-    return True
-
-
-def _pi_wheel_cache_key(req_path: Path, py: str, arch: str) -> str:
-    """Hash of inputs that, when changed, invalidate the staged Pi wheel cache."""
-    import hashlib
-    h = hashlib.sha256()
-    h.update(req_path.read_bytes())
-    h.update(f"|py={py}|arch={arch}".encode())
-    return h.hexdigest()
-
-
 def _verify_requires_installed(requires: list[str]) -> list[str]:
     """Return the list of pyproject `requires` whose dist isn't installed.
 
@@ -737,18 +622,10 @@ def _main_logic() -> int:
             else:
                 ok("all project requirements verified installed")
 
-    # Stage Pi (orangepi/) wheels on the laptop while we still have internet.
-    # The Pi lives on the robot's WiFi (no internet), so setup_orangepi.py
-    # later just pushes these pre-downloaded wheels to the Pi and pip-installs
-    # them offline. Cached by hash of requirements.txt + py + arch — only
-    # re-downloads when one of those changes.
-    pi_wheels_ok = stage_pi_wheels(repo)
-
     step("Running checks")
     results: dict[str, bool] = {
         "git installed": git_ok,
         "project requirements installed": local_install_ok,
-        "Pi wheel cache staged": pi_wheels_ok,
     }
     if sys.platform.startswith("win"):
         results["FRC Driver Station installed"] = ds_ok

@@ -105,13 +105,10 @@ elif [ "$USE_LOCAL_WHEELS" = "1" ] && [ -d "$WHEELS_DIR" ] && \
    ls "$WHEELS_DIR"/*.whl >/dev/null 2>&1; then
   log "installing pip deps offline from $WHEELS_DIR"
   "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
-    --upgrade pip wheel || true
-  "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
     -r "$INSTALL_DIR/requirements.txt"
   echo "$PIP_STAMP_EXPECTED" > "$PIP_STAMP"
 else
   log "installing pip deps online (no local wheel cache)"
-  "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
   echo "$PIP_STAMP_EXPECTED" > "$PIP_STAMP"
 fi

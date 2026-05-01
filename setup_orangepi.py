@@ -446,40 +446,42 @@ done
     return info
 
 
-def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
-    """Briefly connect the Pi's wlan0 to a user-supplied WiFi to run apt.
+def bridge_internet_for_setup(
+    cfg: dict, apt_missing: list[str], need_wheels: bool
+) -> bool:
+    """Briefly connect the Pi's wlan0 to a user-supplied WiFi to fetch deps.
 
-    This solves the chicken-and-egg of `python3-pip`/`libgl1`/etc. on a
+    Solves the chicken-and-egg of pip wheels and missing apt packages on a
     fresh Pi that lives on the FRC robot network (no internet). The Pi's
     ethernet to the robot stays untouched; we only toggle wlan0.
 
-    Flow on the Pi (one ssh round-trip):
-      1. nmcli adds a temporary connection profile `cf-temp-install`.
-      2. Brings it up on wlan0; DHCP/DNS settle.
-      3. apt-get update + apt-get install -y <missing>.
-      4. Down + delete the profile (trap EXIT — runs even on failure).
+    Inside the bridge we do whatever's needed in one shot:
+      - apt install for any missing system packages.
+      - `pip download -r requirements.txt` to populate vendor/wheels/.
 
-    Returns True on success. False if the user skipped, the WiFi connect
-    failed, or apt install failed. The caller handles aborting setup.
+    Both are skipped if not needed, so re-running setup after a successful
+    install is a no-op for this step (and the bridge isn't entered at all).
+
+    Returns True on success. False if the user skipped, WiFi failed, or
+    one of the subcommands failed.
     """
-    if not apt_missing:
-        return True
+    if not apt_missing and not need_wheels:
+        return True  # nothing to fetch — caller skips the bridge entirely
 
-    _step("Installing missing apt packages on the Pi (one-time internet bridge)")
-    _info(f"Missing: {' '.join(apt_missing)}")
+    _step("Fetching Pi dependencies (one-time internet bridge)")
+    if apt_missing:
+        _info(f"Missing apt packages: {' '.join(apt_missing)}")
+    if need_wheels:
+        _info("Pi wheel cache is empty/stale — will pip download from PyPI.")
     _info(
         "We'll briefly connect the Pi's WiFi (wlan0) to a network with "
-        "internet, install the packages, then disconnect. The Pi's robot "
+        "internet, fetch what's needed, then disconnect. The Pi's robot "
         "ethernet stays connected the whole time."
     )
 
     ssid = _ask_string("WiFi network name (SSID)", default="")
     if not ssid:
-        _fail("No SSID provided — skipping apt install.")
-        _info(
-            "Re-run setup with the SSID/password, or install on the Pi "
-            "manually with: sudo apt-get install -y " + " ".join(apt_missing)
-        )
+        _fail("No SSID provided — can't fetch Pi dependencies.")
         return False
     wifi_pass = _ask_password(
         f"Password for '{ssid}' (leave blank for open network)"
@@ -554,90 +556,80 @@ def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
         "else",
         "  echo '[bridge] could not read Date header — continuing anyway' >&2",
         "fi",
-        "echo '[bridge] running apt-get update'",
-        "sudo apt-get update",
-        f"echo '[bridge] installing: {' '.join(apt_missing)}'",
-        f"sudo apt-get install -y {pkgs_q}",
-        # Top up the wheel cache from PyPI while we're online. Laptop-side
-        # `pip download --platform/--abi` can miss wheels for extras like
-        # `uvicorn[standard]` (uvloop, httptools) due to strict tag filters;
-        # running pip on the Pi itself avoids that — it picks the exact
-        # tags Python here can use. Idempotent: pip skips wheels already
-        # present in the destination dir.
-        f"if [ -f {shlex.quote(INSTALL_DIR)}/requirements.txt ]; then",
-        "  echo '[bridge] topping up Pi wheel cache from PyPI…'",
-        f"  mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
-        f"  python3 -m pip download --only-binary=:all: "
-        f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
-        f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels "
-        "|| echo '[bridge] wheel top-up had errors; continuing — '"
-        "'install.sh will surface anything still missing' >&2",
-        "fi",
+    ]
+    if apt_missing:
+        script_lines += [
+            "echo '[bridge] running apt-get update'",
+            "sudo apt-get update",
+            f"echo '[bridge] installing: {' '.join(apt_missing)}'",
+            f"sudo apt-get install -y {pkgs_q}",
+        ]
+    if need_wheels:
+        # Download wheels on the Pi itself — that way pip picks the right
+        # platform/ABI tags automatically (no laptop-side --platform guesswork)
+        # and properly resolves extras like `uvicorn[standard]` → uvloop +
+        # httptools. Stamps vendor/wheels/.cache-stamp with sha256 of
+        # requirements.txt so future runs can skip the bridge if unchanged.
+        script_lines += [
+            f"if [ ! -f {shlex.quote(INSTALL_DIR)}/requirements.txt ]; then",
+            "  echo '[bridge] requirements.txt missing — was push_files run?' >&2",
+            "  exit 4",
+            "fi",
+            "echo '[bridge] downloading Pi wheels from PyPI…'",
+            f"mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
+            f"python3 -m pip download --only-binary=:all: "
+            f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
+            f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
+            f"sha256sum {shlex.quote(INSTALL_DIR)}/requirements.txt "
+            f"| awk '{{print $1}}' "
+            f"> {shlex.quote(INSTALL_DIR)}/vendor/wheels/.cache-stamp",
+            "echo '[bridge] wheels downloaded.'",
+        ]
+    script_lines += [
         "echo '[bridge] done — disconnecting'",
     ]
     script = "\n".join(script_lines) + "\n"
 
     rc = _stream(["ssh", "-t", target, f"bash -c {shlex.quote(script)}"])
     if rc != 0:
-        _fail("Internet bridge / apt install failed (rc={}).".format(rc))
+        _fail(f"Internet bridge failed (rc={rc}).")
         _info(
             "Common causes: wrong WiFi password, SSID typo, weak signal, "
             "or the Pi has no wlan0 (e.g. wired-only model)."
         )
         return False
-    _ok("apt packages installed; temp WiFi disconnected.")
+    _ok("Pi dependencies fetched; temp WiFi disconnected.")
     return True
 
 
-def check_pi_wheel_cache(pi_env: dict) -> bool:
-    """Verify the laptop has staged Pi wheels (created by setup.py).
+def pi_wheel_cache_status(cfg: dict) -> bool:
+    """Probe the Pi to see whether vendor/wheels/ matches our requirements.txt.
 
-    setup_orangepi.py never downloads — wheel staging happens in setup.py
-    while the laptop is on real internet. This function just verifies the
-    cache is present and matches the Pi's Python/arch. If it doesn't, we
-    point the user at setup.py (which they should run on home WiFi).
+    Returns True if the cache is present and the stamp matches the local
+    requirements.txt sha256 — meaning we don't need to enter the bridge to
+    re-download. False otherwise (empty cache, missing stamp, or mismatch).
+
+    Idempotency anchor: lets re-runs of setup_orangepi.py skip the WiFi
+    prompt entirely once the Pi has been fully provisioned.
     """
-    _step("Checking Pi wheel cache")
-    wheels_dir = ORANGEPI_DIR / "vendor" / "wheels"
-    stamp = wheels_dir / ".cache-stamp"
     req = ORANGEPI_DIR / "requirements.txt"
-
-    n_wheels = len(list(wheels_dir.glob("*.whl"))) if wheels_dir.exists() else 0
-    if n_wheels == 0 or not stamp.exists():
-        _fail("No Pi wheels staged on the laptop.")
-        _info(
-            "Run `python setup.py` while on a WiFi with internet — it "
-            "downloads Pi-compatible wheels into orangepi/vendor/wheels/. "
-            "Then come back to the robot's WiFi and re-run Vision Pi setup."
-        )
-        return False
-
-    py = pi_env.get("py", "?")
-    arch = pi_env.get("arch", "?")
-    expected = _wheel_cache_key(req, py, arch)
-    if stamp.read_text().strip() != expected:
-        _fail(
-            f"Pi wheel cache is stale or built for the wrong Python/arch "
-            f"(this Pi is Python {py} on {arch})."
-        )
-        _info(
-            "Re-run `python setup.py` on internet to refresh the cache — "
-            "it picks up the Pi's actual specs from .orangepi_cfg."
-        )
-        return False
-
-    _ok(f"Pi wheel cache OK ({n_wheels} wheels for Python {py}/{arch}).")
-    return True
-
-
-def _wheel_cache_key(req_path: Path, py: str, arch: str) -> str:
-    """Hash of inputs that, when changed, invalidate the staged wheel cache.
-    Mirrors _pi_wheel_cache_key in setup.py — keep them in sync."""
+    if not req.exists():
+        return True  # nothing to install
     import hashlib
-    h = hashlib.sha256()
-    h.update(req_path.read_bytes())
-    h.update(f"|py={py}|arch={arch}".encode())
-    return h.hexdigest()
+    local_hash = hashlib.sha256(req.read_bytes()).hexdigest()
+    target = ssh_target(cfg)
+    probe = (
+        f"cat {shlex.quote(INSTALL_DIR)}/vendor/wheels/.cache-stamp "
+        f"2>/dev/null || true"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", target, probe],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return False
+    return result.stdout.strip() == local_hash
 
 
 def check_reachable(cfg: dict) -> bool:
@@ -661,7 +653,11 @@ def push_files(cfg: dict) -> bool:
         # Trailing slash on the source = "copy contents into INSTALL_DIR".
         rc = _stream([
             "rsync", "-az", "--info=progress2",
-            "--delete", "--exclude=.venv", "--exclude=__pycache__",
+            "--delete",
+            "--exclude=.venv", "--exclude=__pycache__",
+            # Wheels are downloaded on the Pi inside the bridge; never push
+            # or delete them from the laptop side.
+            "--exclude=vendor/wheels",
             f"{ORANGEPI_DIR}/", f"{target}:{INSTALL_DIR}/",
         ])
         if rc != 0:
@@ -706,7 +702,21 @@ def _push_via_tar(target: str) -> bool:
     import tarfile
     import time
 
+    # Match the rsync exclusions: skip .venv, __pycache__ (build artifacts),
+    # and vendor/wheels (downloaded on the Pi during the bridge — never
+    # pushed from the laptop). Tar doesn't have rsync's --delete, so leaving
+    # an old dir on the Pi is harmless.
     skip_names = {".venv", "__pycache__"}
+    skip_rels = {Path("vendor") / "wheels"}
+
+    def _excluded(p: Path) -> bool:
+        if any(part in skip_names for part in p.parts):
+            return True
+        try:
+            rel = p.relative_to(ORANGEPI_DIR)
+        except ValueError:
+            return False
+        return any(rel == r or r in rel.parents for r in skip_rels)
 
     # Total expected size for the progress UI. Skips the same paths the
     # tar walk will skip — counters disagree slightly on dir entries, but
@@ -714,7 +724,7 @@ def _push_via_tar(target: str) -> bool:
     total_bytes = 0
     file_count = 0
     for p in ORANGEPI_DIR.rglob("*"):
-        if any(part in skip_names for part in p.parts):
+        if _excluded(p):
             continue
         if p.is_file():
             try:
@@ -762,8 +772,14 @@ def _push_via_tar(target: str) -> bool:
     def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
         # Drop excluded paths. arcname is relative — split on / works on both
         # platforms because tar normalizes separators internally.
-        for part in info.name.split("/"):
-            if part in skip_names:
+        parts = info.name.split("/")
+        if any(part in skip_names for part in parts):
+            return None
+        # info.name looks like './vendor/wheels/foo.whl'; drop leading '.'
+        rel_parts = [p for p in parts if p not in (".", "")]
+        for skip_rel in skip_rels:
+            sr_parts = list(skip_rel.parts)
+            if rel_parts[: len(sr_parts)] == sr_parts:
                 return None
         return info
 
@@ -1169,35 +1185,35 @@ def _logic() -> int:
         return 1
 
     # Probe the Pi (Python version + arch + which apt deps are missing).
-    # Saved into .orangepi_cfg so the next `python setup.py` run on home
-    # WiFi knows what Python/arch to download wheels for.
     pi_env = detect_pi_env(cfg)
     if pi_env is None:
-        return 1
-
-    # Verify the wheel cache that setup.py was supposed to have staged
-    # while on internet. If it's missing/stale, we tell the user to run
-    # setup.py on home WiFi and stop here.
-    if not check_pi_wheel_cache(pi_env):
         return 1
 
     if not push_files(cfg):
         return 1
 
-    # If apt packages are missing, briefly bridge the Pi's wlan0 to a
-    # user-supplied WiFi (laptop's robot-network connection stays put).
-    # We need temp NOPASSWD set up first since the bridge uses sudo for
-    # nmcli + apt-get. Set it up here so it's available across both
-    # bridge_internet_for_apt and run_remote_install.
-    if pi_env.get("apt_missing"):
+    # Decide whether the bridge needs to run. It does if:
+    #   - any apt dep is missing, OR
+    #   - the Pi's vendor/wheels/.cache-stamp doesn't match our local
+    #     requirements.txt (first install, or requirements.txt changed).
+    # Both checks happen post-push so the Pi has the latest requirements.txt.
+    apt_missing = pi_env.get("apt_missing") or []
+    wheels_ok = pi_wheel_cache_status(cfg)
+    need_bridge = bool(apt_missing) or not wheels_ok
+
+    if need_bridge:
+        # Temp NOPASSWD is needed because the bridge runs sudo for nmcli +
+        # apt-get; the same window also covers the install step below.
         if not _try_install_temp_nopasswd(cfg, password):
             _fail("Couldn't grant temporary sudo — re-run setup and enter password.")
             return 1
-        if not bridge_internet_for_apt(cfg, pi_env["apt_missing"]):
+        if not bridge_internet_for_setup(cfg, apt_missing, need_wheels=not wheels_ok):
             _remove_temp_nopasswd(cfg)
             return 1
-        # Apt deps are now installed — tell install.sh to skip the apt step.
         pi_env["apt_missing"] = []
+    else:
+        _step("Pi dependencies already satisfied — skipping internet bridge")
+        _ok("apt + wheel cache are up to date.")
 
     # Pass the password through to the install step so we can grant
     # temporary passwordless sudo for apt/systemctl. Drop it from memory
