@@ -39,25 +39,62 @@ GATEWAY="10.${TE}.${AM}.1"
 NETMASK_BITS=24
 
 # --- 1. apt deps -----------------------------------------------------------
+# The Pi normally lives on the FRC robot network with no internet. The
+# laptop-side setup (setup_orangepi.py) probes which apt packages are
+# already installed and passes the missing ones via $APT_MISSING. If
+# nothing's missing we skip apt entirely (the common case on a Pi OS Full
+# image, which already has libgl1/libglib2/v4l-utils/python3-venv).
+#
 # python deps: venv + pip
 # camera deps: ffmpeg (legacy passthrough fallback) + v4l-utils (debugging)
-# opencv deps: libgl1 + libglib2.0-0 are pulled in by opencv-python wheel at
+# opencv deps: libgl1 + libglib2.0-0(t64) are pulled in by opencv-python at
 #   import time, even on the -headless variant — without them you get
 #   "ImportError: libGL.so.1: cannot open shared object file" the first
 #   time the service tries to import cv2.
-log "installing apt packages"
-sudo apt-get update -y
-sudo apt-get install -y \
-  ffmpeg python3-venv python3-pip v4l-utils \
-  libgl1 libglib2.0-0
+APT_MISSING="${APT_MISSING:-}"
+if [ -n "$APT_MISSING" ]; then
+  log "apt packages still missing: $APT_MISSING"
+  # Try the local apt cache only (--no-download). Works iff the Pi was
+  # online previously and `apt-get update && apt-get install` had cached
+  # these. If not, we fail loud rather than silently skip.
+  if sudo apt-get install -y --no-download $APT_MISSING 2>/dev/null; then
+    log "installed from local apt cache"
+  else
+    warn "The Pi has no internet and these packages aren't cached locally."
+    warn "Connect the Pi to a network with internet ONCE for first-time"
+    warn "install (a phone hotspot works), then re-run setup. Missing:"
+    warn "  $APT_MISSING"
+    warn "Alternatively install them by hand on the Pi and re-run setup:"
+    warn "  sudo apt-get install -y $APT_MISSING"
+    fail "apt deps unsatisfied — can't continue."
+  fi
+else
+  log "all required apt packages already installed — skipping apt step"
+fi
 
 # --- 2. python venv --------------------------------------------------------
 log "creating venv"
 if [ ! -d "$INSTALL_DIR/.venv" ]; then
   python3 -m venv "$INSTALL_DIR/.venv"
 fi
-"$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
-"$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+
+# Offline pip install: setup_orangepi.py pre-downloads matching wheels into
+# vendor/wheels/ so the Pi never has to talk to PyPI. --no-index forces pip
+# to ignore the network entirely; --find-links points it at the local cache.
+USE_LOCAL_WHEELS="${USE_LOCAL_WHEELS:-0}"
+WHEELS_DIR="$INSTALL_DIR/vendor/wheels"
+if [ "$USE_LOCAL_WHEELS" = "1" ] && [ -d "$WHEELS_DIR" ] && \
+   ls "$WHEELS_DIR"/*.whl >/dev/null 2>&1; then
+  log "installing pip deps offline from $WHEELS_DIR"
+  "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
+    --upgrade pip wheel || true
+  "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
+    -r "$INSTALL_DIR/requirements.txt"
+else
+  log "installing pip deps online (no local wheel cache)"
+  "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
+  "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+fi
 
 # --- 3. environment file (TEAM/etc) ---------------------------------------
 # Touch the env file if missing so systemd doesn't error on EnvironmentFile=.

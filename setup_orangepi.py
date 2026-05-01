@@ -379,6 +379,121 @@ def bootstrap_ssh_key(cfg: dict, password: str | None) -> bool:
     return True
 
 
+def detect_pi_env(cfg: dict) -> dict | None:
+    """Probe the Pi for Python version, arch, and apt packages we'll need.
+
+    Returns a dict like {"py": "3.11", "arch": "aarch64", "apt_missing": [...]}
+    or None on failure. Run before staging wheels so the laptop downloads
+    matching artifacts (a Pi 5 wants `linux_aarch64` wheels for Python 3.11
+    or 3.13; a Pi 4 32-bit would want `armv7l`).
+    """
+    _step("Probing the Pi")
+    target = ssh_target(cfg)
+    probe = (
+        "echo PY:$(python3 -c 'import sys;print(\"%d.%d\"%sys.version_info[:2])');"
+        "echo ARCH:$(uname -m);"
+        "for p in ffmpeg python3-venv python3-pip v4l-utils libgl1 "
+        "libglib2.0-0 libglib2.0-0t64; do "
+        "  dpkg -s $p >/dev/null 2>&1 && echo HAVE:$p || echo NEED:$p; "
+        "done"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", target, probe],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        _fail(f"Couldn't probe Pi: {e}")
+        return None
+    if result.returncode != 0:
+        _fail(f"Pi probe failed: {result.stderr.strip()}")
+        return None
+
+    info: dict = {"apt_missing": [], "apt_have": []}
+    for line in result.stdout.splitlines():
+        if line.startswith("PY:"):
+            info["py"] = line[3:].strip()
+        elif line.startswith("ARCH:"):
+            info["arch"] = line[5:].strip()
+        elif line.startswith("NEED:"):
+            info["apt_missing"].append(line[5:].strip())
+        elif line.startswith("HAVE:"):
+            info["apt_have"].append(line[5:].strip())
+    if "py" not in info or "arch" not in info:
+        _fail(f"Couldn't parse probe output: {result.stdout!r}")
+        return None
+    _ok(f"Pi: Python {info['py']}, arch {info['arch']}")
+    return info
+
+
+def stage_pip_wheels(cfg: dict, pi_env: dict) -> bool:
+    """Download Pi-compatible wheels on the laptop into orangepi/vendor/wheels/.
+
+    The Pi has no internet (it lives on the FRC robot network), so the laptop
+    pre-fetches every wheel from PyPI matching the Pi's Python version + arch
+    and `push_files` ships them along with the rest of the orangepi/ folder.
+    install.sh later does `pip install --no-index --find-links vendor/wheels`.
+    """
+    _step("Pre-downloading Pi pip wheels on the laptop")
+    wheels_dir = ORANGEPI_DIR / "vendor" / "wheels"
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe stale wheels so we don't ship mismatched versions if pyproject /
+    # requirements.txt changed since the last run.
+    for old in wheels_dir.glob("*.whl"):
+        old.unlink()
+    for old in wheels_dir.glob("*.tar.gz"):
+        old.unlink()
+
+    arch = pi_env["arch"]
+    py = pi_env["py"]  # e.g. "3.11"
+    # Map kernel arch → pip platform tag(s). aarch64 / armv7l / x86_64 cover
+    # Pi 5 (64-bit), Pi 4 32-bit, and weird emulated builds respectively.
+    plat_tags = {
+        "aarch64": ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
+        "arm64":   ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
+        "armv7l":  ["manylinux2014_armv7l", "linux_armv7l"],
+        "x86_64":  ["manylinux_2_28_x86_64", "manylinux2014_x86_64", "linux_x86_64"],
+    }.get(arch)
+    if not plat_tags:
+        _fail(f"Unknown Pi arch '{arch}' — can't pick wheel platform tags.")
+        return False
+
+    req = ORANGEPI_DIR / "requirements.txt"
+    if not req.exists():
+        _fail(f"{req} missing.")
+        return False
+
+    cmd = [
+        sys.executable, "-m", "pip", "download",
+        "--only-binary", ":all:",
+        "--python-version", py,
+        "--implementation", "cp",
+        "--abi", f"cp{py.replace('.', '')}",
+        *sum((["--platform", t] for t in plat_tags), []),
+        "-r", str(req),
+        "-d", str(wheels_dir),
+    ]
+    rc = _stream(cmd)
+    if rc != 0:
+        # Some packages don't tag a specific abi (pure-python sdists); retry
+        # without --abi to let pip pick `none` ABI wheels too.
+        _info("Retrying without strict ABI pinning (some pure-python deps)…")
+        cmd_loose = [c for c in cmd if c not in ("--abi", f"cp{py.replace('.', '')}")]
+        rc = _stream(cmd_loose)
+    if rc != 0:
+        _fail("pip download failed — see details panel.")
+        _info(
+            "If a specific package has no aarch64 wheel, you may need to "
+            "build it on the Pi during a one-time online session, or "
+            "remove it from orangepi/requirements.txt."
+        )
+        return False
+
+    n = len(list(wheels_dir.glob("*.whl"))) + len(list(wheels_dir.glob("*.tar.gz")))
+    _ok(f"Staged {n} wheel(s) in orangepi/vendor/wheels/.")
+    return True
+
+
 def check_reachable(cfg: dict) -> bool:
     _step("Checking Pi connectivity")
     host = cfg["host"]
@@ -435,7 +550,9 @@ def push_files(cfg: dict) -> bool:
     return True
 
 
-def run_remote_install(cfg: dict, password: str | None = None) -> bool:
+def run_remote_install(
+    cfg: dict, password: str | None = None, pi_env: dict | None = None,
+) -> bool:
     _step("Installing on the Pi (apt + venv + systemd + static IP)")
     target = ssh_target(cfg)
     team = _read_team_number() or "1279"
@@ -452,10 +569,21 @@ def run_remote_install(cfg: dict, password: str | None = None) -> bool:
             "re-run setup and type the Pi user's password."
         )
 
-    # install.sh reads $TEAM and pins the static IP at 10.TE.AM.11.
+    # Tell install.sh which apt deps are missing (vs. already installed) so
+    # it can skip the apt step when everything's already present — the Pi
+    # is offline and apt would fail otherwise.
+    apt_missing = " ".join(pi_env["apt_missing"]) if pi_env else ""
+
+    # install.sh reads these env vars:
+    #   TEAM         — sets static IP (10.TE.AM.11)
+    #   APT_MISSING  — space-separated apt packages to install (empty = skip)
+    #   USE_LOCAL_WHEELS=1 — install pip deps from vendor/wheels offline
     install_cmd = (
         f"cd {shlex.quote(INSTALL_DIR)} && "
-        f"TEAM={shlex.quote(team)} bash install.sh"
+        f"TEAM={shlex.quote(team)} "
+        f"APT_MISSING={shlex.quote(apt_missing)} "
+        f"USE_LOCAL_WHEELS=1 "
+        f"bash install.sh"
     )
     rc = _stream(["ssh", "-t", target, install_cmd])
     if rc != 0:
@@ -528,19 +656,21 @@ def _try_install_temp_nopasswd(cfg: dict, password: str | None) -> bool:
         _fail(f"Couldn't connect to {host} to set up sudo: {e}")
         return False
 
-    rule = f"{user} ALL=(ALL) NOPASSWD:ALL\n"
-    # `sudo -S -p ''` reads password from stdin with no prompt; we then have
-    # sudo write the sudoers fragment via tee. visudo would be safer but is
-    # interactive — we sanity-check our own input and use `chmod 0440` after.
-    sudo_cmd = (
-        "sudo -S -p '' tee /etc/sudoers.d/cf-install-" + user + " >/dev/null "
-        "&& sudo -S -p '' chmod 0440 /etc/sudoers.d/cf-install-" + user
+    # Bake the rule into the bash -c argument so stdin is reserved purely
+    # for the password. (Earlier version piped the rule through stdin to
+    # `tee`, but sudo only consumes the first stdin line as its password —
+    # everything after that gets written to the file along with the rule,
+    # which trips a sudoers syntax error like `:2:9: syntax error`.)
+    rule_line = f"{user} ALL=(ALL) NOPASSWD:ALL"
+    sudoers_path = f"/etc/sudoers.d/cf-install-{user}"
+    inner = (
+        f"printf '%s\\n' {shlex.quote(rule_line)} > {sudoers_path} "
+        f"&& chmod 0440 {sudoers_path}"
     )
+    sudo_cmd = f"sudo -S -p '' bash -c {shlex.quote(inner)}"
     try:
         stdin, stdout, stderr = client.exec_command(sudo_cmd, timeout=15)
-        stdin.write(password + "\n")  # for the first sudo -S
-        stdin.write(rule)
-        stdin.write(password + "\n")  # for the chmod sudo -S
+        stdin.write(password + "\n")
         stdin.flush()
         stdin.channel.shutdown_write()
         rc = stdout.channel.recv_exit_status()
@@ -797,6 +927,19 @@ def _logic() -> int:
     if not bootstrap_ssh_key(cfg, password):
         return 1
 
+    # Probe the Pi (Python version + arch + which apt deps are already
+    # installed). Used for offline wheel staging and to skip apt install
+    # for packages already present.
+    pi_env = detect_pi_env(cfg)
+    if pi_env is None:
+        return 1
+
+    # Pre-download Pi wheels on the laptop. The Pi lives on the robot
+    # network and has no internet — same pattern as the rio. Wheels go
+    # into orangepi/vendor/wheels/ which gets shipped by push_files.
+    if not stage_pip_wheels(cfg, pi_env):
+        return 1
+
     if not push_files(cfg):
         return 1
 
@@ -804,7 +947,7 @@ def _logic() -> int:
     # temporary passwordless sudo for apt/systemctl. Drop it from memory
     # immediately afterwards — _remove_temp_nopasswd uses key auth, not
     # the password.
-    install_ok = run_remote_install(cfg, password=password)
+    install_ok = run_remote_install(cfg, password=password, pi_env=pi_env)
     password = None  # noqa: F841
     if not install_ok:
         # Best effort: still try to clean up the NOPASSWD rule even if

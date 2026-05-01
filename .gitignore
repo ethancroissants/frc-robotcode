@@ -39,3 +39,7 @@ simgui-window.json
 # Contains credentials — never commit
 push.sh
 push.py
+
+# Pi vendoring — laptop-side cached wheels for offline Pi install. Re-fetched
+# on every setup_orangepi.py run, so committing them would just churn diffs.
+orangepi/vendor/
