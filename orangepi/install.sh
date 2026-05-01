@@ -89,19 +89,31 @@ fi
 # Offline pip install: setup_orangepi.py pre-downloads matching wheels into
 # vendor/wheels/ so the Pi never has to talk to PyPI. --no-index forces pip
 # to ignore the network entirely; --find-links points it at the local cache.
+#
+# Idempotency: hash requirements.txt + the venv's python binary path/version
+# into .pip-stamp. If the stamp matches, every dep is already installed for
+# this exact venv, so we skip the (slow) pip resolve/install on re-runs.
 USE_LOCAL_WHEELS="${USE_LOCAL_WHEELS:-0}"
 WHEELS_DIR="$INSTALL_DIR/vendor/wheels"
-if [ "$USE_LOCAL_WHEELS" = "1" ] && [ -d "$WHEELS_DIR" ] && \
+PIP_STAMP="$INSTALL_DIR/.venv/.pip-stamp"
+PY_VER="$("$INSTALL_DIR/.venv/bin/python" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')"
+PIP_STAMP_EXPECTED="$(sha256sum "$INSTALL_DIR/requirements.txt" | awk '{print $1}')|py=$PY_VER"
+
+if [ -f "$PIP_STAMP" ] && [ "$(cat "$PIP_STAMP")" = "$PIP_STAMP_EXPECTED" ]; then
+  log "pip deps already satisfied (requirements.txt unchanged) — skipping"
+elif [ "$USE_LOCAL_WHEELS" = "1" ] && [ -d "$WHEELS_DIR" ] && \
    ls "$WHEELS_DIR"/*.whl >/dev/null 2>&1; then
   log "installing pip deps offline from $WHEELS_DIR"
   "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
     --upgrade pip wheel || true
   "$INSTALL_DIR/.venv/bin/pip" install --no-index --find-links "$WHEELS_DIR" \
     -r "$INSTALL_DIR/requirements.txt"
+  echo "$PIP_STAMP_EXPECTED" > "$PIP_STAMP"
 else
   log "installing pip deps online (no local wheel cache)"
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  echo "$PIP_STAMP_EXPECTED" > "$PIP_STAMP"
 fi
 
 # --- 3. environment file (TEAM/etc) ---------------------------------------
@@ -181,18 +193,34 @@ EOF
 sudo chmod 0440 /etc/sudoers.d/cold-fusion-sight
 
 # --- 6. systemd unit -------------------------------------------------------
-log "installing systemd unit"
+# Idempotency: only daemon-reload + restart if the rendered unit actually
+# differs from what's installed, OR if the service isn't currently running.
+# Avoids a service blip on every re-run when nothing changed.
 TMP=$(mktemp)
 sed \
   -e "s|__USER__|$USER_NAME|g" \
   -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
   "$INSTALL_DIR/cold-fusion-sight.service" > "$TMP"
-sudo install -m 0644 "$TMP" "$SERVICE_FILE"
+
+UNIT_CHANGED=1
+if [ -f "$SERVICE_FILE" ] && sudo cmp -s "$TMP" "$SERVICE_FILE"; then
+  UNIT_CHANGED=0
+fi
+
+if [ "$UNIT_CHANGED" = "1" ]; then
+  log "installing systemd unit (changed)"
+  sudo install -m 0644 "$TMP" "$SERVICE_FILE"
+  sudo systemctl daemon-reload
+fi
 rm -f "$TMP"
 
-sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-sudo systemctl restart "$SERVICE_NAME"
+sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || sudo systemctl enable "$SERVICE_NAME"
+if [ "$UNIT_CHANGED" = "1" ] || ! systemctl is-active --quiet "$SERVICE_NAME"; then
+  log "restarting $SERVICE_NAME"
+  sudo systemctl restart "$SERVICE_NAME"
+else
+  log "$SERVICE_NAME already running with current unit — not restarting"
+fi
 
 log "service status:"
 systemctl --no-pager status "$SERVICE_NAME" | sed -n "1,10p" || true

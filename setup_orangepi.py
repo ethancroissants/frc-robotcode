@@ -393,9 +393,14 @@ def detect_pi_env(cfg: dict) -> dict | None:
     # If ANY alternative is installed, the dep is satisfied (handles the
     # libglib2.0-0 → libglib2.0-0t64 rename in Debian Trixie's t64
     # transition). We emit NEED only if every alternative is missing.
+    # Use Python's own arch reporting (sysconfig.get_platform) instead of
+    # `uname -m`. On Raspberry Pi OS with a 64-bit kernel + 32-bit userspace,
+    # `uname -m` returns 'aarch64' but Python is 'armv7l' — pip wheels are
+    # tagged by the userspace arch, so keying off the kernel arch makes the
+    # staged wheel cache silently install the wrong artifacts.
     probe = r"""
 echo PY:$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')
-echo ARCH:$(uname -m)
+echo ARCH:$(python3 -c 'import sysconfig;print(sysconfig.get_platform().rsplit("-",1)[-1])')
 for spec in 'python3-venv' 'python3-pip' 'libgl1' 'libglib2.0-0t64|libglib2.0-0'; do
   ok=0
   IFS='|'
