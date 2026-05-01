@@ -485,11 +485,19 @@ def stage_pi_wheels(repo: Path) -> bool:
     if stamp.exists():
         stamp.unlink()
 
+    # pyntcore (and friends) live on WPILib's jfrog mirror, not PyPI — same
+    # source `robotpy sync` pulls from. We add it as an extra index so pip
+    # can find aarch64 wheels of WPILib-published packages.
+    extra_index = (
+        "https://wpilib.jfrog.io/artifactory/api/pypi/"
+        "wpilib-python-release-2026/simple"
+    )
     base_cmd = [
         sys.executable, "-m", "pip", "download",
         "--only-binary", ":all:",
         "--python-version", py,
         "--implementation", "cp",
+        "--extra-index-url", extra_index,
         *sum((["--platform", t] for t in plat_tags), []),
         "-r", str(req),
         "-d", str(wheels_dir),
