@@ -328,24 +328,69 @@ def run_deploy(extra_args: list[str]) -> int:
     info("This usually takes 30–90 seconds.")
     info("(any 'install/uninstall on roboRIO?' prompts auto-answered yes)")
     cmd = [sys.executable, "-m", "robotpy", "deploy", *extra_args]
+    rc, output = _run_robotpy(cmd)
+
+    # `robotpy deploy` aborts if the laptop's installed packages don't match
+    # pyproject.toml — common after pulling new requirements like grapplefrc.
+    # Auto-run `python -m robotpy sync` to install them, then retry the deploy
+    # exactly once. The sync also updates the rio bundle robotpy will upload.
+    if rc != 0 and _looks_like_sync_needed(output):
+        info("")
+        info("Local Python packages don't match pyproject.toml — running")
+        info("`python -m robotpy sync` to install the missing ones, then retrying.")
+        sync_rc = _run_robotpy_sync()
+        if sync_rc == 0:
+            info("Sync complete — re-running deploy.")
+            rc, _ = _run_robotpy(cmd)
+        else:
+            info(f"`robotpy sync` exited with code {sync_rc}; not retrying.")
+    return rc
+
+
+def _run_robotpy(cmd: list[str]) -> tuple[int, str]:
+    """Run robotpy in either UI or terminal mode, returning (rc, captured_output)."""
     t0 = time.monotonic()
     if ui_mode.is_active():
-        rc = ui_mode.get_app().stream_subprocess(cmd)
+        captured: list[str] = []
+        rc = ui_mode.get_app().stream_subprocess(cmd, capture=captured)
+        output = "".join(captured)
     else:
         info(f"$ {' '.join(cmd)}")
         rule("live output", color=dim)
         sys.stdout.flush()
         try:
-            rc = _spawn_with_yes(cmd)
+            rc, output = _spawn_with_yes_tee(cmd)
         except KeyboardInterrupt:
             rule("", color=dim)
             print()
             warn("Interrupted by user.")
-            return 130
+            return 130, ""
         rule("", color=dim)
     elapsed = time.monotonic() - t0
     info(f"robotpy exited with code {rc} after {elapsed:.1f}s")
-    return rc
+    return rc, output
+
+
+def _looks_like_sync_needed(output: str) -> bool:
+    return (
+        "Locally installed packages do not match requirements" in output
+        or "use\n  'python -m robotpy sync'" in output
+        or "python -m robotpy sync" in output and "missing packages" in output
+    )
+
+
+def _run_robotpy_sync() -> int:
+    """Run `python -m robotpy sync` to install pyproject.toml requirements.
+
+    This is exactly what robotpy's own error message tells the user to do
+    when the local install is out of date — running it ourselves saves the
+    user a copy-paste round-trip.
+    """
+    sync_cmd = [sys.executable, "-m", "robotpy", "sync"]
+    if ui_mode.is_active():
+        return ui_mode.get_app().stream_subprocess(sync_cmd)
+    info(f"$ {' '.join(sync_cmd)}")
+    return _spawn_with_yes(sync_cmd)
 
 
 def _spawn_with_yes(cmd: list[str]) -> int:
@@ -376,6 +421,41 @@ def _spawn_with_yes(cmd: list[str]) -> int:
                 pass
 
 
+def _spawn_with_yes_tee(cmd: list[str]) -> tuple[int, str]:
+    """Same as _spawn_with_yes but tees stdout/stderr to both the user's
+    terminal and an in-memory buffer so the caller can scan for known errors.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured: list[str] = []
+    try:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write("y\n" * 20)
+                proc.stdin.flush()
+            except (OSError, BrokenPipeError):
+                pass
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            captured.append(line)
+        rc = proc.wait()
+    finally:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+    return rc, "".join(captured)
+
+
 def result_box(success: bool, rc: int) -> None:
     print()
     if success:
@@ -385,6 +465,7 @@ def result_box(success: bool, rc: int) -> None:
         print(bold("Troubleshooting:"))
         info("Connect to the robot's WiFi (or USB tether) and retry.")
         info("Power-cycle the roboRIO if it's been flaky.")
+        info("If a package is missing locally: `python -m robotpy sync`.")
         info("Try `python deploy.py --skip-tests` to bypass unit tests.")
         info("Try `python deploy.py --nc` to stream console output while deploying.")
         info("Run `python -m robotpy deploy --help` for all flags.")

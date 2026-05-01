@@ -542,7 +542,12 @@ class App:
     # pre-fed 'y' answers so prompts like robotpy's "uninstall + install?"
     # don't EOF and crash the deploy.
 
-    def stream_subprocess(self, cmd: list[str]) -> int:
+    def stream_subprocess(self, cmd: list[str], capture: list[str] | None = None) -> int:
+        """Run cmd, streaming stdout/stderr to the details panel.
+
+        If `capture` is a list, each output line is also appended to it so
+        callers can scan for known error strings after the process exits.
+        """
         self._buffer(f"  $ {' '.join(cmd)}\n")
         try:
             proc = subprocess.Popen(
@@ -565,6 +570,8 @@ class App:
                 pass
         for line in proc.stdout:
             self._buffer(line)
+            if capture is not None:
+                capture.append(line)
             trimmed = line.strip()
             if trimmed:
                 # Truncate so a giant traceback line doesn't blow up the layout.

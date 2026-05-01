@@ -197,6 +197,43 @@ DRIVER_STATION_URL = (
 MIN_PY = (3, 9)
 
 
+def ensure_internet() -> bool:
+    """Verify the laptop can actually reach PyPI before we try to install.
+
+    The robot's WiFi has no internet, and `pip install` against it just
+    times out with cryptic "ReadTimeoutError" stacks. Catching it here
+    lets us tell the user *why* and what to do instead.
+
+    Probes pypi.org first (where pip will go), with python.org as a
+    fallback in case PyPI is the one that's down rather than the user.
+    """
+    step("Checking internet connectivity")
+    import urllib.request, urllib.error
+    targets = [
+        ("https://pypi.org/simple/", "pypi.org"),
+        ("https://www.python.org/", "python.org"),
+    ]
+    last_err = ""
+    for url, label in targets:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "cold-fusion-setup"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                if 200 <= resp.status < 400:
+                    ok(f"reachable: {label}")
+                    return True
+        except urllib.error.URLError as e:
+            last_err = f"{label}: {e.reason}"
+        except Exception as e:
+            last_err = f"{label}: {e}"
+    fail("No internet — can't reach PyPI to install dependencies.")
+    if last_err:
+        info(last_err)
+    info("If you're on the ROBOT'S WiFi, switch to your normal home/school WiFi")
+    info("(robot radio has no internet). Run setup.py once with internet, then")
+    info("you can re-join the robot WiFi to deploy.")
+    return False
+
+
 def ensure_python_version() -> bool:
     step("Checking Python version")
     have = sys.version_info[:3]
@@ -382,6 +419,39 @@ def ensure_tkinter() -> bool:
     return False
 
 
+def _verify_requires_installed(requires: list[str]) -> list[str]:
+    """Return the list of pyproject `requires` whose dist isn't installed.
+
+    Mirrors `robotpy deploy`'s pre-flight check: it uses
+    importlib.metadata.distribution() against each requirement name. Any
+    package it can't find is what trips the "Locally installed packages
+    do not match requirements" abort.
+    """
+    if not requires:
+        return []
+    # Use the laptop's own Python to query — same env that pip just installed
+    # into. Spawning a subprocess avoids stale importlib caches.
+    code = (
+        "import sys\n"
+        "from importlib.metadata import distribution, PackageNotFoundError\n"
+        "missing = []\n"
+        "for name in sys.argv[1:]:\n"
+        "    try:\n"
+        "        distribution(name)\n"
+        "    except PackageNotFoundError:\n"
+        "        missing.append(name)\n"
+        "print('\\n'.join(missing))\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, *requires],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def read_robot_requires(repo: Path) -> list[str]:
     """Read [tool.robotpy].requires from pyproject.toml.
 
@@ -465,6 +535,15 @@ def _main_logic() -> int:
     py_ok = ensure_python_version()
     if not py_ok:
         return 1
+    # Internet must come before pip/robotpy steps — installing offline produces
+    # confusing partial states (deploy later fails with "package not found").
+    if not ensure_internet():
+        print()
+        banner(
+            "Setup Aborted", "no internet — connect to a real WiFi and retry",
+            color=red,
+        )
+        return 1
     git_ok = ensure_git()
     ds_ok = ensure_driver_station()
     # tkinter is optional (only used by --ui mode), so check but don't fail setup.
@@ -491,7 +570,7 @@ def _main_logic() -> int:
     requires = read_robot_requires(repo)
     local_install_ok = True
     if requires:
-        step("Installing project requirements locally (for sim)")
+        step("Installing project requirements locally (for sim + deploy check)")
         # Give sync's spawned pip window a head start before we touch site-packages,
         # so we don't race it for cscore/__init__.py and trip WinError 32 on Windows.
         time.sleep(3)
@@ -505,14 +584,48 @@ def _main_logic() -> int:
             local_install_ok = False
             warn(
                 "Local pip install failed (likely a Windows file lock from the "
-                "sync subprocess). The roboRIO install above already succeeded; "
-                "this only affects local sim. Re-run setup.py once any pip "
-                f"windows have closed if you need sim. (exit {e.returncode})"
+                "sync subprocess). Retrying once after a longer pause… "
+                f"(exit {e.returncode})"
             )
+            time.sleep(8)
+            try:
+                run(
+                    f"pip install {' '.join(requires)} (retry)",
+                    [sys.executable, "-m", "pip", "install", *requires],
+                )
+                local_install_ok = True
+                ok("retry succeeded")
+            except subprocess.CalledProcessError as e2:
+                fail(
+                    "Local pip install still failing — `robotpy deploy` will "
+                    "refuse to run later because the laptop's packages won't "
+                    f"match pyproject.toml. (exit {e2.returncode})"
+                )
+
+        # Verify each requirement actually landed. `robotpy deploy` checks the
+        # exact same thing before uploading and aborts hard ("Locally installed
+        # packages do not match requirements") if anything's missing — catching
+        # it here means we fail while the user is still on real internet, not
+        # later when they're already on the robot's WiFi.
+        if local_install_ok:
+            missing = _verify_requires_installed(requires)
+            if missing:
+                fail(
+                    "Installed but importable check found missing packages: "
+                    + ", ".join(missing)
+                )
+                info(
+                    "Run `python -m robotpy sync` while on internet, then "
+                    "re-run setup.py."
+                )
+                local_install_ok = False
+            else:
+                ok("all project requirements verified installed")
 
     step("Running checks")
     results: dict[str, bool] = {
         "git installed": git_ok,
+        "project requirements installed": local_install_ok,
     }
     if sys.platform.startswith("win"):
         results["FRC Driver Station installed"] = ds_ok

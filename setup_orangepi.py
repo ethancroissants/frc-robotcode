@@ -179,29 +179,39 @@ def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
     return cfg, password
 
 
-def _ssh_key_auth_works(cfg: dict) -> bool:
+def _ssh_key_auth_works(cfg: dict, attempts: int = 1) -> bool:
     """Returns True if `ssh user@host true` succeeds without a password.
 
     BatchMode=yes refuses to prompt for a password, so the call returns
     quickly with non-zero rc on a fresh Pi rather than hanging waiting
     for input we can't supply (stdin is piped by stream_subprocess).
+
+    On Windows a fresh Pi reachable only via mDNS/IPv6 link-local can flake
+    the first probe even when key auth is fine — `attempts` lets the caller
+    retry a couple of times with a short delay.
     """
+    import time
     target = ssh_target(cfg)
-    try:
-        result = subprocess.run(
-            [
-                "ssh",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                target,
-                "true",
-            ],
-            capture_output=True, timeout=15,
-        )
-    except Exception:
-        return False
-    return result.returncode == 0
+    for i in range(max(1, attempts)):
+        try:
+            result = subprocess.run(
+                [
+                    "ssh",
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    target,
+                    "true",
+                ],
+                capture_output=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+        if i + 1 < attempts:
+            time.sleep(1.0)
+    return False
 
 
 def _ensure_local_ssh_key() -> Path | None:
@@ -349,10 +359,21 @@ def bootstrap_ssh_key(cfg: dict, password: str | None) -> bool:
         _fail(f"Installing key on Pi failed (rc={rc}): {err}")
         return False
 
-    if not _ssh_key_auth_works(cfg):
-        _fail("Key was uploaded but key auth still doesn't work — odd.")
-        _info("Try `ssh -v " + ssh_target(cfg) + "` from a terminal to see why.")
-        return False
+    # mDNS / IPv6 link-local resolution can flake the first probe on Windows
+    # even when key auth is genuinely fine. Retry a few times before giving up.
+    if not _ssh_key_auth_works(cfg, attempts=4):
+        # Don't hard-fail: paramiko reported success appending the key, and
+        # our follow-up rsync/ssh will exercise the real path. Warn loudly
+        # so the user knows what to look for if push_files then errors.
+        _info(
+            "Heads-up: post-install key probe didn't succeed, but the key "
+            "was uploaded — continuing anyway."
+        )
+        _info(
+            "If the next step fails on auth, run "
+            "`ssh -v " + ssh_target(cfg) + "` in a terminal to debug."
+        )
+        return True
 
     _ok("SSH key installed on the Pi — passwordless from now on.")
     return True
