@@ -603,25 +603,20 @@ def push_files(cfg: dict) -> bool:
     if rsync_avail:
         # Trailing slash on the source = "copy contents into INSTALL_DIR".
         rc = _stream([
-            "rsync", "-az", "--delete", "--exclude=.venv", "--exclude=__pycache__",
+            "rsync", "-az", "--info=progress2",
+            "--delete", "--exclude=.venv", "--exclude=__pycache__",
             f"{ORANGEPI_DIR}/", f"{target}:{INSTALL_DIR}/",
         ])
-    else:
-        # Fall back to scp -r. Requires the install dir to exist first.
-        if _stream([
-            "ssh", target, f"mkdir -p {shlex.quote(INSTALL_DIR)}",
-        ]) != 0:
-            _fail("Couldn't create install directory on the Pi.")
+        if rc != 0:
+            _fail("File transfer failed (rsync).")
             return False
-        rc = _stream([
-            "scp", "-r",
-            *(str(p) for p in ORANGEPI_DIR.iterdir()
-              if p.name not in (".venv", "__pycache__")),
-            f"{target}:{INSTALL_DIR}/",
-        ])
-    if rc != 0:
-        _fail("File transfer failed.")
-        return False
+    else:
+        # No rsync available (Windows default). `scp -r` is unbearably slow
+        # when shipping the wheel cache (~100MB across 22 files) because it
+        # opens a fresh SSH channel per file. Use a single `tar | ssh tar`
+        # pipe instead — one SSH session, pipelined, no per-file overhead.
+        if not _push_via_tar(target):
+            return False
 
     # Strip CRLF line endings on shell scripts. Windows checkouts often save
     # *.sh with \r\n, and bash chokes with `$'\r': command not found` on the
@@ -636,6 +631,106 @@ def push_files(cfg: dict) -> bool:
     _stream(["ssh", target, fix_cmd])
 
     _ok("Files copied.")
+    return True
+
+
+def _push_via_tar(target: str) -> bool:
+    """Stream orangepi/ to the Pi as one tar archive over a single SSH session.
+
+    Faster than `scp -r` for the wheel cache because it's one TCP stream and
+    one SSH auth; scp does per-file negotiation and falls off a cliff on slow
+    links. We feed Python's tarfile output through `ssh ... tar xf -` so the
+    Pi extracts as we transfer (no temp file on either end).
+
+    Excludes .venv/ and __pycache__/ matches the rsync filter above. Wheels
+    are already zip-compressed, so we don't bother gzipping the tar.
+    """
+    import io
+    import tarfile
+    import time
+
+    skip_names = {".venv", "__pycache__"}
+
+    # Total expected size for the progress UI. Skips the same paths the
+    # tar walk will skip — counters disagree slightly on dir entries, but
+    # the byte total is what matters.
+    total_bytes = 0
+    file_count = 0
+    for p in ORANGEPI_DIR.rglob("*"):
+        if any(part in skip_names for part in p.parts):
+            continue
+        if p.is_file():
+            try:
+                total_bytes += p.stat().st_size
+                file_count += 1
+            except OSError:
+                pass
+    _info(f"  packaging {file_count} file(s), ~{total_bytes // (1024 * 1024)} MB")
+
+    remote_cmd = (
+        f"mkdir -p {shlex.quote(INSTALL_DIR)} && "
+        f"cd {shlex.quote(INSTALL_DIR)} && tar xf -"
+    )
+    proc = subprocess.Popen(
+        ["ssh", target, remote_cmd],
+        stdin=subprocess.PIPE,
+    )
+    if proc.stdin is None:
+        _fail("Couldn't open ssh stdin pipe.")
+        return False
+
+    sent_bytes = 0
+    last_report = time.monotonic()
+
+    class _ProgressWriter:
+        """Wraps proc.stdin to count bytes for the progress UI."""
+        def __init__(self, inner):
+            self._inner = inner
+        def write(self, data):
+            nonlocal sent_bytes, last_report
+            self._inner.write(data)
+            sent_bytes += len(data)
+            now = time.monotonic()
+            if now - last_report > 1.0:
+                last_report = now
+                pct = (sent_bytes / total_bytes * 100) if total_bytes else 0
+                mb = sent_bytes // (1024 * 1024)
+                _info(f"  pushed {mb} MB ({pct:.0f}%)")
+            return len(data)
+        def flush(self):
+            self._inner.flush()
+        def close(self):
+            self._inner.close()
+
+    def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        # Drop excluded paths. arcname is relative — split on / works on both
+        # platforms because tar normalizes separators internally.
+        for part in info.name.split("/"):
+            if part in skip_names:
+                return None
+        return info
+
+    try:
+        with tarfile.open(fileobj=_ProgressWriter(proc.stdin), mode="w|") as tar:
+            tar.add(str(ORANGEPI_DIR), arcname=".", filter=_filter)
+    except Exception as e:
+        _fail(f"tar stream failed: {e}")
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.wait(timeout=5)
+        return False
+
+    try:
+        proc.stdin.close()
+    except Exception:
+        pass
+    rc = proc.wait()
+    if rc != 0:
+        _fail(f"Remote tar extraction failed (rc={rc}).")
+        return False
+    _info(f"  pushed {sent_bytes // (1024 * 1024)} MB total")
     return True
 
 
