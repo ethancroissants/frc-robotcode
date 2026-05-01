@@ -190,34 +190,29 @@ EOF
 sudo chmod 0440 /etc/sudoers.d/cold-fusion-sight
 
 # --- 6. systemd unit -------------------------------------------------------
-# Idempotency: only daemon-reload + restart if the rendered unit actually
-# differs from what's installed, OR if the service isn't currently running.
-# Avoids a service blip on every re-run when nothing changed.
+# Only daemon-reload if the rendered unit file actually differs (cheap
+# optimization, avoids unnecessary systemctl chatter). But ALWAYS restart
+# the service — the unit file is small and rarely changes, while the
+# application code (server.py, static/, etc.) changes every push, and the
+# running uvicorn process holds the old code in memory until restart.
+# Skipping the restart is what made "I pushed new code but the Pi is
+# still serving the old version" happen.
 TMP=$(mktemp)
 sed \
   -e "s|__USER__|$USER_NAME|g" \
   -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
   "$INSTALL_DIR/cold-fusion-sight.service" > "$TMP"
 
-UNIT_CHANGED=1
-if [ -f "$SERVICE_FILE" ] && sudo cmp -s "$TMP" "$SERVICE_FILE"; then
-  UNIT_CHANGED=0
-fi
-
-if [ "$UNIT_CHANGED" = "1" ]; then
-  log "installing systemd unit (changed)"
+if [ ! -f "$SERVICE_FILE" ] || ! sudo cmp -s "$TMP" "$SERVICE_FILE"; then
+  log "installing systemd unit"
   sudo install -m 0644 "$TMP" "$SERVICE_FILE"
   sudo systemctl daemon-reload
 fi
 rm -f "$TMP"
 
-sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || sudo systemctl enable "$SERVICE_NAME"
-if [ "$UNIT_CHANGED" = "1" ] || ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  log "restarting $SERVICE_NAME"
-  sudo systemctl restart "$SERVICE_NAME"
-else
-  log "$SERVICE_NAME already running with current unit — not restarting"
-fi
+sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+log "restarting $SERVICE_NAME (picks up new code)"
+sudo systemctl restart "$SERVICE_NAME"
 
 log "service status:"
 systemctl --no-pager status "$SERVICE_NAME" | sed -n "1,10p" || true
