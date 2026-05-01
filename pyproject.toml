@@ -14,7 +14,12 @@ requires = [
     "phoenix6",
     "robotpy-pathplannerlib",
     # grapplefrc: vendor SDK for the Grapple Robotics LaserCAN sensor.
-    "grapplefrc",
+    # TEMPORARILY DISABLED — Grapple has no Python 3.14 wheel on PyPI yet
+    # (latest is 2027.0.0a2 capped at Requires-Python <3.14, but RobotPy 2026
+    # requires 3.14). Re-enable once a 3.14-compatible release ships.
+    # The LaserCanSubsystem already no-ops when the import fails, so AutoAim
+    # falls back to AprilTag-PnP range rather than the active sensor.
+    # "grapplefrc",
     # cscore + numpy stay in the requires list because tests / sim still
     # reference vision.py; the rio no longer publishes a stream itself.
     "robotpy-cscore",
