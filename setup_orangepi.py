@@ -31,6 +31,9 @@ import ui_mode
 REPO = Path(__file__).resolve().parent
 ORANGEPI_DIR = REPO / "orangepi"
 CFG_PATH = REPO / ".orangepi_cfg"
+# pi_target.json gets included in `robotpy deploy` (no leading dot) so the
+# rio's orangepi_pusher.py can find the Pi after deploy.
+TARGET_PATH = REPO / "pi_target.json"
 
 DEFAULT_USER = "orangepi"
 DEFAULT_HOST = "orangepi.local"
@@ -38,6 +41,9 @@ INSTALL_DIR = "/home/orangepi/cold-fusion-sight"
 
 # rio SSH details. The roboRIO ships with `admin` (no password) on port 22.
 RIO_USER = "admin"
+# Robot code runs as `lvuser`; that's the account whose key needs to be on
+# the Pi so orangepi_pusher.py can push without a password prompt.
+RIO_ROBOT_USER = "lvuser"
 
 
 # ----- ui-or-print helpers -----
@@ -189,17 +195,42 @@ def push_files(cfg: dict) -> bool:
 
 
 def run_remote_install(cfg: dict) -> bool:
-    _step("Installing on the Pi (apt + venv + systemd)")
+    _step("Installing on the Pi (apt + venv + systemd + static IP)")
     target = ssh_target(cfg)
-    rc = _stream([
-        "ssh", "-t", target,
-        f"cd {shlex.quote(INSTALL_DIR)} && bash install.sh",
-    ])
+    team = _read_team_number() or "1279"
+    # install.sh reads $TEAM and pins the static IP at 10.TE.AM.11.
+    install_cmd = (
+        f"cd {shlex.quote(INSTALL_DIR)} && "
+        f"TEAM={shlex.quote(team)} bash install.sh"
+    )
+    rc = _stream(["ssh", "-t", target, install_cmd])
     if rc != 0:
         _fail("Remote install failed; check the details panel.")
         return False
     _ok("Service installed and started.")
     return True
+
+
+def write_target_file(cfg: dict) -> None:
+    """Write pi_target.json for the rio's orangepi_pusher to read post-deploy.
+
+    The rio doesn't know the Pi's user/IP/install dir — we write them into
+    a file at the repo root that gets shipped with the rest of the project
+    on the next `robotpy deploy`.
+    """
+    team = _read_team_number() or "1279"
+    n = int(team)
+    static_ip = f"10.{n // 100}.{n % 100}.11"
+    payload = {
+        "host": static_ip,
+        "user": cfg.get("user", DEFAULT_USER),
+        "install_dir": INSTALL_DIR,
+        # The hostname the user originally typed during setup, so the rio can
+        # fall back to mDNS if static IP routing breaks for some reason.
+        "fallback_host": cfg.get("host", DEFAULT_HOST),
+    }
+    TARGET_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    _ok(f"Wrote pi_target.json (rio will reach Pi at {static_ip}).")
 
 
 def setup_cross_ssh(cfg: dict) -> None:
@@ -210,9 +241,12 @@ def setup_cross_ssh(cfg: dict) -> None:
     default). We use that trust to:
       1. Generate an ed25519 keypair on the Pi if one doesn't exist.
       2. Read the Pi's public key and append it to the rio's
-         /home/admin/.ssh/authorized_keys.
-      3. Generate an ed25519 keypair on the rio if one doesn't exist.
-      4. Read the rio's public key and append it to the Pi's
+         /home/admin/.ssh/authorized_keys (so Pi → rio works as admin).
+      3. Generate keypairs on the rio for *both* admin and lvuser. lvuser
+         is the account robot code runs as — without its key on the Pi,
+         the rio's orangepi_pusher.py would prompt for a password and
+         hang the daemon thread. Admin's key is for human SSH from the Pi.
+      4. Read each rio public key and append it to the Pi's
          /home/orangepi/.ssh/authorized_keys.
 
     Idempotent — uses `grep -qxF || echo` so re-running doesn't dupe
@@ -230,13 +264,26 @@ def setup_cross_ssh(cfg: dict) -> None:
     pi_target = ssh_target(cfg)
     rio_target = f"{RIO_USER}@{rio_host}"
 
+    # ---- Pi → rio (admin) ----
     pi_pub = _ensure_ssh_key_remote(pi_target, key_path="~/.ssh/id_ed25519")
     if pi_pub:
         _push_authorized_key(rio_target, pi_pub, label="Pi key on rio")
 
-    rio_pub = _ensure_ssh_key_remote(rio_target, key_path="/home/admin/.ssh/id_ed25519")
-    if rio_pub:
-        _push_authorized_key(pi_target, rio_pub, label="rio key on Pi")
+    # ---- rio admin → Pi ----
+    rio_admin_pub = _ensure_ssh_key_remote(
+        rio_target, key_path="/home/admin/.ssh/id_ed25519"
+    )
+    if rio_admin_pub:
+        _push_authorized_key(pi_target, rio_admin_pub, label="rio-admin key on Pi")
+
+    # ---- rio lvuser → Pi (the important one for auto-push) ----
+    # admin has passwordless sudo on the rio; we use it to manage lvuser's
+    # ssh dir without asking for lvuser's password (which the rio doesn't have).
+    rio_lvuser_pub = _ensure_ssh_key_remote_as_other_user(
+        rio_target, target_user=RIO_ROBOT_USER, key_path="/home/lvuser/.ssh/id_ed25519",
+    )
+    if rio_lvuser_pub:
+        _push_authorized_key(pi_target, rio_lvuser_pub, label="rio-lvuser key on Pi")
 
 
 def _find_rio_host() -> str | None:
@@ -281,6 +328,49 @@ def _ensure_ssh_key_remote(ssh_target_str: str, key_path: str) -> str | None:
         _fail(f"Unexpected key output from {ssh_target_str}: {pub[:80]!r}")
         return None
     _ok(f"Got SSH key from {ssh_target_str}")
+    return pub
+
+
+def _ensure_ssh_key_remote_as_other_user(
+    ssh_target_str: str, target_user: str, key_path: str,
+) -> str | None:
+    """SSH as the login user, sudo to `target_user`, generate/read its key.
+
+    Used to bootstrap an SSH key for `lvuser` on the rio: we log in as
+    `admin` (which has passwordless sudo) and run ssh-keygen / cat as
+    `lvuser` so the resulting files end up owned by lvuser, in
+    /home/lvuser/.ssh. Without this, robot code (which runs as lvuser)
+    couldn't SSH the Pi.
+    """
+    pub_path = f"{key_path}.pub"
+    # `sudo -u lvuser` runs the command as lvuser. The shell expansion of
+    # `~` happens after sudo, so it resolves to lvuser's home, not admin's.
+    # We chain mkdir → keygen-if-missing → cat. install -d gives us a
+    # 700-mode .ssh dir with the right ownership without futzing with chown.
+    cmd = (
+        f'sudo install -d -o {target_user} -g {target_user} -m 700 '
+        f'/home/{target_user}/.ssh && '
+        f'sudo -u {target_user} sh -c \''
+        f'[ -f {pub_path} ] || ssh-keygen -t ed25519 -N "" -f {key_path} -q\' && '
+        f'sudo cat {pub_path}'
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+             ssh_target_str, cmd],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception as e:
+        _fail(f"Couldn't read {target_user}'s SSH key: {e}")
+        return None
+    if result.returncode != 0:
+        _fail(f"Generating {target_user}'s SSH key failed: {result.stderr.strip()}")
+        return None
+    pub = result.stdout.strip()
+    if not pub.startswith("ssh-"):
+        _fail(f"Unexpected key output for {target_user}: {pub[:80]!r}")
+        return None
+    _ok(f"Got SSH key for {target_user}@rio")
     return pub
 
 
@@ -356,6 +446,7 @@ def _logic() -> int:
         return 1
 
     write_team(cfg)
+    write_target_file(cfg)
     setup_cross_ssh(cfg)
 
     url = f"http://{cfg['host']}:8080/"

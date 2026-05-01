@@ -11,6 +11,7 @@ from phoenix6.controls import NeutralOut
 from wpilib import DriverStation, SmartDashboard, XboxController
 
 import gamepads
+import orangepi_pusher
 import tunables
 from generated import tuner_constants
 from robotcontainer import RobotContainer
@@ -78,6 +79,11 @@ class MyRobot(wpilib.TimedRobot):
         # Camera + overlay live on the Orange Pi 5 now (see orangepi/server.py).
         # The Pi connects to NetworkTables and reads the same tunables we publish;
         # we just need to mirror the operator gamepad so its UI lights up.
+
+        # Hand off the deployed orangepi/ folder to the Pi over SSH. Runs on a
+        # daemon thread so it never blocks robotInit; if the Pi is offline or
+        # SSH fails, the rio still drives normally.
+        orangepi_pusher.start()
 
     def robotPeriodic(self) -> None:
         self.m_timeAndJoystickReplay.update()

@@ -447,35 +447,29 @@ def _main_logic(extra: list[str]) -> int:
 
 
 def deploy_to_orangepi() -> None:
-    """After a successful rio deploy, push the latest code to the Pi too.
+    """Note that the rio will push to the Pi itself on next robot startup.
 
-    Skipped silently if the Pi was never set up (no .orangepi_cfg). The
-    Pi has its own code (orangepi/ folder) plus mirrors of any tunables
-    the rio just published, so it's worth keeping the two in lockstep
-    on every Deploy press.
+    We used to rsync from the laptop here, but that meant Pi pushes only
+    happened when *the laptop* deployed. Now the rio is the gateway:
+      - laptop → rio (this is what `robotpy deploy` does)
+      - rio → Pi  (orangepi_pusher.py runs in robotInit on every boot)
+    So a Deploy press is enough to update both, even when the next boot
+    is a power-cycle in the pit with the laptop unplugged.
 
-    On failure we warn but don't fail the whole deploy — the rio code
-    is already running, and the Pi can be re-pushed with `Update Vision
-    Pi` once the user investigates.
+    If the Pi was never configured we still nudge the user toward setup,
+    but we don't try to push directly anymore.
     """
     repo = os.path.dirname(os.path.abspath(__file__))
-    cfg_path = os.path.join(repo, ".orangepi_cfg")
+    cfg_path = os.path.join(repo, "pi_target.json")
     if not os.path.exists(cfg_path):
-        info("Vision Pi not configured — skipping Pi deploy.")
-        info("(Run `python setup_orangepi.py --ui` to set it up.)")
+        info("Vision Pi not configured yet.")
+        info("(Run Set up Vision Pi from the control panel to provision it.)")
         return
-
-    step("Deploying to Vision Pi")
-    cmd = [sys.executable, "update_orangepi.py"]
-    if ui_mode.is_active():
-        rc = ui_mode.get_app().stream_subprocess(cmd)
-    else:
-        rc = subprocess.run(cmd, cwd=repo).returncode
-    if rc == 0:
-        ok("Pi update complete.")
-    else:
-        warn(f"Pi update failed (rc={rc}). Robot code is fine — re-run "
-             "`Update Vision Pi` to retry.")
+    step("Vision Pi will sync on next robot boot")
+    info("The rio's startup pusher will SSH the new orangepi/ files to the")
+    info("Pi and restart cold-fusion-sight. No further action needed here.")
+    info("Power-cycle the rio (or use `Update Vision Pi` to push from this")
+    info("laptop directly) if you want it pushed *right now*.")
 
 
 def disable_firewall_for_ds() -> None:
