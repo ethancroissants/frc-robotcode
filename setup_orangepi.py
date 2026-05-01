@@ -86,6 +86,23 @@ def _ask_string(prompt: str, default: str = "") -> str | None:
     return ans or default
 
 
+def _ask_password(prompt: str) -> str | None:
+    """Prompt for the Pi user's password.
+
+    Used only on first run to bootstrap SSH key auth — after the laptop's
+    pubkey is on the Pi, every subsequent setup step uses key auth and
+    this prompt is skipped silently. Empty/cancelled means "I already
+    have key auth set up, don't bother me".
+    """
+    if ui_mode.is_active():
+        return ui_mode.get_app().ask_password(prompt, title="Vision Pi")
+    import getpass
+    try:
+        return getpass.getpass(f"{prompt}: ") or None
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
 def _stream(cmd: list[str]) -> int:
     """Run a subprocess; in UI mode the output goes to the details pane."""
     if ui_mode.is_active():
@@ -135,8 +152,14 @@ def have(tool: str) -> bool:
 
 # ----- installer steps -----
 
-def gather_config(cfg: dict) -> dict | None:
-    """Ask for / confirm the Pi's user@host. Saved to .orangepi_cfg."""
+def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
+    """Ask for / confirm the Pi's user@host (saved) + password (not saved).
+
+    Returns (cfg, password) where password may be None if the user left
+    it blank — we'll skip the SSH-key bootstrap and assume key auth is
+    already in place. The password is *only* held in memory long enough
+    to set up keys; it's never written to disk.
+    """
     host = _ask_string(
         "Pi hostname or IP", default=cfg.get("host", DEFAULT_HOST)
     )
@@ -145,11 +168,194 @@ def gather_config(cfg: dict) -> dict | None:
     user = _ask_string("Pi SSH user", default=cfg.get("user", DEFAULT_USER))
     if not user:
         return None
+    password = _ask_password(
+        f"Password for {user}@{host}\n"
+        "(leave blank if SSH key auth is already set up)"
+    )
     cfg = dict(cfg)
     cfg["user"] = user
     cfg["host"] = host
     save_cfg(cfg)
-    return cfg
+    return cfg, password
+
+
+def _ssh_key_auth_works(cfg: dict) -> bool:
+    """Returns True if `ssh user@host true` succeeds without a password.
+
+    BatchMode=yes refuses to prompt for a password, so the call returns
+    quickly with non-zero rc on a fresh Pi rather than hanging waiting
+    for input we can't supply (stdin is piped by stream_subprocess).
+    """
+    target = ssh_target(cfg)
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=accept-new",
+                target,
+                "true",
+            ],
+            capture_output=True, timeout=15,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _ensure_local_ssh_key() -> Path | None:
+    """Make sure the laptop has ~/.ssh/id_ed25519(.pub); generate if missing.
+    Returns the path to the public key file, or None on failure."""
+    home = Path.home()
+    ssh_dir = home / ".ssh"
+    key_path = ssh_dir / "id_ed25519"
+    pub_path = ssh_dir / "id_ed25519.pub"
+    if pub_path.exists():
+        return pub_path
+    # Try a fallback to RSA if the user already has one (older laptops).
+    rsa_pub = ssh_dir / "id_rsa.pub"
+    if rsa_pub.exists():
+        return rsa_pub
+    _info("Generating laptop SSH key (~/.ssh/id_ed25519)…")
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    try:
+        rc = subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_path), "-q"],
+            capture_output=True, timeout=15,
+        ).returncode
+    except Exception as e:
+        _fail(f"ssh-keygen failed: {e}")
+        return None
+    if rc != 0 or not pub_path.exists():
+        _fail("Couldn't generate local SSH key.")
+        return None
+    return pub_path
+
+
+def _ensure_paramiko():
+    """Lazy import paramiko, auto-installing it on first use.
+
+    Paramiko is a pure-python SSH client — we only use it for the
+    one-time pubkey-install step, since system `ssh` can't accept a
+    password through the piped stdin our UI uses. After bootstrap, every
+    other call goes back through system ssh + key auth.
+    """
+    try:
+        import paramiko  # type: ignore
+        return paramiko
+    except ImportError:
+        pass
+    _info("Installing paramiko (one-time, for SSH password bootstrap)…")
+    rc = _stream([sys.executable, "-m", "pip", "install", "--user", "paramiko"])
+    if rc != 0:
+        _fail("Couldn't install paramiko.")
+        _info("Run manually:  " + sys.executable + " -m pip install paramiko")
+        return None
+    try:
+        import paramiko  # type: ignore
+        return paramiko
+    except ImportError:
+        _fail("paramiko installed but import still fails — try restarting setup.")
+        return None
+
+
+def bootstrap_ssh_key(cfg: dict, password: str | None) -> bool:
+    """Make sure passwordless SSH from laptop → Pi works.
+
+    Flow:
+      1. Try BatchMode key auth. If it works, we're already set up — skip.
+      2. If not, and a password was provided, ssh in with paramiko using
+         the password and append the laptop's pubkey to the Pi's
+         authorized_keys.
+      3. Verify by retrying step 1.
+
+    Returns True on success. The password is never logged or saved.
+    """
+    _step("Setting up passwordless SSH to the Pi")
+
+    if _ssh_key_auth_works(cfg):
+        _ok("SSH key auth already works — no password needed.")
+        return True
+
+    if not password:
+        _fail("SSH key auth doesn't work yet, and you didn't enter a password.")
+        _info("Re-run setup and type the Pi's password when asked.")
+        _info(
+            "(That's the password you set on first boot of the Pi — "
+            "the one for the `" + cfg.get("user", DEFAULT_USER) + "` user.)"
+        )
+        return False
+
+    pub_path = _ensure_local_ssh_key()
+    if pub_path is None:
+        return False
+    pubkey = pub_path.read_text().strip()
+    if not pubkey.startswith("ssh-"):
+        _fail(f"Public key at {pub_path} looks malformed.")
+        return False
+
+    paramiko = _ensure_paramiko()
+    if paramiko is None:
+        return False
+
+    host = cfg["host"]
+    user = cfg.get("user", DEFAULT_USER)
+    _info(f"Connecting to {user}@{host} with the password (one-time bootstrap)…")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host,
+            username=user,
+            password=password,
+            timeout=10,
+            # Don't let paramiko try the laptop's existing keys first —
+            # if one of them happened to work we'd have skipped this path
+            # back at step 1. Forcing password keeps the failure mode
+            # honest ("password didn't work" vs "some key happened to").
+            allow_agent=False,
+            look_for_keys=False,
+        )
+    except paramiko.AuthenticationException:
+        _fail("Password rejected by the Pi.")
+        _info("Double-check the password you set on first boot.")
+        return False
+    except Exception as e:
+        _fail(f"Couldn't connect to {host}: {e}")
+        return False
+
+    # Append our pubkey to ~/.ssh/authorized_keys idempotently. mkdir + chmod
+    # cover a fresh user that's never SSH'd anywhere before.
+    quoted = shlex.quote(pubkey)
+    install_cmd = (
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+        "touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
+        f"grep -qxF {quoted} ~/.ssh/authorized_keys || "
+        f"echo {quoted} >> ~/.ssh/authorized_keys"
+    )
+    try:
+        _, stdout, stderr = client.exec_command(install_cmd, timeout=15)
+        rc = stdout.channel.recv_exit_status()
+        err = stderr.read().decode(errors="replace").strip()
+    except Exception as e:
+        client.close()
+        _fail(f"Failed to run install command on Pi: {e}")
+        return False
+    finally:
+        client.close()
+
+    if rc != 0:
+        _fail(f"Installing key on Pi failed (rc={rc}): {err}")
+        return False
+
+    if not _ssh_key_auth_works(cfg):
+        _fail("Key was uploaded but key auth still doesn't work — odd.")
+        _info("Try `ssh -v " + ssh_target(cfg) + "` from a terminal to see why.")
+        return False
+
+    _ok("SSH key installed on the Pi — passwordless from now on.")
+    return True
 
 
 def check_reachable(cfg: dict) -> bool:
@@ -431,13 +637,22 @@ def _logic() -> int:
         ui_mode.get_app().banner("Vision Pi", "set up the Orange Pi sight system")
 
     cfg = load_cfg()
-    cfg = gather_config(cfg)
-    if cfg is None:
+    gathered = gather_config(cfg)
+    if gathered is None:
         _fail("Setup cancelled.")
         return 1
+    cfg, password = gathered
 
     if not check_reachable(cfg):
         return 1
+
+    # Get key auth working before anything that uses SSH (push_files,
+    # remote_install, write_team, setup_cross_ssh) — those all rely on
+    # passwordless ssh / rsync.
+    if not bootstrap_ssh_key(cfg, password):
+        return 1
+    # Drop the password from memory now that keys are in place.
+    password = None  # noqa: F841
 
     if not push_files(cfg):
         return 1

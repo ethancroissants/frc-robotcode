@@ -31,6 +31,14 @@ def _logic() -> int:
     if not base.check_reachable(cfg):
         return 1
 
+    # If key auth ever broke (Pi got re-flashed, keys cleared, etc.) the
+    # update path would silently hang on the first ssh call. Detect that
+    # and bounce back into the full setup, which knows how to reprompt
+    # for a password and re-bootstrap.
+    if not base._ssh_key_auth_works(cfg):
+        base._info("SSH key auth no longer works — running full setup to fix it.")
+        return base._logic()
+
     if not base.push_files(cfg):
         return 1
 

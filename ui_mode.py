@@ -500,6 +500,34 @@ class App:
         self._buffer(f"  ? {prompt} → {ans!r}\n")
         return ans
 
+    def ask_password(
+        self,
+        prompt: str,
+        title: str = "Cold Fusion Robotics",
+    ) -> str | None:
+        """Same as ask_string, but masks input and never logs the value.
+
+        Returns the raw string (not stripped — passwords can have leading
+        / trailing whitespace, however weird), or None if cancelled.
+        """
+        reply = _Reply()
+
+        def show() -> None:
+            if self._closed:
+                reply.put(None)
+                return
+            # `show="*"` makes the entry render bullets instead of plaintext.
+            result = simpledialog.askstring(
+                title, prompt, parent=self.root, show="*"
+            )
+            reply.put(result)
+
+        self.root.after(0, show)
+        ans = reply.get()
+        # Log only that *something* was entered, never the value.
+        self._buffer(f"  ? {prompt} → {'(set)' if ans else '(blank)'}\n")
+        return ans if isinstance(ans, str) else None
+
     def _set_hint(self, msg: str) -> None:
         def do() -> None:
             if self._closed or self._done:

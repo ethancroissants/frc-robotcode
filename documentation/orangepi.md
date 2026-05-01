@@ -230,7 +230,46 @@ You don't need a monitor or keyboard for the Pi after first boot.
 Setup is "headless" — flash the SD, plug it in, then drive it from
 the laptop over SSH.
 
+### What needs to be powered on, and what network you need
+
+This trips people up the first time. Quick reference:
+
+| Step                     | Pi          | rio         | Radio       | Laptop network              |
+| ------------------------ | ----------- | ----------- | ----------- | --------------------------- |
+| 1. Flash SD card         | OFF         | —           | —           | any (download only)         |
+| 2. First boot of Pi      | ON (powered) | —          | —           | same network as the Pi¹     |
+| 3. Find Pi from laptop   | ON          | —           | —           | same network as the Pi¹     |
+| 4. Set up Vision Pi      | ON          | **ON**²     | ON          | **robot WiFi (FRC-1279)**   |
+| 5. Deploy to Robot       | ON³         | **ON**      | ON          | **robot WiFi (FRC-1279)**   |
+| Daily use                | ON          | ON          | ON          | robot WiFi                  |
+
+¹ For Steps 2–3 you can use any network as long as the Pi and your
+laptop are on the same one — your home WiFi, school network, or the
+robot radio all work. The robot's radio is recommended because it's
+where the Pi will live permanently anyway.
+
+² **rio should be on for Step 4** so the wizard can install SSH keys
+in both directions (Pi → rio for `orangepi_pusher.py`'s reverse path,
+rio → Pi so the rio can push files automatically). If the rio is off
+when you run setup, the wizard will say "rio not reachable — skipping
+cross-host SSH for now" and finish the rest. Re-run setup later with
+the rio on, or run the **Set up Vision Pi** button again — it's
+idempotent.
+
+³ The Pi doesn't actually need to be on for Step 5 — the rio just
+caches the new files and pushes them next time the Pi boots. But if
+both are on, the new code lands within seconds of the deploy.
+
+### Connecting your laptop to the robot WiFi
+
+The control panel's **Connect** button (Connection section) does this
+for you on Windows: it joins `FRC-1279`, drops the Windows firewall,
+and pings the rio. If you're on macOS / Linux, join the WiFi by hand
+and verify with `ping 10.12.79.2` (rio) and `ping 10.12.79.11` (Pi).
+
 ### Step 1 — flash the SD card
+
+> **Powered on:** nothing.  **Network:** any (just need to download).
 
 1. Download **Armbian** for Orange Pi 5 (Bookworm minimal):
    <https://www.armbian.com/orange-pi-5/>
@@ -239,6 +278,11 @@ the laptop over SSH.
 4. Eject the card.
 
 ### Step 2 — first boot (one-time, with monitor)
+
+> **Powered on:** Pi (with monitor + keyboard temporarily).
+> **Network:** plug the Pi's ethernet into any network that has DHCP +
+> internet — the robot radio is fine, your house/school WiFi router is
+> fine. The rio does not need to be on yet.
 
 For first boot you'll want a USB keyboard and HDMI monitor on the Pi
 just for ~5 minutes:
@@ -260,8 +304,9 @@ just for ~5 minutes:
 
 ### Step 3 — find the Pi from your laptop
 
-Your laptop should be on the same network as the Pi (same WiFi or
-plugged into the radio).
+> **Powered on:** Pi.  **Network:** your laptop must be on the same
+> network as the Pi (same WiFi router or plugged into the same radio).
+> The rio still doesn't need to be on.
 
 ```bash
 ping orangepi.local
@@ -273,6 +318,16 @@ the IP. Either works for the rest of the setup.
 
 ### Step 4 — provision from the laptop
 
+> **Powered on:** Pi, **rio**, radio.
+> **Network:** your laptop on the robot WiFi (`FRC-1279`). The Connect
+> button in the control panel does this for you on Windows.
+>
+> Why the rio needs to be on: the wizard installs SSH keys both
+> directions (rio's `lvuser` → Pi for the auto-push, Pi → rio admin for
+> debugging). If the rio is off, the wizard finishes everything else
+> and prints "rio not reachable — skipping cross-host SSH for now";
+> re-run setup later with the rio on. It's idempotent.
+
 ```bash
 python start.py
 ```
@@ -280,15 +335,21 @@ python start.py
 Click **Set up Vision Pi**. The wizard will:
 
 1. Ask for the Pi's host (`orangepi.local` or its IP) and user (`orangepi`).
-2. rsync this whole `orangepi/` folder onto the Pi.
-3. Run `install.sh` on the Pi, which:
-   - apt-installs `ffmpeg`, `python3-venv`, `v4l-utils`
-   - creates a Python venv and installs FastAPI / uvicorn / pyntcore
+2. Ask for the Pi user's password (the one you set on first boot).
+   - On first run, the wizard uses this to install your laptop's SSH
+     key on the Pi. After that the password is forgotten and every
+     subsequent step is passwordless.
+   - On re-runs, leave this blank — key auth already works.
+3. rsync this whole `orangepi/` folder onto the Pi.
+4. Run `install.sh` on the Pi, which:
+   - apt-installs `ffmpeg`, `python3-venv`, `v4l-utils`, `libgl1`
+   - creates a Python venv and installs FastAPI / uvicorn / pyntcore /
+     OpenCV
    - **pins the Pi's IP to `10.TE.AM.11`** on `eth0`
    - drops a sudoers rule so the rio can `systemctl restart` later
    - installs and starts the `cold-fusion-sight` systemd service
-4. Set up SSH keys both directions (Pi ↔ admin@rio, Pi ↔ lvuser@rio).
-5. Write `pi_target.json` at the repo root so the rio knows where the
+5. Set up SSH keys both directions (Pi ↔ admin@rio, Pi ↔ lvuser@rio).
+6. Write `pi_target.json` at the repo root so the rio knows where the
    Pi lives once you deploy.
 
 When done, click **Open Sight UI**. Your browser lands on
@@ -296,6 +357,10 @@ When done, click **Open Sight UI**. Your browser lands on
 live camera feed.
 
 ### Step 5 — the very next deploy
+
+> **Powered on:** **rio** (and Pi if you want changes to land
+> immediately — the rio caches them either way).  **Network:** laptop
+> on `FRC-1279`.
 
 Press **Deploy to Robot**. The rio gets the new code (including
 `pi_target.json`); on its next boot, `orangepi_pusher` will SSH the
@@ -507,6 +572,9 @@ After deploy:
 
 After Set up Vision Pi finishes successfully, do this once to verify
 end-to-end:
+
+> **Powered on:** radio, rio, Pi (everything).
+> **Network:** laptop on `FRC-1279` (use the **Connect** button).
 
 1. **Power cycle the robot** (radio + rio + Pi all booting fresh).
 2. Wait ~60 seconds for everything to come up.
