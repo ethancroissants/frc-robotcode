@@ -190,9 +190,10 @@ def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
     auth already works, or the user left the prompt blank. The password is
     *only* held in memory long enough to set up keys; never written to disk.
 
-    Idempotent: if the laptop already has key auth working for the saved
-    user@host, we skip the password prompt entirely. Re-runs of setup or
-    update don't bother the user.
+    Probes key auth up front and tells the user whether they need to type
+    anything. We still SHOW the password field even when key auth works,
+    because a "no, I want to re-bootstrap from scratch" escape hatch is
+    cheaper than debugging a flaky probe later.
     """
     host = _ask_string(
         "Pi hostname or IP", default=cfg.get("host", DEFAULT_HOST)
@@ -207,17 +208,22 @@ def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
     cfg["host"] = host
     save_cfg(cfg)
 
-    # Try key auth before bothering the user with a password prompt.
-    # _ssh_key_auth_works also auto-clears stale known_hosts entries if
-    # the Pi was reflashed and its host key changed.
-    if _ssh_key_auth_works(cfg):
-        return cfg, None
-
-    password = _ask_password(
-        f"Password for {user}@{host}\n"
-        "(leave blank if SSH key auth is already set up)"
-    )
-    return cfg, password
+    # Probe key auth so the prompt copy can tell the user whether they
+    # need to type anything. This also clears a stale known_hosts entry
+    # as a side effect (Pi was reflashed → new host key).
+    key_works = _ssh_key_auth_works(cfg)
+    if key_works:
+        prompt = (
+            f"Password for {user}@{host}\n"
+            "(SSH key auth already works — leave blank to skip)"
+        )
+    else:
+        prompt = (
+            f"Password for {user}@{host}\n"
+            "(needed once to install the SSH key — saved for future runs)"
+        )
+    password = _ask_password(prompt)
+    return cfg, (password or None)
 
 
 def _ssh_key_auth_works(cfg: dict, attempts: int = 1) -> bool:
