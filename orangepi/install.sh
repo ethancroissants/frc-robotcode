@@ -56,17 +56,25 @@ if [ -n "$APT_MISSING" ]; then
   log "apt packages still missing: $APT_MISSING"
   # Try the local apt cache only (--no-download). Works iff the Pi was
   # online previously and `apt-get update && apt-get install` had cached
-  # these. If not, we fail loud rather than silently skip.
+  # these. If not, we print a clear ONE-TIME hotspot recipe.
   if sudo apt-get install -y --no-download $APT_MISSING 2>/dev/null; then
     log "installed from local apt cache"
   else
-    warn "The Pi has no internet and these packages aren't cached locally."
-    warn "Connect the Pi to a network with internet ONCE for first-time"
-    warn "install (a phone hotspot works), then re-run setup. Missing:"
-    warn "  $APT_MISSING"
-    warn "Alternatively install them by hand on the Pi and re-run setup:"
-    warn "  sudo apt-get install -y $APT_MISSING"
-    fail "apt deps unsatisfied — can't continue."
+    fail "
+   ===========================================================
+   apt packages missing on the Pi:  $APT_MISSING
+
+   The Pi has no internet, and these aren't cached. Run this
+   ONCE on the Pi (connect it to a phone hotspot or any WiFi
+   with internet for ~2 minutes):
+
+     sudo apt-get update
+     sudo apt-get install -y $APT_MISSING
+
+   Then move the Pi back to the robot network and re-run
+   Vision Pi setup. From that point on the Pi never needs
+   internet again.
+   ==========================================================="
   fi
 else
   log "all required apt packages already installed — skipping apt step"

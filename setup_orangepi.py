@@ -389,14 +389,23 @@ def detect_pi_env(cfg: dict) -> dict | None:
     """
     _step("Probing the Pi")
     target = ssh_target(cfg)
-    probe = (
-        "echo PY:$(python3 -c 'import sys;print(\"%d.%d\"%sys.version_info[:2])');"
-        "echo ARCH:$(uname -m);"
-        "for p in ffmpeg python3-venv python3-pip v4l-utils libgl1 "
-        "libglib2.0-0 libglib2.0-0t64; do "
-        "  dpkg -s $p >/dev/null 2>&1 && echo HAVE:$p || echo NEED:$p; "
-        "done"
-    )
+    # Probe each requirement as a list of alternatives separated by '|'.
+    # If ANY alternative is installed, the dep is satisfied (handles the
+    # libglib2.0-0 → libglib2.0-0t64 rename in Debian Trixie's t64
+    # transition). We emit NEED only if every alternative is missing.
+    probe = r"""
+echo PY:$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')
+echo ARCH:$(uname -m)
+for spec in 'python3-venv' 'python3-pip' 'libgl1' 'libglib2.0-0t64|libglib2.0-0'; do
+  ok=0
+  IFS='|'
+  for pkg in $spec; do
+    if dpkg -s "$pkg" >/dev/null 2>&1; then ok=1; echo HAVE:$pkg; fi
+  done
+  unset IFS
+  if [ $ok -eq 0 ]; then echo "NEED:${spec%%|*}"; fi
+done
+"""
     try:
         result = subprocess.run(
             ["ssh", target, probe],
@@ -430,6 +439,97 @@ def detect_pi_env(cfg: dict) -> dict | None:
     cfg["pi_env"] = info
     save_cfg(cfg)
     return info
+
+
+def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
+    """Briefly connect the Pi's wlan0 to a user-supplied WiFi to run apt.
+
+    This solves the chicken-and-egg of `python3-pip`/`libgl1`/etc. on a
+    fresh Pi that lives on the FRC robot network (no internet). The Pi's
+    ethernet to the robot stays untouched; we only toggle wlan0.
+
+    Flow on the Pi (one ssh round-trip):
+      1. nmcli adds a temporary connection profile `cf-temp-install`.
+      2. Brings it up on wlan0; DHCP/DNS settle.
+      3. apt-get update + apt-get install -y <missing>.
+      4. Down + delete the profile (trap EXIT — runs even on failure).
+
+    Returns True on success. False if the user skipped, the WiFi connect
+    failed, or apt install failed. The caller handles aborting setup.
+    """
+    if not apt_missing:
+        return True
+
+    _step("Installing missing apt packages on the Pi (one-time internet bridge)")
+    _info(f"Missing: {' '.join(apt_missing)}")
+    _info(
+        "We'll briefly connect the Pi's WiFi (wlan0) to a network with "
+        "internet, install the packages, then disconnect. The Pi's robot "
+        "ethernet stays connected the whole time."
+    )
+
+    ssid = _ask_string("WiFi network name (SSID)", default="")
+    if not ssid:
+        _fail("No SSID provided — skipping apt install.")
+        _info(
+            "Re-run setup with the SSID/password, or install on the Pi "
+            "manually with: sudo apt-get install -y " + " ".join(apt_missing)
+        )
+        return False
+    wifi_pass = _ask_password(
+        f"Password for '{ssid}' (leave blank for open network)"
+    ) or ""
+
+    target = ssh_target(cfg)
+    ssid_q = shlex.quote(ssid)
+    psk_q = shlex.quote(wifi_pass)
+    pkgs_q = " ".join(shlex.quote(p) for p in apt_missing)
+
+    # Build the remote script. trap EXIT guarantees the temp connection is
+    # cleaned up even if `set -e` aborts midway. Hard-coded con-name so we
+    # don't have to deal with weird SSID characters in connection lookup.
+    script_lines = [
+        "set -e",
+        "cleanup() {",
+        "  sudo nmcli connection down cf-temp-install >/dev/null 2>&1 || true",
+        "  sudo nmcli connection delete cf-temp-install >/dev/null 2>&1 || true",
+        "}",
+        "trap cleanup EXIT",
+        "if ! command -v nmcli >/dev/null; then",
+        "  echo 'nmcli not installed — Pi OS Bookworm/Trixie should have it; aborting' >&2",
+        "  exit 2",
+        "fi",
+        f"sudo nmcli connection add type wifi con-name cf-temp-install "
+        f"ifname wlan0 ssid {ssid_q} >/dev/null",
+    ]
+    if wifi_pass:
+        script_lines.append(
+            f"sudo nmcli connection modify cf-temp-install "
+            f"wifi-sec.key-mgmt wpa-psk wifi-sec.psk {psk_q}"
+        )
+    script_lines += [
+        "sudo nmcli connection modify cf-temp-install connection.autoconnect no",
+        "echo '[bridge] connecting wlan0 to the temp WiFi…'",
+        "sudo nmcli connection up cf-temp-install",
+        "sleep 3",  # let DHCP / DNS settle
+        "echo '[bridge] running apt-get update'",
+        "sudo apt-get update",
+        f"echo '[bridge] installing: {' '.join(apt_missing)}'",
+        f"sudo apt-get install -y {pkgs_q}",
+        "echo '[bridge] done — disconnecting'",
+    ]
+    script = "\n".join(script_lines) + "\n"
+
+    rc = _stream(["ssh", "-t", target, f"bash -c {shlex.quote(script)}"])
+    if rc != 0:
+        _fail("Internet bridge / apt install failed (rc={}).".format(rc))
+        _info(
+            "Common causes: wrong WiFi password, SSID typo, weak signal, "
+            "or the Pi has no wlan0 (e.g. wired-only model)."
+        )
+        return False
+    _ok("apt packages installed; temp WiFi disconnected.")
+    return True
 
 
 def check_pi_wheel_cache(pi_env: dict) -> bool:
@@ -931,6 +1031,21 @@ def _logic() -> int:
 
     if not push_files(cfg):
         return 1
+
+    # If apt packages are missing, briefly bridge the Pi's wlan0 to a
+    # user-supplied WiFi (laptop's robot-network connection stays put).
+    # We need temp NOPASSWD set up first since the bridge uses sudo for
+    # nmcli + apt-get. Set it up here so it's available across both
+    # bridge_internet_for_apt and run_remote_install.
+    if pi_env.get("apt_missing"):
+        if not _try_install_temp_nopasswd(cfg, password):
+            _fail("Couldn't grant temporary sudo — re-run setup and enter password.")
+            return 1
+        if not bridge_internet_for_apt(cfg, pi_env["apt_missing"]):
+            _remove_temp_nopasswd(cfg)
+            return 1
+        # Apt deps are now installed — tell install.sh to skip the apt step.
+        pi_env["apt_missing"] = []
 
     # Pass the password through to the install step so we can grant
     # temporary passwordless sudo for apt/systemctl. Drop it from memory
