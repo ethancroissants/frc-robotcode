@@ -170,8 +170,10 @@ class Client:
 
     def stop(self) -> None:
         self._stop = True
-        self._out_q_event.set()
         if self._loop and self._loop.is_running():
+            # _loop_wake lives on the asyncio thread, so cross-thread wake
+            # has to go through call_soon_threadsafe.
+            self._loop.call_soon_threadsafe(self._loop_wake.set)
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -251,7 +253,9 @@ class Client:
             ts_us = int(time.time() * 1_000_000)
             frame = msgpack.packb([pub.topic_id, ts_us, type_id, value])
             self._out_q.append(frame)
-        self._out_q_event.set()
+        # Wake the asyncio writer task so it drains _out_q immediately
+        # instead of waiting up to 100ms on its idle tick. Cross-thread
+        # access to an asyncio.Event has to go via call_soon_threadsafe.
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop_wake.set)
 
