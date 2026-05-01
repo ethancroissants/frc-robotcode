@@ -423,75 +423,64 @@ def detect_pi_env(cfg: dict) -> dict | None:
         _fail(f"Couldn't parse probe output: {result.stdout!r}")
         return None
     _ok(f"Pi: Python {info['py']}, arch {info['arch']}")
+
+    # Persist into .orangepi_cfg so the next run can stage wheels without
+    # being able to reach the Pi (e.g. when the laptop is on home WiFi for
+    # the download step but the Pi is on the robot's network).
+    cfg["pi_env"] = info
+    save_cfg(cfg)
     return info
 
 
-def stage_pip_wheels(cfg: dict, pi_env: dict) -> bool:
-    """Download Pi-compatible wheels on the laptop into orangepi/vendor/wheels/.
+def check_pi_wheel_cache(pi_env: dict) -> bool:
+    """Verify the laptop has staged Pi wheels (created by setup.py).
 
-    The Pi has no internet (it lives on the FRC robot network), so the laptop
-    pre-fetches every wheel from PyPI matching the Pi's Python version + arch
-    and `push_files` ships them along with the rest of the orangepi/ folder.
-    install.sh later does `pip install --no-index --find-links vendor/wheels`.
+    setup_orangepi.py never downloads — wheel staging happens in setup.py
+    while the laptop is on real internet. This function just verifies the
+    cache is present and matches the Pi's Python/arch. If it doesn't, we
+    point the user at setup.py (which they should run on home WiFi).
     """
-    _step("Pre-downloading Pi pip wheels on the laptop")
+    _step("Checking Pi wheel cache")
     wheels_dir = ORANGEPI_DIR / "vendor" / "wheels"
-    wheels_dir.mkdir(parents=True, exist_ok=True)
-    # Wipe stale wheels so we don't ship mismatched versions if pyproject /
-    # requirements.txt changed since the last run.
-    for old in wheels_dir.glob("*.whl"):
-        old.unlink()
-    for old in wheels_dir.glob("*.tar.gz"):
-        old.unlink()
-
-    arch = pi_env["arch"]
-    py = pi_env["py"]  # e.g. "3.11"
-    # Map kernel arch → pip platform tag(s). aarch64 / armv7l / x86_64 cover
-    # Pi 5 (64-bit), Pi 4 32-bit, and weird emulated builds respectively.
-    plat_tags = {
-        "aarch64": ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
-        "arm64":   ["manylinux_2_28_aarch64", "manylinux2014_aarch64", "linux_aarch64"],
-        "armv7l":  ["manylinux2014_armv7l", "linux_armv7l"],
-        "x86_64":  ["manylinux_2_28_x86_64", "manylinux2014_x86_64", "linux_x86_64"],
-    }.get(arch)
-    if not plat_tags:
-        _fail(f"Unknown Pi arch '{arch}' — can't pick wheel platform tags.")
-        return False
-
+    stamp = wheels_dir / ".cache-stamp"
     req = ORANGEPI_DIR / "requirements.txt"
-    if not req.exists():
-        _fail(f"{req} missing.")
-        return False
 
-    cmd = [
-        sys.executable, "-m", "pip", "download",
-        "--only-binary", ":all:",
-        "--python-version", py,
-        "--implementation", "cp",
-        "--abi", f"cp{py.replace('.', '')}",
-        *sum((["--platform", t] for t in plat_tags), []),
-        "-r", str(req),
-        "-d", str(wheels_dir),
-    ]
-    rc = _stream(cmd)
-    if rc != 0:
-        # Some packages don't tag a specific abi (pure-python sdists); retry
-        # without --abi to let pip pick `none` ABI wheels too.
-        _info("Retrying without strict ABI pinning (some pure-python deps)…")
-        cmd_loose = [c for c in cmd if c not in ("--abi", f"cp{py.replace('.', '')}")]
-        rc = _stream(cmd_loose)
-    if rc != 0:
-        _fail("pip download failed — see details panel.")
+    n_wheels = len(list(wheels_dir.glob("*.whl"))) if wheels_dir.exists() else 0
+    if n_wheels == 0 or not stamp.exists():
+        _fail("No Pi wheels staged on the laptop.")
         _info(
-            "If a specific package has no aarch64 wheel, you may need to "
-            "build it on the Pi during a one-time online session, or "
-            "remove it from orangepi/requirements.txt."
+            "Run `python setup.py` while on a WiFi with internet — it "
+            "downloads Pi-compatible wheels into orangepi/vendor/wheels/. "
+            "Then come back to the robot's WiFi and re-run Vision Pi setup."
         )
         return False
 
-    n = len(list(wheels_dir.glob("*.whl"))) + len(list(wheels_dir.glob("*.tar.gz")))
-    _ok(f"Staged {n} wheel(s) in orangepi/vendor/wheels/.")
+    py = pi_env.get("py", "?")
+    arch = pi_env.get("arch", "?")
+    expected = _wheel_cache_key(req, py, arch)
+    if stamp.read_text().strip() != expected:
+        _fail(
+            f"Pi wheel cache is stale or built for the wrong Python/arch "
+            f"(this Pi is Python {py} on {arch})."
+        )
+        _info(
+            "Re-run `python setup.py` on internet to refresh the cache — "
+            "it picks up the Pi's actual specs from .orangepi_cfg."
+        )
+        return False
+
+    _ok(f"Pi wheel cache OK ({n_wheels} wheels for Python {py}/{arch}).")
     return True
+
+
+def _wheel_cache_key(req_path: Path, py: str, arch: str) -> str:
+    """Hash of inputs that, when changed, invalidate the staged wheel cache.
+    Mirrors _pi_wheel_cache_key in setup.py — keep them in sync."""
+    import hashlib
+    h = hashlib.sha256()
+    h.update(req_path.read_bytes())
+    h.update(f"|py={py}|arch={arch}".encode())
+    return h.hexdigest()
 
 
 def check_reachable(cfg: dict) -> bool:
@@ -927,17 +916,17 @@ def _logic() -> int:
     if not bootstrap_ssh_key(cfg, password):
         return 1
 
-    # Probe the Pi (Python version + arch + which apt deps are already
-    # installed). Used for offline wheel staging and to skip apt install
-    # for packages already present.
+    # Probe the Pi (Python version + arch + which apt deps are missing).
+    # Saved into .orangepi_cfg so the next `python setup.py` run on home
+    # WiFi knows what Python/arch to download wheels for.
     pi_env = detect_pi_env(cfg)
     if pi_env is None:
         return 1
 
-    # Pre-download Pi wheels on the laptop. The Pi lives on the robot
-    # network and has no internet — same pattern as the rio. Wheels go
-    # into orangepi/vendor/wheels/ which gets shipped by push_files.
-    if not stage_pip_wheels(cfg, pi_env):
+    # Verify the wheel cache that setup.py was supposed to have staged
+    # while on internet. If it's missing/stale, we tell the user to run
+    # setup.py on home WiFi and stop here.
+    if not check_pi_wheel_cache(pi_env):
         return 1
 
     if not push_files(cfg):

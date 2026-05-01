@@ -43,3 +43,6 @@ push.py
 # Pi vendoring — laptop-side cached wheels for offline Pi install. Re-fetched
 # on every setup_orangepi.py run, so committing them would just churn diffs.
 orangepi/vendor/
+
+# Per-laptop Pi target (host/user/cached pi_env) — local config, not source.
+.orangepi_cfg
