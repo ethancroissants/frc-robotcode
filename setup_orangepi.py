@@ -534,6 +534,21 @@ def bridge_internet_for_apt(cfg: dict, apt_missing: list[str]) -> bool:
         "  ip route >&2 || true",
         "  exit 3",
         "fi",
+        # Sync clock from an HTTPS Date header. If the Pi has no RTC battery
+        # or has been off the network, its wall clock can drift into the past.
+        # apt's signature verifier (sqv) rejects 'not yet live' signatures, so
+        # apt-get update silently keeps stale package lists that point at dead
+        # mirror URLs — which then 404/timeout during install. One-shot fix.
+        "echo '[bridge] syncing system clock from HTTPS Date header…'",
+        "http_date=$(curl -sI --max-time 8 --interface wlan0 "
+        "https://archive.raspberrypi.com/ "
+        "| awk -F': ' 'tolower($1)==\"date\"{print $2}' | tr -d '\\r')",
+        "if [ -n \"$http_date\" ]; then",
+        "  sudo date -u -s \"$http_date\" >/dev/null && "
+        "echo \"[bridge] clock set to $(date -u)\"",
+        "else",
+        "  echo '[bridge] could not read Date header — continuing anyway' >&2",
+        "fi",
         "echo '[bridge] running apt-get update'",
         "sudo apt-get update",
         f"echo '[bridge] installing: {' '.join(apt_missing)}'",
