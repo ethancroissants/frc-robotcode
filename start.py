@@ -58,6 +58,31 @@ DEFAULT_TEAM = "1279"
 ROBOT_SSID = "FRC-1279"
 STATUS_POLL_MS = 5000
 
+
+def _build_version() -> str:
+    """Monotonic build version derived from git history.
+
+    `git rev-list --count HEAD` is the commit count of the current branch,
+    which goes up by 1 every commit — exactly the "increment per commit"
+    versioning the team asked for. Falls back to '?' if git isn't available
+    or this is a downloaded zip with no .git dir.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "rev-list", "--count", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode == 0:
+            n = out.stdout.strip()
+            if n.isdigit():
+                return f"v{n}"
+    except Exception:
+        pass
+    return "v?"
+
+
+BUILD_VERSION = _build_version()
+
 # roboRIO ships with these SSH accounts; `admin` has no password by default.
 SSH_USER = "admin"
 
@@ -470,29 +495,42 @@ def main() -> int:
     ).pack(anchor="w")
     tk.Label(
         htitles,
-        text="Team 1279 — Robot Code Control Panel",
+        text=f"Team 1279 — Robot Code Control Panel · {BUILD_VERSION}",
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 10),
     ).pack(anchor="w", pady=(1, 0))
 
-    # Live connection indicator. The dot recolors as we re-poll every
+    # Live connection indicators. Each dot recolors as we re-poll every
     # STATUS_POLL_MS milliseconds. Pinging happens on a background thread
-    # so the UI stays responsive while ICMP times out.
+    # so the UI stays responsive while ICMP times out. Two rows: robot on
+    # top (rio), Vision Pi underneath.
     hstatus = tk.Frame(hinner, bg=PANEL)
     hstatus.pack(side="right", padx=(12, 0))
+
+    hstatus_row1 = tk.Frame(hstatus, bg=PANEL)
+    hstatus_row1.pack(anchor="e")
     status_dot = tk.Label(
-        hstatus, text="●", bg=PANEL, fg=DIM, font=("Helvetica", 14)
+        hstatus_row1, text="●", bg=PANEL, fg=DIM, font=("Helvetica", 14)
     )
     status_dot.pack(side="left")
     status_text = tk.Label(
-        hstatus,
-        text="Checking…",
-        bg=PANEL,
-        fg=DIM,
+        hstatus_row1, text="Checking…", bg=PANEL, fg=DIM,
         font=("Helvetica", 10),
     )
     status_text.pack(side="left", padx=(4, 0))
+
+    hstatus_row2 = tk.Frame(hstatus, bg=PANEL)
+    hstatus_row2.pack(anchor="e")
+    pi_status_dot = tk.Label(
+        hstatus_row2, text="●", bg=PANEL, fg=DIM, font=("Helvetica", 14)
+    )
+    pi_status_dot.pack(side="left")
+    pi_status_text = tk.Label(
+        hstatus_row2, text="Vision Pi: —", bg=PANEL, fg=DIM,
+        font=("Helvetica", 10),
+    )
+    pi_status_text.pack(side="left", padx=(4, 0))
 
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x")
 
@@ -539,27 +577,45 @@ def main() -> int:
             if card is not None:
                 card.set_enabled(bool(reachable))
 
+    def _set_pi_status(reachable: bool, host: str | None, *, configured: bool) -> None:
+        if not alive["v"]:
+            return
+        if not configured:
+            pi_status_dot.configure(fg=DIM)
+            pi_status_text.configure(text="Vision Pi: not set up", fg=DIM)
+        elif reachable:
+            pi_status_dot.configure(fg=OK_COLOR)
+            pi_status_text.configure(text=f"Vision Pi: connected ({host})", fg=FG)
+        else:
+            pi_status_dot.configure(fg=FAIL_COLOR)
+            pi_status_text.configure(text="Vision Pi: offline", fg=FG)
+
     def _refresh_pi_cards() -> None:
         """Recompute Vision Pi card enabled-state + subtitles.
-        Set-up is the entry point so it's always enabled. The other three
-        only make sense once the user has finished setup at least once."""
+
+        pi_setup is always enabled — it's the entry point AND the updater
+        (idempotent re-runs push code, no separate update button anymore).
+        pi_open and pi_ssh need the Pi to be reachable on the network.
+        """
         if not alive["v"]:
             return
         is_set_up = _pi_is_set_up()
         host = pi_host["v"]
         reachable = host is not None
+        _set_pi_status(reachable, host, configured=is_set_up)
 
         setup_card = card_refs.get("pi_setup")
         if setup_card is not None:
             if is_set_up:
-                setup_card.set_subtitle("Re-run the installer (safe — idempotent).")
+                setup_card.set_subtitle(
+                    "Re-run to push code updates (safe — idempotent)."
+                )
             else:
                 setup_card.set_subtitle("Start here — installs the Pi-side service.")
 
-        for cid, when_offline in (
-            ("pi_update", "Pi offline — power it and connect to the robot network."),
-            ("pi_open", "Pi offline — power it and connect to the robot network."),
-            ("pi_ssh", "Pi offline — power it and connect to the robot network."),
+        for cid, online_subtitle in (
+            ("pi_open", lambda h: f"Open http://{h}:8080/ in your browser."),
+            ("pi_ssh", lambda h: f"Open a terminal connected to {h}."),
         ):
             card = card_refs.get(cid)
             if card is None:
@@ -568,26 +624,26 @@ def main() -> int:
                 card.set_subtitle("Run \"Set up Vision Pi\" first.")
                 card.set_enabled(False)
             elif not reachable:
-                card.set_subtitle(when_offline)
+                card.set_subtitle(
+                    "Pi offline — power it and connect to the robot network."
+                )
                 card.set_enabled(False)
             else:
                 card.set_enabled(True)
-                if cid == "pi_update":
-                    card.set_subtitle(f"Push the latest sight code to {host} and restart.")
-                elif cid == "pi_open":
-                    card.set_subtitle(f"Open http://{host}:8080/ in your browser.")
-                elif cid == "pi_ssh":
-                    card.set_subtitle(f"Open a terminal connected to {host}.")
+                card.set_subtitle(online_subtitle(host))
 
     def _poll_status() -> None:
         if not alive["v"]:
             return
 
         def worker() -> None:
-            ok_, host = _check_bot_status()
-            # Also probe the Pi if we know where to look for it.
+            # Probe windows are generous on purpose: on Windows, mDNS
+            # resolution alone can eat 1-2s before any ICMP fires, and a
+            # too-tight timeout was previously leaving buttons stuck in
+            # disabled state for users whose hosts were actually reachable.
+            ok_, host = _check_bot_status(timeout_s=2.0)
             pi_target = _pi_target_host()
-            pi_ok = bool(pi_target) and ping(pi_target, timeout_s=0.6)
+            pi_ok = bool(pi_target) and ping(pi_target, timeout_s=2.5)
 
             if alive["v"]:
                 def apply() -> None:
@@ -897,16 +953,10 @@ def main() -> int:
         ]),
         ("Vision Pi", [
             (
-                "1. Set up Vision Pi",
-                "Start here — installs the Pi-side service.",
+                "1. Set up / Update Vision Pi",
+                "Initial install or push the latest code to the Pi.",
                 lambda: _launch(["setup_orangepi.py", "--ui"]),
                 "pi_setup",
-            ),
-            (
-                "2. Update Vision Pi",
-                "Run \"Set up Vision Pi\" first.",
-                lambda: _launch(["update_orangepi.py", "--ui"]),
-                "pi_update",
             ),
             (
                 "3. Open Sight UI",
@@ -953,9 +1003,9 @@ def main() -> int:
             # Cards that need a live SSH/HTTP connection start disabled; the
             # status poller flips them on once the relevant host answers.
             #   - ssh / wipe: rio ping required
-            #   - pi_update / pi_open / pi_ssh: Pi must be set up + reachable
-            #   - pi_setup is always enabled (it's the entry point)
-            disabled_ids = {"ssh", "wipe", "pi_update", "pi_open", "pi_ssh"}
+            #   - pi_open / pi_ssh: Pi must be set up + reachable
+            #   - pi_setup is always enabled (it's the entry point + updater)
+            disabled_ids = {"ssh", "wipe", "pi_open", "pi_ssh"}
             initial_enabled = card_id not in disabled_ids
             card = Card(grid, title, subtitle, cmd, enabled=initial_enabled)
             card.grid(row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4)

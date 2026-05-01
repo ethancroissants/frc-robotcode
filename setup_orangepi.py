@@ -155,10 +155,13 @@ def have(tool: str) -> bool:
 def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
     """Ask for / confirm the Pi's user@host (saved) + password (not saved).
 
-    Returns (cfg, password) where password may be None if the user left
-    it blank — we'll skip the SSH-key bootstrap and assume key auth is
-    already in place. The password is *only* held in memory long enough
-    to set up keys; it's never written to disk.
+    Returns (cfg, password) where password may be None — meaning either key
+    auth already works, or the user left the prompt blank. The password is
+    *only* held in memory long enough to set up keys; never written to disk.
+
+    Idempotent: if the laptop already has key auth working for the saved
+    user@host, we skip the password prompt entirely. Re-runs of setup or
+    update don't bother the user.
     """
     host = _ask_string(
         "Pi hostname or IP", default=cfg.get("host", DEFAULT_HOST)
@@ -168,14 +171,21 @@ def gather_config(cfg: dict) -> tuple[dict, str | None] | None:
     user = _ask_string("Pi SSH user", default=cfg.get("user", DEFAULT_USER))
     if not user:
         return None
-    password = _ask_password(
-        f"Password for {user}@{host}\n"
-        "(leave blank if SSH key auth is already set up)"
-    )
     cfg = dict(cfg)
     cfg["user"] = user
     cfg["host"] = host
     save_cfg(cfg)
+
+    # Try key auth before bothering the user with a password prompt.
+    # _ssh_key_auth_works also auto-clears stale known_hosts entries if
+    # the Pi was reflashed and its host key changed.
+    if _ssh_key_auth_works(cfg):
+        return cfg, None
+
+    password = _ask_password(
+        f"Password for {user}@{host}\n"
+        "(leave blank if SSH key auth is already set up)"
+    )
     return cfg, password
 
 
@@ -186,12 +196,18 @@ def _ssh_key_auth_works(cfg: dict, attempts: int = 1) -> bool:
     quickly with non-zero rc on a fresh Pi rather than hanging waiting
     for input we can't supply (stdin is piped by stream_subprocess).
 
+    Auto-recovers from "host key changed" — if a Pi was reflashed, the
+    known_hosts entry is stale and ssh refuses to connect. We detect that
+    error string in stderr, run `ssh-keygen -R host` to clear it, and retry.
+
     On Windows a fresh Pi reachable only via mDNS/IPv6 link-local can flake
     the first probe even when key auth is fine — `attempts` lets the caller
     retry a couple of times with a short delay.
     """
     import time
     target = ssh_target(cfg)
+    host = cfg.get("host", "")
+    cleared_known_hosts = False
     for i in range(max(1, attempts)):
         try:
             result = subprocess.run(
@@ -207,11 +223,54 @@ def _ssh_key_auth_works(cfg: dict, attempts: int = 1) -> bool:
             )
             if result.returncode == 0:
                 return True
+            stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+            # Detect a stale known_hosts entry (Pi was reflashed → new host
+            # key). Clear it once and retry — but only once, to avoid an
+            # infinite loop if something else is wrong.
+            if not cleared_known_hosts and host and (
+                "REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr
+                or "Host key verification failed" in stderr
+                or "WARNING: POSSIBLE DNS SPOOFING" in stderr
+            ):
+                _clear_known_hosts(host)
+                cleared_known_hosts = True
+                continue  # retry immediately; don't count this against attempts
         except Exception:
             pass
         if i + 1 < attempts:
             time.sleep(1.0)
     return False
+
+
+def _clear_known_hosts(host: str) -> None:
+    """Remove any known_hosts entries for `host` (and a few common variants).
+
+    Called when ssh reports a host key mismatch — usually because the Pi was
+    reflashed. Idempotent: ssh-keygen -R is a no-op if the host isn't there.
+    Strips entries by hostname, by IP if we can resolve one, and by short
+    hostname (e.g. 'orangepi' for 'orangepi.local') so windows running both
+    forms get cleaned up.
+    """
+    import socket
+    candidates = {host}
+    # Short form: orangepi.local → orangepi
+    if "." in host:
+        candidates.add(host.split(".")[0])
+    # IP form: useful when the user accessed the Pi by IP at some point.
+    try:
+        for info in socket.getaddrinfo(host, None):
+            candidates.add(info[4][0])
+    except Exception:
+        pass
+    _info(f"Stale SSH host key for {host} — clearing known_hosts and retrying.")
+    for h in candidates:
+        try:
+            subprocess.run(
+                ["ssh-keygen", "-R", h],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
 
 
 def _ensure_local_ssh_key() -> Path | None:

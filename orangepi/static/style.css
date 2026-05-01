@@ -1,24 +1,32 @@
-/* Cold Fusion Sight — control UI theme.
- * Dark, monospace-flavored, high-contrast HUD aesthetic. Built around CSS
- * variables so the team brand color rides through every accent.
+/* Cold Fusion Sight — control UI.
+ *
+ * Light theme, system fonts, minimal chrome. Designed to look like a
+ * dashboard a human made, not an AI mock. Big visuals are reserved for the
+ * data (camera feed, target lock); controls stay calm and predictable.
  */
 
 :root {
-  --bg: #0b0d12;
-  --panel: #14171f;
-  --panel-2: #1a1f2a;
-  --border: #232a38;
-  --border-strong: #354156;
-  --text: #e8ecf6;
-  --text-dim: #9aa3b8;
-  --accent: #ffd400;          /* team yellow */
-  --accent-soft: rgba(255, 212, 0, 0.18);
-  --good: #34d399;
-  --bad: #ef4444;
-  --info: #60a5fa;
-  --shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 12px 30px rgba(0, 0, 0, 0.5);
-  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif;
+  --bg: #f3f4f6;
+  --panel: #ffffff;
+  --panel-2: #f8fafc;
+  --border: #e2e6ee;
+  --border-strong: #cbd2dd;
+  --text: #1f2430;
+  --text-dim: #6b7280;
+  --text-soft: #9aa3b3;
+  --accent: #f5b400;          /* team yellow, slightly muted for light bg */
+  --accent-strong: #d59b00;
+  --accent-soft: rgba(245, 180, 0, 0.18);
+  --good: #16a34a;
+  --good-soft: rgba(22, 163, 74, 0.10);
+  --bad: #dc2626;
+  --bad-soft: rgba(220, 38, 38, 0.10);
+  --info: #2563eb;
+  --info-soft: rgba(37, 99, 235, 0.10);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -29,8 +37,8 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
+  font-size: 14px;
   -webkit-font-smoothing: antialiased;
-  user-select: none;
   height: 100%;
   overflow: hidden;
 }
@@ -45,79 +53,96 @@ body {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 24px;
-  padding: 14px 22px;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
-  border-bottom: 1px solid var(--border-strong);
+  gap: 20px;
+  padding: 10px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-family: var(--mono);
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  gap: 10px;
+  font-weight: 600;
 }
 .brand-mark {
-  color: var(--accent);
-  font-size: 22px;
-  filter: drop-shadow(0 0 8px var(--accent-soft));
+  color: var(--accent-strong);
+  font-size: 18px;
 }
 .brand-name {
-  font-size: 14px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
   color: var(--text);
 }
 
 .status-line {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   justify-self: start;
-  margin-left: 16px;
+  margin-left: 12px;
+  flex-wrap: wrap;
 }
 
 .pill {
-  font-family: var(--mono);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 6px 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 4px 10px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--panel);
   color: var(--text-dim);
+  white-space: nowrap;
 }
-.pill-good { color: var(--good); border-color: rgba(52, 211, 153, 0.4); }
-.pill-bad { color: var(--bad); border-color: rgba(239, 68, 68, 0.4); }
-.pill-info { color: var(--info); border-color: rgba(96, 165, 250, 0.4); }
-.pill-warn { color: var(--accent); border-color: rgba(255, 212, 0, 0.4); }
+.pill-good { color: var(--good); border-color: rgba(22, 163, 74, 0.3); background: var(--good-soft); }
+.pill-bad  { color: var(--bad);  border-color: rgba(220, 38, 38, 0.3); background: var(--bad-soft); }
+.pill-info { color: var(--info); border-color: rgba(37, 99, 235, 0.3); background: var(--info-soft); }
+.pill-warn { color: var(--accent-strong); border-color: rgba(245, 180, 0, 0.4); background: var(--accent-soft); }
 
 .readouts {
   display: flex;
-  gap: 22px;
-  font-family: var(--mono);
+  gap: 18px;
 }
-.readout { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
-.readout .lbl { font-size: 10px; letter-spacing: 0.12em; color: var(--text-dim); }
-.readout .val { font-size: 18px; color: var(--text); font-weight: 600; }
+.readout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+}
+.readout .lbl {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+.readout .val {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--text);
+  font-weight: 600;
+}
 
 /* ================= Main grid ================= */
 .grid {
   display: grid;
-  grid-template-columns: 1fr 380px;
-  gap: 16px;
-  padding: 16px;
+  grid-template-columns: 1fr 360px;
+  gap: 14px;
+  padding: 14px;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-/* ================= Camera card ================= */
+/* ================= Card primitive ================= */
+.card,
 .camera-card {
   background: var(--panel);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-sm);
+}
+
+.camera-card {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -125,31 +150,42 @@ body {
 
 .card-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  color: var(--text-dim);
-  padding: 12px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
-.hint { color: var(--accent); font-weight: 600; text-transform: lowercase; letter-spacing: 0.04em; }
+.card-help {
+  margin: 0;
+  padding: 10px 14px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.hint {
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
+}
 
+/* ================= Camera ================= */
 .camera-frame {
   flex: 1 1 auto;
   position: relative;
-  background: black;
-  border-radius: 0 0 12px 12px;
+  background: #0e1014;
+  border-radius: 0 0 10px 10px;
   overflow: hidden;
-  /* Camera is no longer click-to-aim — the SHOOT button on the rail
-     is now the only way to fire. Default cursor reflects that. */
   cursor: default;
   min-height: 0;
 }
-
 .camera-frame img {
   width: 100%;
   height: 100%;
@@ -157,7 +193,6 @@ body {
   display: block;
   pointer-events: none;
 }
-
 .camera-frame svg#overlay {
   position: absolute;
   inset: 0;
@@ -165,10 +200,7 @@ body {
   height: 100%;
   pointer-events: none;
 }
-
-#crosshair line, #crosshair circle { vector-effect: non-scaling-stroke; }
-#target-marker { transition: transform 0.18s ease; }
-#target-marker circle { vector-effect: non-scaling-stroke; }
+#bearing-tick line { vector-effect: non-scaling-stroke; }
 
 /* ================= Right rail ================= */
 .rail {
@@ -179,27 +211,154 @@ body {
   min-height: 0;
 }
 
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
-}
-.card .card-header { padding: 10px 14px; border-bottom: 1px solid var(--border); }
-.card-help {
-  margin: 0;
-  padding: 10px 14px 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.4;
+/* ================= Inputs / buttons ================= */
+button,
+input[type="number"] {
+  font-family: var(--sans);
+  font-size: 13px;
 }
 
-/* Dial */
+input[type="number"] {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  outline: none;
+  transition: border-color 0.1s, box-shadow 0.1s;
+  width: 100%;
+}
+input[type="number"]:focus {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input[type="number"]::placeholder { color: var(--text-soft); }
+
+/* Default button is a quiet secondary. Use .primary for the main action. */
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+}
+button:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--text-soft);
+}
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled,
+button[disabled] {
+  background: var(--panel-2);
+  color: var(--text-soft);
+  border-color: var(--border);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1f1500;
+  font-weight: 600;
+  margin: 0 14px 14px;
+  width: calc(100% - 28px);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #1f1500;
+}
+
+button.ghost {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+button.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+
+button.square {
+  padding: 8px 10px;
+  min-width: 40px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+button.danger {
+  background: transparent;
+  color: var(--bad);
+  border-color: rgba(220, 38, 38, 0.4);
+}
+button.danger:hover:not(:disabled) { background: var(--bad-soft); }
+
+/* ================= SHOOT button — calmer, smaller ================= */
+.shoot-card { background: var(--panel); }
+
+.shoot-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: calc(100% - 28px);
+  margin: 12px 14px 8px;
+  padding: 12px 12px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.08s;
+}
+.shoot-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--text-soft);
+}
+.shoot-btn:active:not(:disabled) { transform: translateY(1px); }
+
+/* Disabled = washed out (no target / robot disabled / driver lockout). */
+.shoot-btn:disabled,
+.shoot-btn[disabled] {
+  background: var(--panel-2);
+  color: var(--text-soft);
+  border-color: var(--border);
+  cursor: not-allowed;
+  opacity: 0.7;
+  box-shadow: none;
+}
+
+/* Armed = ready to fire. ONLY then does it light up red — so a red SHOOT
+ * button actually means something instead of being the default state. */
+.shoot-btn.armed {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+}
+.shoot-btn.armed:hover { background: #b91c1c; border-color: #b91c1c; }
+
+.shoot-label {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.shoot-sub {
+  font-size: 11px;
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* ================= Manual dial ================= */
 .dial-row {
   display: grid;
   grid-template-columns: auto auto 1fr auto auto;
-  gap: 8px;
-  padding: 14px;
+  gap: 6px;
+  padding: 12px 14px;
   align-items: center;
 }
 .dial-display {
@@ -210,51 +369,124 @@ body {
   font-family: var(--mono);
 }
 .dial-display #dial-big {
-  font-size: 36px;
+  font-size: 28px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--text);
   line-height: 1;
 }
 .dial-display .unit {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-dim);
 }
 
-/* Laser */
+/* ================= LaserCAN ================= */
 .laser-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 14px 14px 8px;
+  padding: 12px 14px 6px;
   font-family: var(--mono);
 }
-.laser-num { font-size: 36px; font-weight: 700; color: var(--text); }
-.laser-unit { font-size: 13px; color: var(--text-dim); margin-right: auto; }
-#laser-pill { align-self: center; }
+.laser-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+}
+.laser-unit { font-size: 12px; color: var(--text-dim); margin-right: auto; }
+#laser-pill { align-self: center; font-family: var(--sans); }
 
-/* Gamepad */
+/* ================= Auto-aim status ================= */
+.aim-status {
+  padding: 12px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: var(--text-dim);
+}
+.aim-status.active { color: var(--accent-strong); animation: pulse 1.4s infinite; }
+.aim-status.fail { color: var(--bad); }
+.aim-status.done { color: var(--good); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* ================= Calibration ================= */
+.cal-table {
+  width: calc(100% - 28px);
+  margin: 8px 14px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.cal-table th {
+  text-align: left;
+  font-family: var(--sans);
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.cal-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cal-table tr:hover td { background: var(--panel-2); }
+.cal-table td.right-edge { text-align: right; }
+.cal-table .row-del {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--sans);
+}
+.cal-table .row-del:hover {
+  color: var(--bad);
+  border-color: rgba(220, 38, 38, 0.3);
+  background: var(--bad-soft);
+}
+
+.cal-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  padding: 6px 14px 10px;
+}
+.cal-add input { padding: 6px 8px; font-size: 13px; }
+.cal-add button { padding: 6px 12px; font-size: 12px; }
+#cal-snapshot-btn {
+  width: calc(100% - 28px);
+  margin: 0 14px 12px;
+  padding: 8px;
+  font-size: 12px;
+}
+
+/* ================= Gamepad mirror ================= */
 .gamepad {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 14px;
-  padding: 14px;
+  padding: 12px 14px;
   align-items: center;
 }
 .dpad {
   display: grid;
-  grid-template-columns: repeat(3, 36px);
-  grid-template-rows: repeat(3, 36px);
-  gap: 4px;
+  grid-template-columns: repeat(3, 30px);
+  grid-template-rows: repeat(3, 30px);
+  gap: 3px;
 }
 .dpad-cell {
   background: var(--panel-2);
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-dim);
   transition: background 0.06s, border-color 0.06s, color 0.06s;
 }
@@ -266,228 +498,64 @@ body {
 }
 .dpad-cell.center::after {
   content: "";
-  width: 8px;
-  height: 8px;
-  background: var(--border-strong);
+  width: 6px;
+  height: 6px;
+  background: var(--text-soft);
   border-radius: 50%;
 }
 .dpad-cell.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--bg);
-  box-shadow: 0 0 14px var(--accent-soft);
+  color: #1f1500;
 }
 
-.buttons { display: flex; flex-direction: column; gap: 10px; }
-.bumpers { display: flex; gap: 8px; }
-.bump {
-  flex: 1;
+.buttons { display: flex; flex-direction: column; gap: 8px; }
+.bumpers { display: flex; gap: 6px; }
+.bump,
+.face-btn {
   text-align: center;
-  padding: 6px 0;
   border: 1px solid var(--border-strong);
   background: var(--panel-2);
-  border-radius: 6px;
+  border-radius: 4px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-weight: 600;
   color: var(--text-dim);
   transition: all 0.06s;
 }
+.bump { flex: 1; padding: 5px 0; font-size: 11px; }
 .face {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
+  gap: 4px;
 }
 .face-btn {
-  text-align: center;
-  padding: 10px 0;
-  border: 1px solid var(--border-strong);
-  background: var(--panel-2);
-  border-radius: 6px;
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 14px;
-  color: var(--text-dim);
-  transition: all 0.06s;
+  padding: 8px 0;
+  font-size: 12px;
 }
-.face-y { color: #fde047; }
-.face-x { color: #93c5fd; }
-.face-b { color: #fca5a5; }
-.face-a { color: #86efac; }
+.face-y { color: #ca8a04; }
+.face-x { color: #1d4ed8; }
+.face-b { color: #b91c1c; }
+.face-a { color: #15803d; }
 .bump.active, .face-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--bg);
-  box-shadow: 0 0 14px var(--accent-soft);
+  color: #1f1500;
 }
 
-/* Calibrate */
-.cal-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-  padding: 14px;
-}
-input[type="number"] {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 9px 10px;
-  font-family: var(--mono);
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.06s;
-}
-input[type="number"]:focus { border-color: var(--accent); }
-
-/* Auto-aim status */
-.aim-status {
-  padding: 14px;
-  font-family: var(--mono);
-  font-size: 14px;
-  letter-spacing: 0.08em;
-  text-align: center;
-  color: var(--text-dim);
-}
-.aim-status.active { color: var(--accent); animation: pulse 1.4s infinite; }
-.aim-status.fail { color: var(--bad); }
-.aim-status.done { color: var(--good); }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
-
-/* Buttons */
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  transition: all 0.08s;
-}
-button:hover { border-color: var(--accent); }
-button:active { transform: translateY(1px); }
-button.primary {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
-  margin: 0 14px 14px;
-  width: calc(100% - 28px);
-}
-button.primary:hover { filter: brightness(0.95); }
-button.danger {
-  background: transparent;
-  color: var(--bad);
-  border-color: rgba(239, 68, 68, 0.5);
-  margin: 0 14px 14px;
-  width: calc(100% - 28px);
-}
-button.danger:hover { background: rgba(239, 68, 68, 0.1); }
-button.ghost {
-  background: var(--panel-2);
-  border: 1px solid var(--border-strong);
-}
-button.square { padding: 10px 12px; min-width: 44px; }
-
-/* ================= SHOOT button ================= */
-.shoot-card { background: linear-gradient(180deg, var(--panel-2), var(--panel)); }
-
-.shoot-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  width: calc(100% - 28px);
-  margin: 14px;
-  padding: 22px 12px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #b91c1c, #7f1d1d);
-  border: 1px solid #ef4444;
-  color: #fff;
-  font-family: var(--mono);
-  letter-spacing: 0.18em;
-  cursor: pointer;
-  transition: all 0.08s;
-  box-shadow: 0 8px 28px rgba(239, 68, 68, 0.25), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
-}
-.shoot-btn:hover { filter: brightness(1.1); }
-.shoot-btn:active { transform: translateY(2px); box-shadow: 0 2px 14px rgba(239, 68, 68, 0.35); }
-.shoot-btn[disabled] {
-  background: linear-gradient(180deg, #1f2937, #111827);
-  border-color: var(--border-strong);
-  color: var(--text-dim);
-  cursor: not-allowed;
-  box-shadow: none;
-}
-.shoot-btn.armed {
-  background: linear-gradient(180deg, #16a34a, #166534);
-  border-color: var(--good);
-  box-shadow: 0 8px 28px rgba(52, 211, 153, 0.3), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
-}
-.shoot-label {
-  font-size: 28px;
-  font-weight: 800;
-}
-.shoot-sub {
-  font-size: 11px;
-  letter-spacing: 0.12em;
-  opacity: 0.85;
-  text-transform: uppercase;
-}
-
-/* ================= Calibration table ================= */
-.cal-table {
-  width: calc(100% - 28px);
-  margin: 10px 14px 8px;
-  border-collapse: collapse;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-.cal-table th {
-  text-align: left;
-  font-weight: 600;
-  color: var(--text-dim);
-  letter-spacing: 0.06em;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-}
-.cal-table td {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-}
-.cal-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-.cal-table td.right-edge { text-align: right; }
-.cal-table .row-del {
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  letter-spacing: 0;
-}
-.cal-table .row-del:hover { color: var(--bad); border-color: rgba(239, 68, 68, 0.5); }
-
-.cal-add {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  gap: 6px;
-  padding: 8px 14px;
-}
-.cal-add input { padding: 7px 8px; font-size: 12px; }
-.cal-add button { padding: 7px 12px; font-size: 11px; letter-spacing: 0.06em; }
-#cal-snapshot-btn { width: calc(100% - 28px); margin: 0 14px 14px; padding: 8px; font-size: 11px; }
-
-/* ================= Lockout pill ================= */
-#lockout-pill {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--bad);
-  border-color: rgba(239, 68, 68, 0.5);
-  animation: pulse 1.0s infinite;
+/* ================= Disabled-mode banner ================= */
+/* When the robot is disabled, controls grey out (handled by the `controls
+ * disabled` class on body in app.js). Camera + readouts stay live so you
+ * can still see the field. */
+body.controls-disabled .shoot-btn,
+body.controls-disabled .dial-row button,
+body.controls-disabled #apply-laser,
+body.controls-disabled #cal-add-btn,
+body.controls-disabled #cal-snapshot-btn,
+body.controls-disabled .cal-table .row-del,
+body.controls-disabled .cal-add input {
+  pointer-events: none;
+  opacity: 0.55;
+  filter: grayscale(0.4);
 }
 
 /* ================= Bottombar ================= */
@@ -495,11 +563,11 @@ button.square { padding: 10px 12px; min-width: 44px; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 22px;
+  padding: 6px 18px;
   border-top: 1px solid var(--border);
   background: var(--panel);
-  font-family: var(--mono);
   font-size: 11px;
   flex: 0 0 auto;
+  color: var(--text-dim);
 }
 .dim { color: var(--text-dim); }

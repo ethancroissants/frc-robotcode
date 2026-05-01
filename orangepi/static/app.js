@@ -12,29 +12,38 @@
 const $ = (id) => document.getElementById(id);
 
 // --- Status pills ----------------------------------------------------------
-const connPill   = $("conn-pill");
-const targetPill = $("target-pill");
+const connPill    = $("conn-pill");
+const enabledPill = $("enabled-pill");
+const targetPill  = $("target-pill");
 const lockoutPill = $("lockout-pill");
-const aimPill    = $("aim-pill");
+const aimPill     = $("aim-pill");
 
 function setConnected(ok) {
-  connPill.textContent = ok ? "CONNECTED" : "DISCONNECTED";
+  connPill.textContent = ok ? "Connected" : "Disconnected";
   connPill.className = "pill " + (ok ? "pill-good" : "pill-bad");
+}
+
+function setRobotEnabled(enabled) {
+  enabledPill.textContent = enabled ? "Robot enabled" : "Robot disabled";
+  enabledPill.className = "pill " + (enabled ? "pill-good" : "pill-bad");
+  // Toggle the body class so CSS grays out the action controls.
+  document.body.classList.toggle("controls-disabled", !enabled);
 }
 
 function setTarget(detected, tagId) {
   if (detected) {
-    targetPill.textContent = `LOCK #${tagId}`;
+    targetPill.textContent = `Lock #${tagId}`;
     targetPill.className = "pill pill-good";
   } else {
-    targetPill.textContent = "NO TARGET";
+    targetPill.textContent = "No target";
     targetPill.className = "pill pill-bad";
   }
 }
 
 function setLockout(locked) {
   lockoutPill.style.display = locked ? "" : "none";
-  lockoutPill.textContent = "DRIVER LOCKED";
+  lockoutPill.textContent = "Driver locked";
+  lockoutPill.className = "pill pill-warn";
 }
 
 function setAimStatus(text, klass) {
@@ -42,7 +51,9 @@ function setAimStatus(text, klass) {
   el.textContent = text;
   el.className = "aim-status";
   if (klass) el.classList.add(klass);
-  aimPill.textContent = `AIM ${text}`;
+  // Title-case the pill text so it reads like UI copy, not a CRT terminal.
+  const titled = text.charAt(0) + text.slice(1).toLowerCase();
+  aimPill.textContent = `Aim ${titled}`;
   aimPill.className = "pill " + (
     klass === "active" ? "pill-warn"
     : klass === "done" ? "pill-good"
@@ -58,16 +69,22 @@ const shootSub = $("shoot-sub");
 let lastTargetState = { detected: false, range_m: 0 };
 
 function refreshShootButton(state) {
-  // Armed = we have a target AND a known range (LaserCAN valid OR PnP > 0).
+  // Armed = we have a target AND a known range AND the robot is enabled
+  // AND the driver isn't currently locked out by AutoAim. The button only
+  // turns red (.armed) when ALL preconditions are met — so a red button
+  // genuinely means "you can fire this right now".
   const hasRange = (state.lasercan_valid && state.lasercan_m > 0)
                 || (state.target?.detected && state.target.range_m > 0);
   const hasTarget = !!state.target?.detected;
-  const armed = hasTarget && hasRange && !state.driver_lockout;
+  const robotEnabled = state.robot_enabled !== false;  // default true
+  const armed = hasTarget && hasRange && robotEnabled && !state.driver_lockout;
 
   shootBtn.classList.toggle("armed", armed);
-  shootBtn.disabled = state.driver_lockout || !hasTarget;
+  shootBtn.disabled = !armed;
 
-  if (state.driver_lockout) {
+  if (!robotEnabled) {
+    shootSub.textContent = "robot disabled";
+  } else if (state.driver_lockout) {
     shootSub.textContent = "AutoAim running";
   } else if (!hasTarget) {
     shootSub.textContent = "no target";
@@ -77,8 +94,8 @@ function refreshShootButton(state) {
     const r = state.lasercan_valid ? state.lasercan_m : state.target.range_m;
     const rps = state.recommended_rps;
     shootSub.textContent = rps != null
-      ? `tag #${state.target.tag_id}  ${r.toFixed(2)}m → ${rps.toFixed(1)} rps`
-      : `tag #${state.target.tag_id}  ${r.toFixed(2)}m`;
+      ? `tag #${state.target.tag_id} · ${r.toFixed(2)}m · ${rps.toFixed(1)} rps`
+      : `tag #${state.target.tag_id} · ${r.toFixed(2)}m`;
   }
 }
 
@@ -234,6 +251,10 @@ function fmt(v, digits, unit) {
 
 function applyState(s) {
   setConnected(!!s.connected);
+  // robot_enabled defaults true on the Pi side so a fresh setup with no
+  // rio publisher doesn't grey out the whole UI; older rio code that
+  // doesn't publish the topic will still leave the UI usable.
+  setRobotEnabled(s.robot_enabled !== false);
   setLockout(!!s.driver_lockout);
   const t = s.target || { detected: false };
   setTarget(t.detected, t.tag_id);
@@ -252,6 +273,15 @@ function applyState(s) {
   $("r-rps").textContent = isFinite(s.recommended_rps)
     ? s.recommended_rps.toFixed(1)
     : "—";
+
+  // "Seen tags" hint in the camera card header — distinct from the
+  // configured TARGET_TAG_IDS so users debugging "no detection" can
+  // see whether the detector is actually working.
+  const seen = Array.isArray(s.seen_tags) ? s.seen_tags : [];
+  const seenEl = $("seen-tag-list");
+  if (seenEl) {
+    seenEl.textContent = seen.length ? seen.join(", ") : "(none)";
+  }
 
   // Manual dial readouts
   $("dial-big").textContent  = isFinite(s.dial_ft) ? s.dial_ft.toFixed(1) : "--.-";
@@ -277,17 +307,20 @@ function applyState(s) {
     if (el) el.classList.toggle("active", !!s[`btn_${k.toLowerCase()}`]);
   }
 
-  // Aim status
-  const status = String(s.aim_status || "idle").toUpperCase();
+  // Aim status — keep the raw string from NT for the class lookup, but
+  // display it in title case so it doesn't read like a CRT terminal.
+  const raw = String(s.aim_status || "idle").toLowerCase();
   let klass = "";
-  if (status === "ROTATING" || status === "SPINNING_UP" || status === "FIRING") {
+  if (raw === "rotating" || raw === "spinning_up" || raw === "firing") {
     klass = "active";
-  } else if (status === "DONE") {
+  } else if (raw === "done") {
     klass = "done";
-  } else if (status === "ERROR") {
+  } else if (raw === "error") {
     klass = "fail";
   }
-  setAimStatus(status, klass);
+  // "spinning_up" → "Spinning up"
+  const display = raw.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+  setAimStatus(display, klass);
 
   updateBearingTick(t);
   refreshShootButton(s);

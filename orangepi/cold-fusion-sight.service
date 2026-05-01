@@ -2,6 +2,10 @@
 Description=Cold Fusion Sight (camera + control web UI)
 After=network-online.target
 Wants=network-online.target
+# Don't ever give up: the default StartLimit kicks the service into
+# 'failed' after 5 restarts in 10 seconds, which is the wrong default for
+# a robot field service. We want it to keep coming back, period.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -19,6 +23,11 @@ SupplementaryGroups=video
 # we'd rather have systemd kick it than starve the rest of the Pi.
 LimitNOFILE=4096
 TasksMax=128
+# Keep stdout/stderr in journalctl with a short tag for easy filtering
+# (`journalctl -u cold-fusion-sight -f` shows live logs).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cold-fusion-sight
 
 [Install]
 WantedBy=multi-user.target

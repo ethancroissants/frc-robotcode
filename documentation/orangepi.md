@@ -56,12 +56,11 @@ table. Everything else is automatic.
 Open `python start.py`. The **Vision Pi** section has four buttons.
 They're numbered for the order you press them the *first* time:
 
-| #   | Button                | When to press                                                                  |
-| --- | --------------------- | ------------------------------------------------------------------------------ |
-| 1   | **Set up Vision Pi**  | Once per Pi (or after re-flashing). The wizard walks you through provisioning. |
-| 2   | **Update Vision Pi**  | Optional. Pushes Pi-only changes from your laptop without rebooting the rio.   |
-| 3   | **Open Sight UI**     | Any time after #1 finishes. Opens the camera page in your browser.             |
-| —   | **SSH to Vision Pi**  | Debugging only — opens a terminal on the Pi.                                   |
+| #   | Button                       | When to press                                                                                                       |
+| --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Set up / Update Vision Pi**| Once per Pi for first install; re-run any time to push code changes (idempotent — only does what's actually needed). |
+| 2   | **Open Sight UI**            | Any time after #1 finishes. Opens the camera page in your browser.                                                  |
+| —   | **SSH to Vision Pi**         | Debugging only — opens a terminal on the Pi.                                                                        |
 
 After step #1 succeeds, **you do not press anything else day-to-day.**
 The "Deploy to Robot" button in the Robot Code section ships your code
@@ -86,12 +85,11 @@ own once the Pi comes back.
 Open `python start.py`. The **Vision Pi** section has four buttons.
 They're numbered for the order you press them the *first* time:
 
-| #   | Button                | When to press                                                                  |
-| --- | --------------------- | ------------------------------------------------------------------------------ |
-| 1   | **Set up Vision Pi**  | Once per Pi (or after re-flashing). The wizard walks you through provisioning. |
-| 2   | **Update Vision Pi**  | Optional. Pushes Pi-only changes from your laptop without rebooting the rio.   |
-| 3   | **Open Sight UI**     | Any time after #1 finishes. Opens the camera page in your browser.             |
-| —   | **SSH to Vision Pi**  | Debugging only — opens a terminal on the Pi.                                   |
+| #   | Button                       | When to press                                                                                                       |
+| --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Set up / Update Vision Pi**| Once per Pi for first install; re-run any time to push code changes (idempotent — only does what's actually needed). |
+| 2   | **Open Sight UI**            | Any time after #1 finishes. Opens the camera page in your browser.                                                  |
+| —   | **SSH to Vision Pi**         | Debugging only — opens a terminal on the Pi.                                                                        |
 
 After step #1 succeeds, **you do not press anything else day-to-day.**
 The "Deploy to Robot" button in the Robot Code section ships your code
@@ -335,21 +333,30 @@ python start.py
 Click **Set up Vision Pi**. The wizard will:
 
 1. Ask for the Pi's host (`orangepi.local` or its IP) and user (`orangepi`).
-2. Ask for the Pi user's password (the one you set on first boot).
-   - On first run, the wizard uses this to install your laptop's SSH
-     key on the Pi. After that the password is forgotten and every
-     subsequent step is passwordless.
-   - On re-runs, leave this blank — key auth already works.
+2. Ask for the Pi user's password (the one you set on first boot)
+   **only on the first run**. On every re-run after that, key auth
+   already works — no prompt, no nag.
+   - If the Pi was reflashed and its host key changed, the wizard
+     auto-clears the stale `known_hosts` entry so it doesn't get
+     stuck on a "REMOTE HOST IDENTIFICATION HAS CHANGED" warning.
 3. rsync this whole `orangepi/` folder onto the Pi.
-4. Run `install.sh` on the Pi, which:
-   - apt-installs `ffmpeg`, `python3-venv`, `v4l-utils`, `libgl1`
-   - creates a Python venv and installs FastAPI / uvicorn / pyntcore /
-     OpenCV
+4. **If anything's missing or the wheel cache is stale**, briefly
+   connect the Pi's `wlan0` to a WiFi you supply (the wizard will
+   prompt for SSID + password). Inside that bridge it apt-installs
+   any missing packages and `pip download`s wheels. Disconnects when
+   done. The Pi's robot ethernet is left alone the whole time.
+   - On re-runs where everything is already installed, the bridge is
+     skipped entirely and no WiFi prompt appears.
+5. Run `install.sh` on the Pi, which:
+   - creates the venv if it doesn't exist
+   - installs pip deps from the local wheel cache (only if
+     `requirements.txt` changed since last run — stamped in `.venv/.pip-stamp`)
    - **pins the Pi's IP to `10.TE.AM.11`** on `eth0`
    - drops a sudoers rule so the rio can `systemctl restart` later
-   - installs and starts the `cold-fusion-sight` systemd service
-5. Set up SSH keys both directions (Pi ↔ admin@rio, Pi ↔ lvuser@rio).
-6. Write `pi_target.json` at the repo root so the rio knows where the
+   - installs the `cold-fusion-sight` systemd unit (and only restarts
+     the service if the unit file actually differs from what's installed)
+6. Set up SSH keys both directions (Pi ↔ admin@rio, Pi ↔ lvuser@rio).
+7. Write `pi_target.json` at the repo root so the rio knows where the
    Pi lives once you deploy.
 
 When done, click **Open Sight UI**. Your browser lands on
@@ -609,7 +616,7 @@ If any step fails, work through the **Troubleshooting** table below.
 - **Open the UI:** **Open Sight UI** (or bookmark `http://10.12.79.11:8080/`).
 - **Aim & shoot:** click on the camera. rio rotates, dials in distance
   from LaserCAN, fires.
-- **Force-push the Pi without rebooting the rio:** **Update Vision Pi**.
+- **Force-push the Pi without rebooting the rio:** re-run **Set up / Update Vision Pi**. It rsyncs the latest code, restarts the service if anything changed, and skips the parts that are already done.
   Useful when iterating on HTML/CSS/JS — push from laptop, no rio reboot.
 
 ## Cross-host SSH
@@ -661,8 +668,7 @@ your repo/
 ├── orangepi/              ← Pi-side code (server.py, static/, install.sh)
 ├── orangepi_pusher.py     ← rio module: ships orangepi/ to the Pi at boot
 ├── pi_target.json         ← {"host": "10.12.79.11", ...} written by setup
-├── setup_orangepi.py      ← one-time provisioning wizard
-├── update_orangepi.py     ← force-push from laptop without rebooting rio
+├── setup_orangepi.py      ← provisioning + update wizard (idempotent re-runs)
 └── documentation/orangepi.md  ← (you are here)
 ```
 

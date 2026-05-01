@@ -13,16 +13,17 @@
       <span class="brand-name">COLD&nbsp;FUSION&nbsp;SIGHT</span>
     </div>
     <div class="status-line">
-      <span id="conn-pill" class="pill pill-bad">DISCONNECTED</span>
-      <span id="target-pill" class="pill pill-bad">NO&nbsp;TARGET</span>
-      <span id="lockout-pill" class="pill" style="display:none">DRIVER&nbsp;LOCKED</span>
-      <span id="aim-pill" class="pill">AIM&nbsp;IDLE</span>
+      <span id="conn-pill" class="pill pill-bad">Disconnected</span>
+      <span id="enabled-pill" class="pill pill-bad">Robot disabled</span>
+      <span id="target-pill" class="pill pill-bad">No target</span>
+      <span id="lockout-pill" class="pill" style="display:none">Driver locked</span>
+      <span id="aim-pill" class="pill">Aim idle</span>
     </div>
     <div class="readouts">
-      <div class="readout"><span class="lbl">RANGE</span><span class="val" id="r-range">--.- m</span></div>
-      <div class="readout"><span class="lbl">BEARING</span><span class="val" id="r-bearing">--.-°</span></div>
-      <div class="readout"><span class="lbl">RPS</span><span class="val" id="r-rps">--.-</span></div>
-      <div class="readout"><span class="lbl">TAG</span><span class="val" id="r-tag">--</span></div>
+      <div class="readout"><span class="lbl">Range</span><span class="val" id="r-range">—</span></div>
+      <div class="readout"><span class="lbl">Bearing</span><span class="val" id="r-bearing">—</span></div>
+      <div class="readout"><span class="lbl">RPS</span><span class="val" id="r-rps">—</span></div>
+      <div class="readout"><span class="lbl">Tag</span><span class="val" id="r-tag">—</span></div>
     </div>
   </header>
 
@@ -30,8 +31,11 @@
     <!-- ============ Camera + tag overlay ============ -->
     <section class="camera-card">
       <div class="card-header">
-        <span>FIELD VIEW</span>
-        <span class="hint" id="cam-hint">tracking AprilTag IDs <span id="target-tag-list">…</span></span>
+        <span>Field view</span>
+        <span class="hint" id="cam-hint">
+          Targeting <span id="target-tag-list">…</span>
+          · Seen <span id="seen-tag-list">(none)</span>
+        </span>
       </div>
       <div class="camera-frame" id="camera-frame">
         <img id="stream" src="/stream.mjpg" alt="camera feed" draggable="false" />
@@ -51,36 +55,36 @@
     <aside class="rail">
       <!-- BIG SHOOT BUTTON ------------------------------------------>
       <div class="card shoot-card">
-        <div class="card-header">FIRE CONTROL</div>
-        <button class="shoot-btn" id="shoot-btn">
-          <span class="shoot-label">SHOOT</span>
+        <div class="card-header">Fire control</div>
+        <button class="shoot-btn" id="shoot-btn" disabled>
+          <span class="shoot-label">Shoot</span>
           <span class="shoot-sub" id="shoot-sub">no target</span>
         </button>
         <p class="card-help">
-          Pi tracks the AprilTag, computes range + bearing, looks up the
-          right RPS from the calibration table. The driver controller is
-          disabled while AutoAim is running so the bot can rotate freely.
+          The Pi tracks the AprilTag, computes range + bearing, and looks up
+          the right RPS from the calibration table. The driver controller is
+          disabled while AutoAim runs so the bot can rotate freely.
         </p>
       </div>
 
       <!-- LaserCAN -->
       <div class="card">
-        <div class="card-header">LIDAR (LaserCAN)</div>
+        <div class="card-header">Lidar (LaserCAN)</div>
         <div class="laser-row">
-          <div class="laser-num" id="laser-big">--.--</div>
+          <div class="laser-num" id="laser-big">—</div>
           <div class="laser-unit">meters</div>
-          <span class="pill" id="laser-pill">NO READING</span>
+          <span class="pill" id="laser-pill">No reading</span>
         </div>
-        <button class="primary" id="apply-laser">USE&nbsp;AS&nbsp;DIAL</button>
+        <button class="primary" id="apply-laser">Use as dial</button>
       </div>
 
       <!-- Manual dial -->
       <div class="card">
-        <div class="card-header">SHOT DISTANCE (MANUAL)</div>
+        <div class="card-header">Shot distance (manual)</div>
         <div class="dial-row">
           <button class="ghost square" data-dial="-1">−1</button>
           <button class="ghost square" data-dial="-0.5">−½</button>
-          <div class="dial-display"><span id="dial-big">--.-</span><span class="unit">ft</span></div>
+          <div class="dial-display"><span id="dial-big">—</span><span class="unit">ft</span></div>
           <button class="ghost square" data-dial="+0.5">+½</button>
           <button class="ghost square" data-dial="+1">+1</button>
         </div>
@@ -88,10 +92,11 @@
 
       <!-- Calibration table -->
       <div class="card">
-        <div class="card-header">SHOOTER CALIBRATION</div>
+        <div class="card-header">Shooter calibration</div>
         <p class="card-help">
-          Distance (ft) → flywheel RPS. Pi interpolates between points. Add a
-          row by shooting from a known distance with the right RPS dialed in.
+          Distance (ft) → flywheel RPS. The Pi interpolates between points.
+          Add a row by shooting from a known distance with the right RPS
+          dialed in.
         </p>
         <table class="cal-table" id="cal-table">
           <thead>
@@ -102,16 +107,16 @@
         <div class="cal-add">
           <input id="cal-add-dist" type="number" step="0.1" placeholder="ft" />
           <input id="cal-add-rps" type="number" step="0.5" placeholder="rps" />
-          <button class="primary" id="cal-add-btn">ADD&nbsp;POINT</button>
+          <button class="primary" id="cal-add-btn">Add point</button>
         </div>
         <button class="ghost" id="cal-snapshot-btn" title="Use the current LaserCAN distance + dialed RPS">
-          SNAPSHOT&nbsp;CURRENT&nbsp;SHOT
+          Snapshot current shot
         </button>
       </div>
 
       <!-- Gamepad mirror -->
       <div class="card">
-        <div class="card-header">OPERATOR</div>
+        <div class="card-header">Operator</div>
         <div class="gamepad">
           <div class="dpad">
             <div class="dpad-cell empty" data-pov="NW"></div>
@@ -141,8 +146,8 @@
 
       <!-- Auto-aim status -->
       <div class="card">
-        <div class="card-header">AUTO AIM</div>
-        <div class="aim-status" id="aim-status">IDLE</div>
+        <div class="card-header">Auto aim</div>
+        <div class="aim-status" id="aim-status">Idle</div>
       </div>
     </aside>
   </main>

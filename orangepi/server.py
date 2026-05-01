@@ -231,6 +231,11 @@ class NTBridge:
     READ_BOOL = {
         "lasercan_valid": "/SmartDashboard/Sight/LaserCAN/Valid",
         "driver_lockout": "/SmartDashboard/Sight/DriverLockout",
+        # Robot enabled state — rio publishes this from the matching robot
+        # code; UI grays out controls when False so we can't fire while the
+        # bot is disabled. Defaults True at the subscription so a fresh
+        # setup doesn't soft-brick the UI before the rio publishes.
+        "robot_enabled": "/SmartDashboard/Sight/RobotEnabled",
         "btn_a": "/SmartDashboard/Sight/Buttons/A",
         "btn_b": "/SmartDashboard/Sight/Buttons/B",
         "btn_x": "/SmartDashboard/Sight/Buttons/X",
@@ -291,7 +296,11 @@ class NTBridge:
         for key, path in self.READ_DOUBLE.items():
             self._d_subs[key] = self.inst.subscribe(path, "double", 0.0)
         for key, path in self.READ_BOOL.items():
-            self._b_subs[key] = self.inst.subscribe(path, "boolean", False)
+            # robot_enabled defaults True so the UI is usable on a fresh
+            # setup before the rio robot code wires up the topic; everything
+            # else is False until proven otherwise.
+            default = True if key == "robot_enabled" else False
+            self._b_subs[key] = self.inst.subscribe(path, "boolean", default)
         for key, path in self.READ_INT.items():
             self._i_subs[key] = self.inst.subscribe(path, "int", 0)
         for key, path in self.READ_STR.items():
@@ -390,6 +399,12 @@ class CameraEngine:
         self._latest_jpeg: bytes = b""
         self._frame_idx = 0
         self._latest_det: Detection | None = None
+        # All tag IDs visible in the latest detection tick (targeted or not).
+        # Lets the renderer draw non-targeted tags in a different color and
+        # the UI surface "we see IDs X, Y" so users debugging "no detection"
+        # can immediately see the detector IS working — they just need to
+        # update TARGET_TAG_IDS.
+        self._latest_all: list[tuple[int, np.ndarray]] = []
         self._cond = threading.Condition()
         self._frame_token = 0  # bumped each new JPEG; used to wake subscribers
 
@@ -519,6 +534,7 @@ class CameraEngine:
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         corners_list, ids, _ = self._detector.detectMarkers(gray)
         if ids is None or len(ids) == 0:
+            self._latest_all = []
             return None
 
         # Scale corners back up to full-res pixel coordinates so PnP and
@@ -526,12 +542,18 @@ class CameraEngine:
         scale = 1.0 / DETECT_DOWNSCALE if DETECT_DOWNSCALE != 0 else 1.0
         scaled_corners = [c * scale for c in corners_list]
 
-        # Filter to tags we care about; if none match, fall back to the
-        # largest tag so the operator can at least see *something* lit up
-        # in the UI.
+        # Cache every detected tag so the renderer + UI can show non-target
+        # detections in a different color. Critical for debugging "tags
+        # aren't being detected" — usually they ARE, but TARGET_TAG_IDS
+        # doesn't include the IDs the user is testing with.
+        self._latest_all = [
+            (int(tid), c)
+            for tid, c in zip(ids.flatten().tolist(), scaled_corners)
+        ]
+
         candidates: list[tuple[int, np.ndarray]] = []
         for tag_id, corners in zip(ids.flatten().tolist(), scaled_corners):
-            if not TARGET_TAG_IDS or tag_id in TARGET_TAG_IDS:
+            if not TARGET_TAG_IDS or int(tag_id) in TARGET_TAG_IDS:
                 candidates.append((int(tag_id), corners))
         if not candidates:
             return None
@@ -583,8 +605,24 @@ class CameraEngine:
         cv2.line(frame, (w // 2, 0), (w // 2, h), (255, 255, 255), 1, cv2.LINE_AA)
         cv2.line(frame, (0, h // 2), (w, h // 2), (255, 255, 255), 1, cv2.LINE_AA)
 
+        # Draw every non-targeted detection first, in a muted orange, so
+        # the user can see when the detector is working but their target
+        # list doesn't match. The targeted detection then overlays in green.
+        target_id = det.tag_id if det is not None else None
+        for tid, corners in self._latest_all:
+            if tid == target_id:
+                continue
+            pts_other = corners.astype(np.int32).reshape(-1, 2)
+            other_color = (60, 140, 255)  # BGR — soft orange, "seen but not aimed"
+            cv2.polylines(frame, [pts_other], isClosed=True, color=other_color,
+                          thickness=1, lineType=cv2.LINE_AA)
+            cx_o = int(pts_other[:, 0].mean())
+            cy_o = int(pts_other[:, 1].mean())
+            cv2.putText(frame, f"#{tid}", (cx_o + 6, cy_o - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, other_color, 1, cv2.LINE_AA)
+
         if det is not None:
-            color = (0, 212, 0) if det.tag_id in TARGET_TAG_IDS else (0, 165, 255)
+            color = (0, 212, 0) if (not TARGET_TAG_IDS or det.tag_id in TARGET_TAG_IDS) else (0, 165, 255)
             pts = det.corners_px.astype(np.int32).reshape(-1, 2)
             cv2.polylines(frame, [pts], isClosed=True, color=color,
                           thickness=2, lineType=cv2.LINE_AA)
@@ -668,30 +706,47 @@ async def api_state(request: Request) -> StreamingResponse:
     """Server-Sent Events feed of robot + target state for the live HUD."""
     async def event_stream() -> AsyncIterator[str]:
         last_payload = ""
+        # Cap how many times in a row we'll swallow a per-tick exception
+        # before bailing out of the loop. A bad NT snapshot shouldn't kill
+        # the SSE stream, but a persistent bug shouldn't loop forever
+        # either — the client will reconnect via EventSource onerror.
+        consecutive_errors = 0
         while not await request.is_disconnected():
-            snap = nt.snapshot()
-            # Add Pi-side state that doesn't go through NT (latest detection
-            # mirror, calibration metadata) so the UI has one feed.
-            det = camera._latest_det
-            if det is not None:
-                snap["target"] = {
-                    "detected": True,
-                    "tag_id": det.tag_id,
-                    "bearing_deg": det.bearing_deg,
-                    "range_m": det.range_m,
-                    "cx_norm": det.cx_norm,
-                    "cy_norm": det.cy_norm,
-                    "age_ms": int((time.monotonic() - det.ts) * 1000),
-                }
-            else:
-                snap["target"] = {"detected": False}
-            # The Pi-recommended RPS for the *current* distance source —
-            # mirror so the UI doesn't need a second NT subscription.
-            snap["recommended_rps"] = camera._rps_hint_for(det)
-            payload = json.dumps(snap, default=float)
-            if payload != last_payload:
-                last_payload = payload
-                yield f"data: {payload}\n\n"
+            try:
+                snap = nt.snapshot()
+                det = camera._latest_det
+                if det is not None:
+                    snap["target"] = {
+                        "detected": True,
+                        "tag_id": det.tag_id,
+                        "bearing_deg": det.bearing_deg,
+                        "range_m": det.range_m,
+                        "cx_norm": det.cx_norm,
+                        "cy_norm": det.cy_norm,
+                        "age_ms": int((time.monotonic() - det.ts) * 1000),
+                    }
+                else:
+                    snap["target"] = {"detected": False}
+                snap["recommended_rps"] = camera._rps_hint_for(det)
+                # Surface every tag ID the detector saw this tick (target
+                # or not). Lets the UI show "seen: 14, 22" so users know
+                # the detector is working when no targeted tag is in view.
+                snap["seen_tags"] = sorted({tid for tid, _ in camera._latest_all})
+                payload = json.dumps(snap, default=float)
+                if payload != last_payload:
+                    last_payload = payload
+                    yield f"data: {payload}\n\n"
+                consecutive_errors = 0
+            except asyncio.CancelledError:
+                # Client disconnected mid-yield — let it propagate so
+                # uvicorn cleans the response up.
+                raise
+            except Exception:
+                consecutive_errors += 1
+                log.exception("SSE tick failed (%d in a row)", consecutive_errors)
+                if consecutive_errors >= 20:
+                    log.error("too many SSE errors; closing this stream")
+                    break
             await asyncio.sleep(0.05)  # 20 Hz max
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
