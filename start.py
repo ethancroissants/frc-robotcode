@@ -543,19 +543,57 @@ def main() -> int:
     card_refs: dict[str, "Card"] = {}
 
     def _pi_cfg_path() -> Path:
-        return REPO / ".orangepi_cfg"
+        """Per-user config path. Mirror of setup_orangepi._user_config_dir.
+
+        Stored outside the repo so `git clean`, fresh clones, and
+        accidental deletions don't wipe the user's Pi setup. Falls back
+        to the legacy in-repo location if the new one doesn't exist
+        (the migration runs on the next setup-script invocation).
+        """
+        if sys.platform.startswith("win"):
+            base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        new_path = base / "cold-fusion-robotics" / "orangepi_cfg.json"
+        if new_path.exists():
+            return new_path
+        legacy = REPO / ".orangepi_cfg"
+        if legacy.exists():
+            return legacy
+        return new_path  # for the "exists()" check downstream
 
     def _pi_is_set_up() -> bool:
         return _pi_cfg_path().exists()
 
-    def _pi_target_host() -> str | None:
-        """Read the Pi's hostname from .orangepi_cfg, if it's been set up."""
+    def _pi_candidate_hosts() -> list[str]:
+        """Hosts to ping when probing for the Pi.
+
+        First the saved cfg's host (if present). Then the conventional
+        defaults — `orangepi.local` (mDNS) and `10.TE.AM.11` (the IP
+        install.sh pins). If either default answers, we treat the Pi as
+        discovered even when `.orangepi_cfg` is missing — that file gets
+        wiped sometimes (fresh clone, accidental delete) and shouldn't
+        be the only source of truth.
+        """
+        candidates: list[str] = []
         try:
             import json
             data = json.loads(_pi_cfg_path().read_text())
+            saved = data.get("host")
+            if saved:
+                candidates.append(saved)
         except Exception:
-            return None
-        return data.get("host") or None
+            pass
+        team = read_team_number() or DEFAULT_TEAM
+        if team.isdigit():
+            n = int(team)
+            candidates.append(f"10.{n // 100}.{n % 100}.11")
+        candidates.append("orangepi.local")
+        # Dedupe, preserve order.
+        seen: set[str] = set()
+        return [h for h in candidates if not (h in seen or seen.add(h))]
 
     def _set_status(reachable: bool | None, host: str | None) -> None:
         if not alive["v"]:
@@ -580,12 +618,14 @@ def main() -> int:
     def _set_pi_status(reachable: bool, host: str | None, *, configured: bool) -> None:
         if not alive["v"]:
             return
-        if not configured:
-            pi_status_dot.configure(fg=DIM)
-            pi_status_text.configure(text="Vision Pi: not set up", fg=DIM)
-        elif reachable:
+        # If we can reach a Pi at any candidate address, treat it as set
+        # up — the `.orangepi_cfg` file is convenient but not load-bearing.
+        if reachable:
             pi_status_dot.configure(fg=OK_COLOR)
             pi_status_text.configure(text=f"Vision Pi: connected ({host})", fg=FG)
+        elif not configured:
+            pi_status_dot.configure(fg=DIM)
+            pi_status_text.configure(text="Vision Pi: not set up", fg=DIM)
         else:
             pi_status_dot.configure(fg=FAIL_COLOR)
             pi_status_text.configure(text="Vision Pi: offline", fg=FG)
@@ -599,9 +639,10 @@ def main() -> int:
         """
         if not alive["v"]:
             return
-        is_set_up = _pi_is_set_up()
         host = pi_host["v"]
         reachable = host is not None
+        # "Set up" is now a soft signal: cfg present OR Pi visible on net.
+        is_set_up = _pi_is_set_up() or reachable
         _set_pi_status(reachable, host, configured=is_set_up)
 
         setup_card = card_refs.get("pi_setup")
@@ -642,13 +683,19 @@ def main() -> int:
             # too-tight timeout was previously leaving buttons stuck in
             # disabled state for users whose hosts were actually reachable.
             ok_, host = _check_bot_status(timeout_s=2.0)
-            pi_target = _pi_target_host()
-            pi_ok = bool(pi_target) and ping(pi_target, timeout_s=2.5)
+            # Try every candidate host; the first one that answers wins.
+            # This means a Pi at the conventional 10.TE.AM.11 IP shows up
+            # as "Connected" even if `.orangepi_cfg` got deleted.
+            pi_found: str | None = None
+            for cand in _pi_candidate_hosts():
+                if ping(cand, timeout_s=2.5):
+                    pi_found = cand
+                    break
 
             if alive["v"]:
                 def apply() -> None:
                     _set_status(ok_, host)
-                    pi_host["v"] = pi_target if pi_ok else None
+                    pi_host["v"] = pi_found
                     _refresh_pi_cards()
                 root.after(0, apply)
 

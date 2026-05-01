@@ -30,7 +30,28 @@ import ui_mode
 
 REPO = Path(__file__).resolve().parent
 ORANGEPI_DIR = REPO / "orangepi"
-CFG_PATH = REPO / ".orangepi_cfg"
+
+
+def _user_config_dir() -> Path:
+    """Per-user config directory that survives repo wipes / fresh clones.
+
+    - Windows:   %APPDATA%\\cold-fusion-robotics\\
+    - macOS:     ~/Library/Application Support/cold-fusion-robotics/
+    - Linux:     $XDG_CONFIG_HOME/cold-fusion-robotics/  (or ~/.config/...)
+    """
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "cold-fusion-robotics"
+
+
+CFG_PATH = _user_config_dir() / "orangepi_cfg.json"
+# Old in-repo path. Kept around so existing setups migrate transparently.
+_LEGACY_CFG_PATH = REPO / ".orangepi_cfg"
+
 # pi_target.json gets included in `robotpy deploy` (no leading dot) so the
 # rio's orangepi_pusher.py can find the Pi after deploy.
 TARGET_PATH = REPO / "pi_target.json"
@@ -114,6 +135,15 @@ def _stream(cmd: list[str]) -> int:
 # ----- config persistence -----
 
 def load_cfg() -> dict:
+    # Migrate old in-repo cfg on first read so users who already had a
+    # working setup don't have to re-enter anything.
+    if _LEGACY_CFG_PATH.exists() and not CFG_PATH.exists():
+        try:
+            CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CFG_PATH.write_bytes(_LEGACY_CFG_PATH.read_bytes())
+            _LEGACY_CFG_PATH.unlink()
+        except Exception:
+            pass  # best-effort; we'll just re-prompt
     if not CFG_PATH.exists():
         return {}
     try:
@@ -123,6 +153,7 @@ def load_cfg() -> dict:
 
 
 def save_cfg(cfg: dict) -> None:
+    CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CFG_PATH.write_text(json.dumps(cfg, indent=2))
 
 
