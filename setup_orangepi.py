@@ -414,7 +414,7 @@ done
     try:
         result = subprocess.run(
             ["ssh", target, probe],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except Exception as e:
         _fail(f"Couldn't probe Pi: {e}")
@@ -630,7 +630,7 @@ def pi_wheel_cache_status(cfg: dict) -> bool:
     try:
         result = subprocess.run(
             ["ssh", target, probe],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
     except Exception:
         return False
@@ -1055,7 +1055,7 @@ def _ensure_ssh_key_remote(ssh_target_str: str, key_path: str) -> str | None:
         result = subprocess.run(
             ["ssh", "-o", "StrictHostKeyChecking=accept-new",
              ssh_target_str, cmd],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         )
     except Exception as e:
         _fail(f"Couldn't read SSH key from {ssh_target_str}: {e}")
@@ -1098,7 +1098,7 @@ def _ensure_ssh_key_remote_as_other_user(
         result = subprocess.run(
             ["ssh", "-o", "StrictHostKeyChecking=accept-new",
              ssh_target_str, cmd],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         )
     except Exception as e:
         _fail(f"Couldn't read {target_user}'s SSH key: {e}")
@@ -1130,7 +1130,7 @@ def _push_authorized_key(dest_target: str, pubkey: str, label: str) -> None:
         rc = subprocess.run(
             ["ssh", "-o", "StrictHostKeyChecking=accept-new",
              dest_target, cmd],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         ).returncode
     except Exception as e:
         _fail(f"Failed to push {label}: {e}")

@@ -556,6 +556,13 @@ class App:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE,
                 text=True,
+                # Force UTF-8 so non-ASCII output from remote tools (em-dash,
+                # progress glyphs, etc.) doesn't crash on Windows where the
+                # default text-mode encoding is cp1252. errors="replace"
+                # turns any genuinely undecodable bytes into '?' instead of
+                # killing the stream mid-line.
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
         except Exception as e:
