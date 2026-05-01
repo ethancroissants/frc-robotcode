@@ -577,6 +577,11 @@ def bridge_internet_for_setup(
             "fi",
             "echo '[bridge] downloading Pi wheels from PyPI…'",
             f"mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
+            # Force a UTF-8 locale so pip's progress / log output doesn't
+            # crash with "'charmap' codec can't decode" — non-tty SSH
+            # sessions default to a minimal locale and pip writes non-ASCII
+            # progress glyphs.
+            f"LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
             f"python3 -m pip download --only-binary=:all: "
             f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
             f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
