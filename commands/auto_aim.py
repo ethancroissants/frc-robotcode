@@ -1,27 +1,45 @@
-"""AutoAim: Pi click → rio rotates + dials in shot distance + fires.
+"""AutoAim: Pi SHOOT button → rio rotates onto the AprilTag and fires.
 
-Pi publishes the target as a normalized image-frame click on
-/SmartDashboard/Sight/Aim/{PixelX,PixelY,RequestId,Requested}. We treat the
-request id as a fresh-shot trigger: every time it increments, we re-arm.
+NetworkTables contract (all under /SmartDashboard)
+--------------------------------------------------
+Pi → rio (read here):
+  Sight/Target/Detected      bool   — tag visible right now?
+  Sight/Target/BearingDeg    double — signed angle from camera optical axis
+                                       (positive = target is right of center)
+  Sight/Target/RangeM        double — PnP-derived range (fallback for LaserCAN)
+  Sight/Target/TagID         int    — which tag we're tracking
+  Sight/Aim/TargetRps        double — Pi's RPS recommendation from its
+                                       distance→RPS calibration table
+  Sight/Shoot/RequestId      int    — bumped on SHOOT press; rio's trigger
+                                       (in robotcontainer) edge-detects this
+                                       and schedules this command
 
-Math:
-  - x_norm in [0, 1] is left-to-right across the image. Center is 0.5.
-  - Translate to a yaw offset using the camera's horizontal FOV:
-      yaw_off_rad = (x_norm - 0.5) * fov_rad
-    The camera is fixed to the robot, so target_heading = current_heading +
-    yaw_off (assuming "forward" of the camera matches "forward" of the bot;
-    if you mount sideways, add the offset in tunables).
-  - For range, prefer the LaserCAN measurement (it points down-bore of the
-    camera). If the laser is invalid, fall back to projecting y_norm onto
-    the ground plane through the existing pinhole tunables — the same math
-    `vision.py` uses, just inverted.
+rio → Pi (written here):
+  Sight/Aim/Status           string — phase: idle | rotating | spinning_up
+                                       | firing | done | error
+  Sight/DriverLockout        bool   — true while this command is running so
+                                       the Pi UI shows "DRIVER LOCKED" and
+                                       the operator knows the swerve is busy
 
-Drive: PID on heading error using the swerve drivetrain's setpoint API.
-Once heading is within tolerance and shooter has spun up, hand off to the
-existing AutoFire by calling shooterOut/FIRE on the operator subsystem.
+Closed-loop strategy
+--------------------
+We don't compute an absolute target heading — we close the bearing-error
+loop directly. Every cycle we read the *fresh* bearing from the Pi and feed
+0 as the setpoint to a PIDController. The output is yaw rate (rad/s),
+which goes straight into a swerve FieldCentric request with zero translation.
 
-Status is published back to /Sight/Aim/Status as one of:
-  idle | rotating | spinning_up | firing | done | error
+Range comes from LaserCAN preferentially; the AprilTag PnP range is a
+fallback for momentary CAN dropouts.
+
+If the tag drops out of view mid-aim we hold the last bearing for up to
+HOLD_LAST_BEARING_S; beyond that we abort. That keeps us from spinning
+randomly when a robot crosses the line of sight.
+
+The rio's existing requirements system means while this command runs,
+the drivetrain's joystick default command is suppressed — the driver
+literally cannot drive. The DriverLockout flag is a UI mirror so the
+operator sees "yep, I'm locked out for a second" rather than thinking
+their controller is broken.
 """
 
 from __future__ import annotations
@@ -38,23 +56,36 @@ from subsystems.lasercan_subsystem import LaserCanSubsystem
 from subsystems.operator_subsystem import OperatorSubsystem
 
 
-_NT_REQ_ID = "Sight/Aim/RequestId"
-_NT_REQUESTED = "Sight/Aim/Requested"
-_NT_X = "Sight/Aim/PixelX"
-_NT_Y = "Sight/Aim/PixelY"
-_NT_STATUS = "Sight/Aim/Status"
+# ----- NT topic names (mirror server.py) -----
+_NT_TARGET_DETECTED = "Sight/Target/Detected"
+_NT_TARGET_BEARING  = "Sight/Target/BearingDeg"
+_NT_TARGET_RANGE_M  = "Sight/Target/RangeM"
+_NT_TARGET_TAG_ID   = "Sight/Target/TagID"
+_NT_TARGET_RPS      = "Sight/Aim/TargetRps"
+_NT_STATUS          = "Sight/Aim/Status"
+_NT_LOCKOUT         = "Sight/DriverLockout"
 
-# Heading-loop gains. Conservative defaults — tune after first practice.
-_HEADING_KP = 4.0  # rad/s per rad of error
+# ----- Tuning -----
+# Bearing error → yaw rate. Bearing is in radians; output is rad/s. 4.0 means
+# 1° of bearing error commands ~0.07 rad/s of yaw — gentle enough to avoid
+# overshoot, fast enough to slew 30° in <1s.
+_HEADING_KP = 4.0
 _HEADING_KI = 0.0
 _HEADING_KD = 0.2
-_HEADING_TOLERANCE_RAD = math.radians(2.0)  # within 2° = "on target"
+_HEADING_TOLERANCE_RAD = math.radians(1.5)  # within 1.5° of tag center = on target
 
-# Once heading is locked, give the flywheel this long to settle before firing.
-_SETTLE_S = 0.25
-# Hard timeout for the whole sequence, in case something goes wrong.
+# Once heading is locked, give the flywheel time to settle (use the velocity
+# tolerance check too — whichever is later).
+_FLYWHEEL_SETTLE_S = 0.4
+
+# How long to hold the last bearing if the tag temporarily drops out.
+_HOLD_LAST_BEARING_S = 0.4
+
+# Hard timeout for the whole sequence.
 _OVERALL_TIMEOUT_S = 6.0
 
+# How long to actually feed once at-speed. Reads from the existing tunable
+# (auto_fire_duration) so it stays consistent with the manual fire path.
 _FOOT_TO_M = 0.3048
 
 
@@ -62,94 +93,131 @@ def _publish_status(s: str) -> None:
     SmartDashboard.putString(_NT_STATUS, s)
 
 
+def _publish_lockout(v: bool) -> None:
+    SmartDashboard.putBoolean(_NT_LOCKOUT, v)
+
+
 class AutoAim(Command):
-    """Listens for Pi aim requests; rotates + sets dial + fires."""
+    """Listens for Pi SHOOT requests; rotates onto the tag + fires.
+
+    Constructed once per shoot, by the DeferredCommand wired up in
+    robotcontainer.py — that gives us a fresh PIDController state every
+    fire so we never carry over integral windup from a prior aim.
+    """
 
     def __init__(self, drivetrain, operator: OperatorSubsystem, lasercan: LaserCanSubsystem):
         super().__init__()
         self.drivetrain = drivetrain
         self.operator = operator
         self.lasercan = lasercan
+        # Requirements: holding both means scheduling AutoAim cancels the
+        # default joystick-drive command, so the driver physically cannot
+        # move the robot until end() runs. That IS the driver lockout —
+        # the NT flag is for UI feedback.
         self.addRequirements(operator, drivetrain)
 
-        # Heading control happens via a swerve FieldCentric request that we
-        # rebuild each tick. The drivetrain's existing default command runs
-        # joystick drive, which we override while AutoAim is scheduled.
         self._req = (
             swerve_requests.FieldCentric()
             .with_drive_request_type(SwerveModule.DriveRequestType.OPEN_LOOP_VOLTAGE)
         )
 
+        # Bearing PID: setpoint is always 0 (we want the target centered),
+        # measurement is the current bearing in radians. Continuous input
+        # because bearing wraps if the camera ever sees +/-180° (it
+        # shouldn't, but cheap safety).
         self._heading_pid = PIDController(_HEADING_KP, _HEADING_KI, _HEADING_KD)
         self._heading_pid.enableContinuousInput(-math.pi, math.pi)
         self._heading_pid.setTolerance(_HEADING_TOLERANCE_RAD)
 
         self._timer = Timer()
         self._settle_timer = Timer()
-        self._target_heading: float | None = None
-        self._target_distance_m: float | None = None
+        self._lost_timer = Timer()  # how long since we last saw the tag
+        self._target_rps: float = 0.0
+        self._last_bearing_rad: float = 0.0
         self._phase = "idle"
-        self._last_seen_request_id: int = 0
 
     # ----- lifecycle -----
 
     def initialize(self) -> None:
-        rid = int(SmartDashboard.getNumber(_NT_REQ_ID, 0))
-        if rid <= self._last_seen_request_id or not SmartDashboard.getBoolean(_NT_REQUESTED, False):
-            # Nothing new — finish immediately so the scheduler stops nagging.
-            self._phase = "idle"
-            _publish_status("idle")
-            return
-        self._last_seen_request_id = rid
-
-        x_norm = SmartDashboard.getNumber(_NT_X, 0.5)
-        y_norm = SmartDashboard.getNumber(_NT_Y, 0.5)
         self._timer.reset(); self._timer.start()
+        self._settle_timer.stop(); self._settle_timer.reset()
+        self._lost_timer.stop(); self._lost_timer.reset()
+        self._heading_pid.reset()
 
-        try:
-            self._target_heading = self._compute_target_heading(x_norm)
-            self._target_distance_m = self._compute_target_distance_m(y_norm)
-        except Exception as e:
-            print(f"AutoAim init failed: {e}")
-            _publish_status("error")
-            self._phase = "error"
-            return
+        # Snapshot what the Pi sees right now. If there's no detection at
+        # all we still arm — the tag may show up between init and execute —
+        # but we go straight into "rotating" with bearing=0 (no rotation)
+        # and rely on the lost-timer to time us out if nothing appears.
+        self._target_rps = max(0.0, float(SmartDashboard.getNumber(_NT_TARGET_RPS, 0.0)))
+        self._last_bearing_rad = math.radians(
+            SmartDashboard.getNumber(_NT_TARGET_BEARING, 0.0)
+        )
 
-        # Push the dialed distance straight to the SmartDashboard tunable so
-        # the existing shooter-distance → rps mapping picks it up. The driver
-        # can still see and override it via the slider.
-        if self._target_distance_m is not None:
-            tunables.set_shooter_distance_feet(self._target_distance_m / _FOOT_TO_M)
+        # Mirror the Pi-recommended distance into the dial so the driver-side
+        # display (Elastic / control panel) stays meaningful.
+        range_m = self._best_range_m()
+        if range_m is not None:
+            tunables.set_shooter_distance_feet(range_m / _FOOT_TO_M)
 
         self._phase = "rotating"
         _publish_status("rotating")
-        self._heading_pid.reset()
+        _publish_lockout(True)
 
     def execute(self) -> None:
         if self._phase in ("idle", "error", "done"):
             return
 
+        bearing_rad, fresh = self._read_bearing()
+        if fresh:
+            self._last_bearing_rad = bearing_rad
+            self._lost_timer.stop(); self._lost_timer.reset()
+        else:
+            if not self._lost_timer.isRunning():
+                self._lost_timer.start()
+            if self._lost_timer.get() > _HOLD_LAST_BEARING_S:
+                # We've lost the tag too long; abort rather than driving on
+                # a stale value.
+                _publish_status("error")
+                self._phase = "error"
+                self._stop_drive()
+                return
+            bearing_rad = self._last_bearing_rad  # hold last known
+
+        # Refresh RPS each tick — distance changes if the bot is moving
+        # (it shouldn't be, since we own drivetrain, but the Pi's
+        # recommendation reflects the current LaserCAN/PnP reading).
+        rps = float(SmartDashboard.getNumber(_NT_TARGET_RPS, 0.0))
+        if rps > 0:
+            self._target_rps = rps
+
         if self._phase == "rotating":
-            self._rotate_step()
-            if self._heading_pid.atSetpoint():
-                # Begin spin-up; keep holding heading.
+            self._rotate_step(bearing_rad)
+            if self._heading_pid.atSetpoint() and abs(bearing_rad) < _HEADING_TOLERANCE_RAD:
                 self._phase = "spinning_up"
                 self._settle_timer.reset(); self._settle_timer.start()
                 _publish_status("spinning_up")
 
         if self._phase == "spinning_up":
-            self._rotate_step()                    # keep holding heading
-            self.operator.shooterOut()             # flywheel only, no feed
-            if self._settle_timer.get() >= _SETTLE_S:
+            # Keep holding heading + spin the wheel.
+            self._rotate_step(bearing_rad)
+            if self._target_rps > 0:
+                self.operator.shooterAtRps(self._target_rps)
+            else:
+                self.operator.shooterOut()  # fallback to dial-derived RPS
+            settled = self._settle_timer.get() >= _FLYWHEEL_SETTLE_S
+            at_speed = self._target_rps > 0 and self.operator.isAtRps(self._target_rps)
+            if settled and (at_speed or self._target_rps == 0):
                 self._phase = "firing"
                 _publish_status("firing")
 
         if self._phase == "firing":
-            self._rotate_step()
-            # Run the full FIRE sequence (kicker + conveyor + flywheel),
-            # matching what AutoFire does in its post-spin-up phase.
-            self.operator.FIRE()
-            if self._timer.get() >= tunables.shooter_spin_up_seconds() + tunables.auto_fire_duration():
+            # Hold heading + keep flywheel spinning + run kicker/conveyor.
+            self._rotate_step(bearing_rad)
+            if self._target_rps > 0:
+                self.operator.shooterAtRps(self._target_rps)
+            self.operator.kickerIn()
+            self.operator.conveyorFwd()
+            if self._timer.get() >= _FLYWHEEL_SETTLE_S + tunables.auto_fire_duration():
                 self._phase = "done"
                 _publish_status("done")
 
@@ -164,70 +232,48 @@ class AutoAim(Command):
 
     def end(self, interrupted: bool) -> None:
         self.operator.ceaseFire()
-        SmartDashboard.putBoolean(_NT_REQUESTED, False)
+        self._stop_drive()
+        _publish_lockout(False)
         if self._phase != "done":
             _publish_status("idle" if not interrupted else "error")
-        # Stop driving — drivetrain's default command resumes joystick drive.
 
-    # ----- math -----
+    # ----- helpers -----
 
-    def _rotate_step(self) -> None:
-        """Drive the swerve toward `_target_heading` with a heading PID."""
-        if self._target_heading is None:
-            return
-        cur = self._current_heading_rad()
-        omega = self._heading_pid.calculate(cur, self._target_heading)
+    def _rotate_step(self, bearing_rad: float) -> None:
+        """Drive yaw to zero bearing error; hold translation at zero."""
+        omega = self._heading_pid.calculate(bearing_rad, 0.0)
         req = (
             self._req
             .with_velocity_x(0.0)
             .with_velocity_y(0.0)
             .with_rotational_rate(omega)
         )
-        # CTRE's swerve drivetrain exposes set_control(request) directly; the
-        # subsystem's applyRequest() helper just wraps that in a runnable.
         self.drivetrain.set_control(req)
 
-    def _current_heading_rad(self) -> float:
-        """Robot pose heading in radians, normalized [-pi, pi]."""
+    def _stop_drive(self) -> None:
         try:
-            pose = self.drivetrain.get_state().pose
-            return pose.rotation().radians()
+            self.drivetrain.set_control(
+                self._req
+                .with_velocity_x(0.0)
+                .with_velocity_y(0.0)
+                .with_rotational_rate(0.0)
+            )
         except Exception:
-            try:
-                return self.drivetrain.getRotation3d().z
-            except Exception:
-                return 0.0
+            pass
 
-    def _compute_target_heading(self, x_norm: float) -> float:
-        """Map normalized x click to absolute target heading.
+    def _read_bearing(self) -> tuple[float, bool]:
+        """Returns (bearing_rad, fresh). fresh=False if Pi reports no tag."""
+        detected = SmartDashboard.getBoolean(_NT_TARGET_DETECTED, False)
+        if not detected:
+            return self._last_bearing_rad, False
+        return math.radians(SmartDashboard.getNumber(_NT_TARGET_BEARING, 0.0)), True
 
-        Camera FOV is in tunables; (x_norm - 0.5) * FOV is the angular offset
-        of the click from camera center. Camera and robot share heading.
-        """
-        fov_rad = math.radians(tunables.sight_fov_deg())
-        yaw_off = (x_norm - 0.5) * fov_rad
-        return self._current_heading_rad() + yaw_off
-
-    def _compute_target_distance_m(self, y_norm: float) -> float | None:
-        """Prefer LaserCAN; fall back to projecting y_norm onto ground plane."""
+    def _best_range_m(self) -> float | None:
+        """LaserCAN if valid; tag PnP otherwise; None if neither."""
         laser = self.lasercan.distance_m() or self.lasercan.last_known_distance_m()
         if laser is not None and laser > 0.1:
             return laser
-        # Inverse pinhole on the ground plane: solve for downrange given pixel.
-        cam_h = tunables.sight_camera_height_m()
-        tilt = tunables.sight_camera_tilt_rad()
-        fov = math.radians(tunables.sight_fov_deg())
-        # Normalize y to "pixels from optical center" using the 4:3 frame
-        # assumption baked into the pi camera. The pi sends y_norm in [0, 1];
-        # any aspect ratio works because we pre-divide by image height.
-        # focal_y in same units as h_image: focal/(0.5 * H) = 1/tan(fov/2).
-        if y_norm <= 0.5:
-            return None  # click was above horizon — can't compute ground hit
-        r = math.tan((y_norm - 0.5) * fov)
-        # Same closed form as vision._project_to_pixel inverted:
-        #   tan(angle below horizon) = (h - r·d_horizon) / (...)
-        # Easier path: ray pitch = tilt + (y_norm-0.5)*fov, intersect with y=0.
-        ray_pitch = tilt + (y_norm - 0.5) * fov
-        if ray_pitch <= 1e-3:
-            return None
-        return cam_h / math.tan(ray_pitch)
+        pnp = SmartDashboard.getNumber(_NT_TARGET_RANGE_M, 0.0)
+        if pnp > 0.1:
+            return pnp
+        return None

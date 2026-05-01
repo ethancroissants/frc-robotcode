@@ -144,7 +144,9 @@ body {
   background: black;
   border-radius: 0 0 12px 12px;
   overflow: hidden;
-  cursor: crosshair;
+  /* Camera is no longer click-to-aim — the SHOOT button on the rail
+     is now the only way to fire. Default cursor reflects that. */
+  cursor: default;
   min-height: 0;
 }
 
@@ -389,6 +391,104 @@ button.ghost {
   border: 1px solid var(--border-strong);
 }
 button.square { padding: 10px 12px; min-width: 44px; }
+
+/* ================= SHOOT button ================= */
+.shoot-card { background: linear-gradient(180deg, var(--panel-2), var(--panel)); }
+
+.shoot-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: calc(100% - 28px);
+  margin: 14px;
+  padding: 22px 12px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #b91c1c, #7f1d1d);
+  border: 1px solid #ef4444;
+  color: #fff;
+  font-family: var(--mono);
+  letter-spacing: 0.18em;
+  cursor: pointer;
+  transition: all 0.08s;
+  box-shadow: 0 8px 28px rgba(239, 68, 68, 0.25), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+}
+.shoot-btn:hover { filter: brightness(1.1); }
+.shoot-btn:active { transform: translateY(2px); box-shadow: 0 2px 14px rgba(239, 68, 68, 0.35); }
+.shoot-btn[disabled] {
+  background: linear-gradient(180deg, #1f2937, #111827);
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.shoot-btn.armed {
+  background: linear-gradient(180deg, #16a34a, #166534);
+  border-color: var(--good);
+  box-shadow: 0 8px 28px rgba(52, 211, 153, 0.3), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+}
+.shoot-label {
+  font-size: 28px;
+  font-weight: 800;
+}
+.shoot-sub {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  opacity: 0.85;
+  text-transform: uppercase;
+}
+
+/* ================= Calibration table ================= */
+.cal-table {
+  width: calc(100% - 28px);
+  margin: 10px 14px 8px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.cal-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cal-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cal-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+.cal-table td.right-edge { text-align: right; }
+.cal-table .row-del {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  letter-spacing: 0;
+}
+.cal-table .row-del:hover { color: var(--bad); border-color: rgba(239, 68, 68, 0.5); }
+
+.cal-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  padding: 8px 14px;
+}
+.cal-add input { padding: 7px 8px; font-size: 12px; }
+.cal-add button { padding: 7px 12px; font-size: 11px; letter-spacing: 0.06em; }
+#cal-snapshot-btn { width: calc(100% - 28px); margin: 0 14px 14px; padding: 8px; font-size: 11px; }
+
+/* ================= Lockout pill ================= */
+#lockout-pill {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--bad);
+  border-color: rgba(239, 68, 68, 0.5);
+  animation: pulse 1.0s infinite;
+}
 
 /* ================= Bottombar ================= */
 .bottombar {

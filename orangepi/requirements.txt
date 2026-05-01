@@ -3,3 +3,8 @@ uvicorn[standard]>=0.27
 # pyntcore ships the same NT4 client the rio uses, so the Pi speaks the
 # protocol Elastic/Shuffleboard already speak.
 pyntcore>=2026.1.0
+# OpenCV with contrib modules — gives us cv2.aruco.ArucoDetector for
+# AprilTag detection (DICT_APRILTAG_36h11). The headless wheel is smaller
+# and avoids GTK deps we don't need on a coprocessor.
+opencv-contrib-python-headless>=4.8
+numpy>=1.24

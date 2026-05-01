@@ -257,21 +257,24 @@ class RobotContainer:
             InstantCommand(lambda: tunables.bump_shooter_distance(-0.5)).ignoringDisable(True)
         )
 
-        # Pi click-to-aim: every time the Pi increments /Sight/Aim/RequestId,
-        # schedule a fresh AutoAim. We watch the value and edge-trigger.
-        self._last_aim_request_id = 0
+        # Pi SHOOT button: every time the Pi increments /Sight/Shoot/RequestId,
+        # schedule a fresh AutoAim. AutoAim reads /Sight/Target/* directly
+        # for bearing + range, and /Sight/Aim/TargetRps for the calibrated
+        # flywheel speed. AutoAim's addRequirements(drivetrain) cancels the
+        # joystick default command, so the driver is locked out for the
+        # duration. Initialise the lockout flag to false so the Pi UI
+        # doesn't show "DRIVER LOCKED" before any aim has happened.
+        SmartDashboard.putBoolean("Sight/DriverLockout", False)
+        self._last_shoot_request_id = 0
 
-        def _new_aim_request() -> bool:
-            from wpilib import SmartDashboard
-            rid = int(SmartDashboard.getNumber("Sight/Aim/RequestId", 0))
-            if rid > self._last_aim_request_id and SmartDashboard.getBoolean(
-                "Sight/Aim/Requested", False
-            ):
-                self._last_aim_request_id = rid
+        def _new_shoot_request() -> bool:
+            rid = int(SmartDashboard.getNumber("Sight/Shoot/RequestId", 0))
+            if rid > self._last_shoot_request_id:
+                self._last_shoot_request_id = rid
                 return True
             return False
 
-        Trigger(_new_aim_request).onTrue(
+        Trigger(_new_shoot_request).onTrue(
             DeferredCommand(
                 lambda: AutoAim(
                     self.drivetrain,

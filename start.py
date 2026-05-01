@@ -415,6 +415,11 @@ class Card(tk.Frame):
         self._enabled = value
         self._apply_enabled()
 
+    def set_subtitle(self, text: str) -> None:
+        # Used by the status poller to re-label Vision Pi cards as the Pi
+        # transitions between not-set-up / offline / online.
+        self._subtitle.configure(text=text)
+
     def _click(self, _event=None) -> None:
         if not self._enabled:
             return
@@ -496,7 +501,23 @@ def main() -> int:
     # this so it always targets the address that just answered a ping,
     # rather than re-probing on click.
     current_host: dict[str, str | None] = {"v": None}
+    pi_host: dict[str, str | None] = {"v": None}
     card_refs: dict[str, "Card"] = {}
+
+    def _pi_cfg_path() -> Path:
+        return REPO / ".orangepi_cfg"
+
+    def _pi_is_set_up() -> bool:
+        return _pi_cfg_path().exists()
+
+    def _pi_target_host() -> str | None:
+        """Read the Pi's hostname from .orangepi_cfg, if it's been set up."""
+        try:
+            import json
+            data = json.loads(_pi_cfg_path().read_text())
+        except Exception:
+            return None
+        return data.get("host") or None
 
     def _set_status(reachable: bool | None, host: str | None) -> None:
         if not alive["v"]:
@@ -518,14 +539,62 @@ def main() -> int:
             if card is not None:
                 card.set_enabled(bool(reachable))
 
+    def _refresh_pi_cards() -> None:
+        """Recompute Vision Pi card enabled-state + subtitles.
+        Set-up is the entry point so it's always enabled. The other three
+        only make sense once the user has finished setup at least once."""
+        if not alive["v"]:
+            return
+        is_set_up = _pi_is_set_up()
+        host = pi_host["v"]
+        reachable = host is not None
+
+        setup_card = card_refs.get("pi_setup")
+        if setup_card is not None:
+            if is_set_up:
+                setup_card.set_subtitle("Re-run the installer (safe — idempotent).")
+            else:
+                setup_card.set_subtitle("Start here — installs the Pi-side service.")
+
+        for cid, when_offline in (
+            ("pi_update", "Pi offline — power it and connect to the robot network."),
+            ("pi_open", "Pi offline — power it and connect to the robot network."),
+            ("pi_ssh", "Pi offline — power it and connect to the robot network."),
+        ):
+            card = card_refs.get(cid)
+            if card is None:
+                continue
+            if not is_set_up:
+                card.set_subtitle("Run \"Set up Vision Pi\" first.")
+                card.set_enabled(False)
+            elif not reachable:
+                card.set_subtitle(when_offline)
+                card.set_enabled(False)
+            else:
+                card.set_enabled(True)
+                if cid == "pi_update":
+                    card.set_subtitle(f"Push the latest sight code to {host} and restart.")
+                elif cid == "pi_open":
+                    card.set_subtitle(f"Open http://{host}:8080/ in your browser.")
+                elif cid == "pi_ssh":
+                    card.set_subtitle(f"Open a terminal connected to {host}.")
+
     def _poll_status() -> None:
         if not alive["v"]:
             return
 
         def worker() -> None:
             ok_, host = _check_bot_status()
+            # Also probe the Pi if we know where to look for it.
+            pi_target = _pi_target_host()
+            pi_ok = bool(pi_target) and ping(pi_target, timeout_s=0.6)
+
             if alive["v"]:
-                root.after(0, lambda: _set_status(ok_, host))
+                def apply() -> None:
+                    _set_status(ok_, host)
+                    pi_host["v"] = pi_target if pi_ok else None
+                    _refresh_pi_cards()
+                root.after(0, apply)
 
         threading.Thread(target=worker, daemon=True).start()
         root.after(STATUS_POLL_MS, _poll_status)
@@ -828,24 +897,28 @@ def main() -> int:
         ]),
         ("Vision Pi", [
             (
-                "Set up Vision Pi",
-                "Install the camera + sight web UI on the Orange Pi 5.",
+                "1. Set up Vision Pi",
+                "Start here — installs the Pi-side service.",
                 lambda: _launch(["setup_orangepi.py", "--ui"]),
+                "pi_setup",
             ),
             (
-                "Update Vision Pi",
-                "Push the latest sight code to the Pi and restart.",
+                "2. Update Vision Pi",
+                "Run \"Set up Vision Pi\" first.",
                 lambda: _launch(["update_orangepi.py", "--ui"]),
+                "pi_update",
             ),
             (
-                "Open Sight UI",
-                "Open the Pi's camera/control web page in your browser.",
+                "3. Open Sight UI",
+                "Run \"Set up Vision Pi\" first.",
                 _open_sight_ui_clicked,
+                "pi_open",
             ),
             (
                 "SSH to Vision Pi",
-                "Open a terminal connected to the Pi over SSH.",
+                "Run \"Set up Vision Pi\" first.",
                 _ssh_pi_clicked,
+                "pi_ssh",
             ),
         ]),
         ("Tools", [
@@ -877,13 +950,23 @@ def main() -> int:
             # tracks bot reachability.
             title, subtitle, cmd = item[0], item[1], item[2]
             card_id = item[3] if len(item) > 3 else None
-            # SSH and Wipe start disabled; the status poller flips them on
-            # once the rio answers a ping (both need a live SSH connection).
-            initial_enabled = card_id not in ("ssh", "wipe")
+            # Cards that need a live SSH/HTTP connection start disabled; the
+            # status poller flips them on once the relevant host answers.
+            #   - ssh / wipe: rio ping required
+            #   - pi_update / pi_open / pi_ssh: Pi must be set up + reachable
+            #   - pi_setup is always enabled (it's the entry point)
+            disabled_ids = {"ssh", "wipe", "pi_update", "pi_open", "pi_ssh"}
+            initial_enabled = card_id not in disabled_ids
             card = Card(grid, title, subtitle, cmd, enabled=initial_enabled)
             card.grid(row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4)
             if card_id:
                 card_refs[card_id] = card
+
+    # Once the cards exist, refresh Vision Pi labels based on whether
+    # .orangepi_cfg already exists (so re-runs show "Re-run installer"
+    # instead of "Start here"). The status poller will refine this once
+    # it gets a Pi ping back.
+    _refresh_pi_cards()
 
     # ----- footer -----
     footer = tk.Frame(root, bg=PANEL)

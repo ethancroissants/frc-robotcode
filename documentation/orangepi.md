@@ -1,11 +1,113 @@
 # Vision Pi (Orange Pi 5) — Setup Guide
 
-The Pi runs the camera + the click-to-aim web page. The rio runs the
-robot. They share the robot's network and talk over NetworkTables.
+The Pi runs the camera, AprilTag detector, and the SHOOT web page. The
+rio runs the robot. They share the robot's network and talk over
+NetworkTables.
 
 If you're new to this — **read the next section first.** It's the part
 that's confusing the first time, and the rest of the doc assumes you've
 seen it.
+
+---
+
+## How firing actually works (the new way)
+
+The old "click anywhere on the camera and the bot fires there" is gone.
+Replaced with: **the Pi tracks an AprilTag with the camera + LaserCAN,
+the operator presses SHOOT, the rio rotates onto the tag and fires
+using the calibrated RPS for that distance.** No clicking required.
+
+**Step by step, when you press SHOOT:**
+
+1. The Pi has been running an AprilTag detector on every camera frame
+   the whole time. It already knows: which tag, what angle off the
+   robot's nose (bearing, in degrees), and approximately how far away
+   (range, in meters — but it prefers the LaserCAN reading because
+   that's an active sensor and more accurate).
+2. The Pi looks up the right flywheel RPS from its **calibration
+   table** (a list of distance → RPS pairs you fill in by shooting at
+   known distances; see "Shooter calibration" below).
+3. The Pi POSTs to its own `/api/shoot`, which bumps an NT counter
+   `/Sight/Shoot/RequestId`.
+4. The rio's command scheduler sees the counter tick and schedules
+   `AutoAim`. AutoAim:
+   a. Sets `/Sight/DriverLockout = true` so the Pi UI shows
+      **DRIVER LOCKED** and the operator knows.
+   b. Reads the *fresh* bearing from the Pi every 20 ms loop, runs a
+      PID that drives bearing to zero by yawing the swerve. The
+      driver controller is *physically powerless* during this — the
+      AutoAim command requires the drivetrain, which cancels the
+      joystick default command.
+   c. Spins the flywheel at the Pi-recommended RPS (not the rio's
+      old "10 rps per foot" linear mapping — the calibration table
+      is the source of truth now).
+   d. When bearing is locked AND the flywheel is at speed, runs the
+      kicker + conveyor for `auto_fire_duration` seconds.
+   e. Releases the lockout, returns control to the driver.
+
+**This means:** the only inputs that matter to firing are (a) what
+AprilTag the Pi sees, (b) the LaserCAN range, and (c) the calibration
+table. Everything else is automatic.
+
+---
+
+## TL;DR — what do I press in the control panel?
+
+Open `python start.py`. The **Vision Pi** section has four buttons.
+They're numbered for the order you press them the *first* time:
+
+| #   | Button                | When to press                                                                  |
+| --- | --------------------- | ------------------------------------------------------------------------------ |
+| 1   | **Set up Vision Pi**  | Once per Pi (or after re-flashing). The wizard walks you through provisioning. |
+| 2   | **Update Vision Pi**  | Optional. Pushes Pi-only changes from your laptop without rebooting the rio.   |
+| 3   | **Open Sight UI**     | Any time after #1 finishes. Opens the camera page in your browser.             |
+| —   | **SSH to Vision Pi**  | Debugging only — opens a terminal on the Pi.                                   |
+
+After step #1 succeeds, **you do not press anything else day-to-day.**
+The "Deploy to Robot" button in the Robot Code section ships your code
+to the rio, and the rio automatically forwards Pi files to the Pi on
+its next boot. (See "How this actually works" below.)
+
+**If a button is greyed out**, the panel is telling you why in its
+subtitle — usually one of:
+
+- *"Run 'Set up Vision Pi' first."* — `.orangepi_cfg` doesn't exist yet.
+- *"Pi offline — power it and connect to the robot network."* — the Pi
+  isn't responding to ping. Check power, ethernet, and that you're on
+  the same network as the Pi.
+
+The control panel polls every 5 seconds, so cards re-enable on their
+own once the Pi comes back.
+
+---
+
+## TL;DR — what do I press in the control panel?
+
+Open `python start.py`. The **Vision Pi** section has four buttons.
+They're numbered for the order you press them the *first* time:
+
+| #   | Button                | When to press                                                                  |
+| --- | --------------------- | ------------------------------------------------------------------------------ |
+| 1   | **Set up Vision Pi**  | Once per Pi (or after re-flashing). The wizard walks you through provisioning. |
+| 2   | **Update Vision Pi**  | Optional. Pushes Pi-only changes from your laptop without rebooting the rio.   |
+| 3   | **Open Sight UI**     | Any time after #1 finishes. Opens the camera page in your browser.             |
+| —   | **SSH to Vision Pi**  | Debugging only — opens a terminal on the Pi.                                   |
+
+After step #1 succeeds, **you do not press anything else day-to-day.**
+The "Deploy to Robot" button in the Robot Code section ships your code
+to the rio, and the rio automatically forwards Pi files to the Pi on
+its next boot. (See "How this actually works" below.)
+
+**If a button is greyed out**, the panel is telling you why in its
+subtitle — usually one of:
+
+- *"Run 'Set up Vision Pi' first."* — `.orangepi_cfg` doesn't exist yet.
+- *"Pi offline — power it and connect to the robot network."* — the Pi
+  isn't responding to ping. Check power, ethernet, and that you're on
+  the same network as the Pi.
+
+The control panel polls every 5 seconds, so cards re-enable on their
+own once the Pi comes back.
 
 ---
 
@@ -76,15 +178,27 @@ on next robot boot the rio pushes the relevant files to the Pi. Done.
 
 Two channels:
 
-- **NetworkTables (live state).** rio publishes RPS / dial / predicted
-  / LaserCAN / button state on `/SmartDashboard/...`. The Pi's web app
-  is an NT4 *client* (same protocol Elastic uses) and reads them. When
-  you click the camera in the browser, the Pi writes
-  `/Sight/Aim/{X,Y,RequestId}` and the rio's `AutoAim` command picks
-  it up.
+- **NetworkTables (live state).** Same protocol Elastic and Shuffleboard
+  use. The Pi runs as an NT4 client and the rio is the server. Topic map:
+
+  *Pi → rio*:
+  - `/Sight/Target/Detected` (bool) — tag visible right now?
+  - `/Sight/Target/BearingDeg` — signed angle of tag from camera axis
+  - `/Sight/Target/RangeM` — PnP-derived range (LaserCAN preferred)
+  - `/Sight/Target/TagID` — which tag is locked
+  - `/Sight/Aim/TargetRps` — calibrated flywheel RPS for current distance
+  - `/Sight/Shoot/RequestId` — bumped on SHOOT button press
+
+  *rio → Pi*:
+  - `/Sight/LaserCAN/{DistanceM, Valid, Ambient}` — sensor mirror
+  - `/Sight/Aim/Status` — `idle` / `rotating` / `spinning_up` / `firing` / `done` / `error`
+  - `/Sight/DriverLockout` — true while AutoAim is running
+  - `/Sight/Buttons/{A,B,X,Y,LB,RB,POV}` — operator gamepad mirror
+  - `/Tune/Shooter Distance (ft)` — manual dial value
 
 - **SSH (file pushes).** Used only for `orangepi_pusher.py` (rio →
-  Pi) shipping new files when you redeploy. Not used at runtime.
+  Pi) shipping new files when you redeploy. Not used at runtime — all
+  match-time chatter is NT.
 
 ### Where you open the UI
 
@@ -188,6 +302,234 @@ Press **Deploy to Robot**. The rio gets the new code (including
 Pi and verify the orangepi/ files match. From then on, every Deploy
 keeps both in sync automatically. **You never touch the Pi directly
 again unless you want to.**
+
+---
+
+## AprilTag tracking — what the Pi looks for
+
+The Pi runs OpenCV's `cv2.aruco` detector on every camera frame, looking
+for AprilTags from the **36h11** family (the standard FRC field uses
+this family — every season's field-element tags are 36h11).
+
+By default the Pi tracks tag IDs **3, 4, 7, 8** (2024 Crescendo speaker
+tags). To track different tags, edit one line in
+`orangepi/sight.env` on the Pi (or in the install.sh defaults if you're
+re-provisioning):
+
+```
+TARGET_TAG_IDS=3,4,7,8
+```
+
+Comma-separated list. Empty list means "track any tag in the family",
+which is fine for testing but you really want to constrain it to the
+tags that mark *your* shooting target so the Pi doesn't lock onto a
+random partner-bot's tag mid-match.
+
+If you change `TARGET_TAG_IDS`, restart the Pi service (or just the
+robot — the rio re-pushes the Pi files on boot if they changed):
+
+```bash
+ssh orangepi@10.12.79.11 'sudo systemctl restart cold-fusion-sight'
+```
+
+### Camera FOV
+
+The bearing computation needs the camera's horizontal field-of-view in
+degrees. The default is **60°**, which fits most USB webcams and the
+ELP/Logitech cameras typically used for FRC vision. If you're using a
+narrower or wider lens, set `CAMERA_HFOV_DEG` in `sight.env`.
+
+The Pi will work with the wrong FOV — it'll just point a degree or two
+off, since bearing scales linearly with the FOV value. To check: pick a
+spot 5 m away with a tag, and verify the Pi's bearing readout agrees
+with where the tag actually is in the frame (center = 0°, edge of frame
+= ±FOV/2).
+
+### Tag size
+
+PnP range estimation assumes a **6.5 inch (0.1651 m)** tag side length,
+which is the FRC standard. If you're testing with printed tags of a
+different size, set `TAG_SIZE_M` in `sight.env`. Range readings are
+linearly proportional to the assumed tag size, so a 2× error here gives
+a 2× error in the PnP range — but the LaserCAN takes precedence, so
+this only matters for sanity-checks on the UI.
+
+---
+
+## Shooter calibration — making it accurate
+
+The rio used to map distance to flywheel RPS with a single linear
+formula. That works for a first try; it doesn't survive long-shot vs
+short-shot accuracy demands. So the Pi now keeps an **interpolation
+table** of (distance_ft, rps) pairs that you fill in by shooting at
+known distances.
+
+### How to calibrate
+
+In the Sight UI right rail there's a **SHOOTER CALIBRATION** card with
+the current table and an **ADD POINT** form.
+
+The fast workflow:
+
+1. Park the bot at a known distance from the goal (use a tape measure
+   or the field markings).
+2. Spin the shooter at a guess RPS using the manual dial; fire.
+3. Adjust RPS up/down until shots actually land in the goal.
+4. Type the distance + final RPS into the **ADD POINT** row, click
+   **ADD POINT**.
+5. Move to a new distance, repeat.
+
+After ~5 well-spaced points the curve is solid. The table is stored on
+the Pi at `/home/orangepi/cold-fusion-sight/sight_calibration.json` and
+survives reboots.
+
+### How interpolation works
+
+For a given distance `d`, the Pi looks up the bracketing pair `(d_lo,
+rps_lo)` and `(d_hi, rps_hi)` and linearly interpolates. Distances
+beyond the table's range clamp to the nearest endpoint — so cap your
+table at the maximum range you ever want to shoot from, otherwise the
+robot will under- or over-rotate the wheel for outside-the-table shots.
+
+### Sensible starting table
+
+The default table the Pi installs with on first boot:
+
+| Distance (ft) | RPS |
+| ------------- | --- |
+| 0             | 0   |
+| 4             | 40  |
+| 8             | 80  |
+| 12            | 100 |
+| 16            | 110 |
+
+This matches the rio's old "10 RPS per foot" mapping at the low end and
+diminishes at the high end (because air resistance makes that linear
+mapping wrong far away). **It is a starting point. Replace it with real
+shot data as soon as you can.**
+
+---
+
+## LaserCAN — physical mounting + wiring
+
+The Grapple Robotics LaserCAN is a 1D time-of-flight sensor (think
+"single-pixel LiDAR"). The shooter uses it to read distance to the
+goal, which feeds the auto-aim dial.
+
+The Pi does **not** talk to the LaserCAN — it's a CAN bus device wired
+into the rio's CAN bus, exactly like a TalonFX. The Pi only reads the
+*resulting* distance value out of NetworkTables. So you don't need any
+USB or ethernet between the Pi and the LaserCAN.
+
+### Where to mount it
+
+- **On the shooter assembly**, pointed *forward along the launch line*
+  — i.e. parallel to the direction the ball will travel out of the
+  shooter, at roughly the height the ball exits.
+- Aim it so the laser hits the goal/target when the robot is squared up.
+  The shooter is fixed on this robot, so the LaserCAN's line of sight
+  needs to match the camera's. Use the camera image as your alignment
+  reference: when a target is centered in the camera, the LaserCAN dot
+  should land on it.
+- Keep it clear of the shooter's exit window so a passing ball doesn't
+  briefly trip the reading. ~1–2 inches above or below the ball's path
+  is plenty.
+- The body of the sensor is M3-mountable (two holes). Either bolt it to
+  the shooter frame directly, or print/laser-cut a small bracket.
+
+### Wiring
+
+LaserCAN is a CAN device, so it gets two pairs of wires:
+
+```
+                                 ┌──────────────┐
+                                 │  LaserCAN    │
+                                 │  (CAN ID 36) │
+                                 └─┬──┬──┬──┬───┘
+                                   │  │  │  │
+                                   │  │  │  └── CAN-LO (yellow)
+                                   │  │  └───── CAN-HI (green)
+                                   │  └──────── GND     (black)
+                                   └─────────── +5–24V  (red)
+                                                via the rest of the CAN
+                                                chain — share with the
+                                                CTRE network.
+```
+
+**CAN bus chain.** Splice it into the existing CTRE CAN bus (the same
+loop your TalonFXes ride on). Either daisy-chain it between two motor
+controllers or branch off a Y. Order on the bus doesn't matter as long
+as the chain still has terminating resistance at both ends — the rio
+provides one terminator, and the PDH/PDP at the far end provides the
+other. If you tap into the middle of the chain, that's fine.
+
+**Power.** LaserCAN runs on 5–24 V; the cleanest source is a 12 V tap
+from the PDH/PDP through a 1 A breaker, or from a CTRE CANcoder breakout
+board if you have one. Don't draw power off the rio's CAN connector
+itself.
+
+### CAN ID
+
+We expect `CAN ID 36`. That's defined in [`constants.py`][canids]:
+
+```python
+class CANIDs:
+    LASERCAN = 36
+```
+
+To set the ID, plug the LaserCAN into your laptop via USB-C and use
+Grapple's web flasher: <https://grapplerobotics.au/setup>. If your
+LaserCAN is on a different ID, change the constant — don't reflash
+unless you have a reason.
+
+[canids]: ../constants.py
+
+### How to verify it works
+
+After deploy:
+
+1. Power the bot, wait for the rio to enable.
+2. Open the Sight UI.
+3. The right rail has a **LIDAR** card. With the sensor pointed at a
+   wall ~1 m away, it should read approximately the right distance.
+4. If it shows **NO READING**:
+   - Double-check the CAN ID matches `CANIDs.LASERCAN`.
+   - SSH to the rio and tail the log: `tail -f /tmp/robot-log` — look
+     for `[lasercan]` lines or `grapplefrc` import errors.
+   - Verify the CAN bus is wired correctly: `Phoenix Tuner X` on the
+     laptop should show all your motors *and* the LaserCAN.
+5. If the camera centers on a target but the LaserCAN distance is
+   clearly wrong, the sensor isn't aligned with the camera. Re-aim it.
+
+---
+
+## How do I know the whole system is working?
+
+After Set up Vision Pi finishes successfully, do this once to verify
+end-to-end:
+
+1. **Power cycle the robot** (radio + rio + Pi all booting fresh).
+2. Wait ~60 seconds for everything to come up.
+3. From the laptop, click **Connect** in the control panel. Header
+   should turn green and say `Connected (10.12.79.2)` (your team's IP).
+4. Click **Open Sight UI**. Browser should load
+   `http://10.12.79.11:8080/` and show:
+   - A live camera image (not a black square).
+   - A green **CONNECTED** pill in the top bar (NT4 link to rio is up).
+   - Live RPS / dial / lidar readouts in the right rail.
+   - Operator gamepad mirror lighting up when you press buttons on the
+     paired controller.
+5. Aim the camera at one of your target AprilTags. The
+   **NO TARGET → LOCK #N** pill in the top bar should flip to LOCK
+   within a frame or two; range/bearing readouts come alive.
+6. Press the big red **SHOOT** button (bottom-right) — it turns green
+   when armed (target visible + range known + lockout off). With the
+   robot enabled in DriverStation, it should rotate onto the tag,
+   spin up the shooter, fire. The DRIVER LOCKED pill appears for the
+   duration; the aim status walks through `rotating → spinning_up →
+   firing → done`.
+
+If any step fails, work through the **Troubleshooting** table below.
 
 ---
 

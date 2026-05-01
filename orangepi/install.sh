@@ -39,9 +39,17 @@ GATEWAY="10.${TE}.${AM}.1"
 NETMASK_BITS=24
 
 # --- 1. apt deps -----------------------------------------------------------
+# python deps: venv + pip
+# camera deps: ffmpeg (legacy passthrough fallback) + v4l-utils (debugging)
+# opencv deps: libgl1 + libglib2.0-0 are pulled in by opencv-python wheel at
+#   import time, even on the -headless variant — without them you get
+#   "ImportError: libGL.so.1: cannot open shared object file" the first
+#   time the service tries to import cv2.
 log "installing apt packages"
 sudo apt-get update -y
-sudo apt-get install -y ffmpeg python3-venv python3-pip v4l-utils
+sudo apt-get install -y \
+  ffmpeg python3-venv python3-pip v4l-utils \
+  libgl1 libglib2.0-0
 
 # --- 2. python venv --------------------------------------------------------
 log "creating venv"

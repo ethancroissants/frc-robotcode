@@ -14,38 +14,34 @@
     </div>
     <div class="status-line">
       <span id="conn-pill" class="pill pill-bad">DISCONNECTED</span>
+      <span id="target-pill" class="pill pill-bad">NO&nbsp;TARGET</span>
+      <span id="lockout-pill" class="pill" style="display:none">DRIVER&nbsp;LOCKED</span>
       <span id="aim-pill" class="pill">AIM&nbsp;IDLE</span>
     </div>
     <div class="readouts">
-      <div class="readout"><span class="lbl">DIAL</span><span class="val" id="r-dial">--.- ft</span></div>
-      <div class="readout"><span class="lbl">PRED</span><span class="val" id="r-pred">--.- ft</span></div>
+      <div class="readout"><span class="lbl">RANGE</span><span class="val" id="r-range">--.- m</span></div>
+      <div class="readout"><span class="lbl">BEARING</span><span class="val" id="r-bearing">--.-°</span></div>
       <div class="readout"><span class="lbl">RPS</span><span class="val" id="r-rps">--.-</span></div>
-      <div class="readout"><span class="lbl">LIDAR</span><span class="val" id="r-laser">-- m</span></div>
+      <div class="readout"><span class="lbl">TAG</span><span class="val" id="r-tag">--</span></div>
     </div>
   </header>
 
   <main class="grid">
-    <!-- ============ Camera + click-to-aim ============ -->
+    <!-- ============ Camera + tag overlay ============ -->
     <section class="camera-card">
       <div class="card-header">
         <span>FIELD VIEW</span>
-        <span class="hint">click anywhere to fire there</span>
+        <span class="hint" id="cam-hint">tracking AprilTag IDs <span id="target-tag-list">…</span></span>
       </div>
       <div class="camera-frame" id="camera-frame">
         <img id="stream" src="/stream.mjpg" alt="camera feed" draggable="false" />
-        <!-- Overlay layer: drawn in the browser, no rio overhead. -->
+        <!-- Overlay layer: a *second* hint for the target box that lags
+             slightly behind the JPEG (which has the box drawn on it
+             server-side). Useful when the stream stalls — the SVG box
+             keeps following the latest detection received over SSE. -->
         <svg id="overlay" preserveAspectRatio="none" viewBox="0 0 1000 1000">
-          <!-- Crosshair -->
-          <g id="crosshair" stroke="rgba(255,255,255,0.4)" stroke-width="1.5" fill="none">
-            <line x1="500" y1="0" x2="500" y2="1000" />
-            <line x1="0" y1="500" x2="1000" y2="500" />
-            <circle cx="500" cy="500" r="8" />
-          </g>
-          <!-- Last-clicked target marker (positioned by JS). -->
-          <g id="target-marker" style="display:none">
-            <circle id="target-ring" r="22" fill="none"
-                    stroke="#ffd400" stroke-width="3" />
-            <circle id="target-dot" r="3" fill="#ffd400" />
+          <g id="bearing-tick" stroke="#ffd400" stroke-width="2" stroke-dasharray="6 6" style="display:none">
+            <line id="bearing-line" x1="500" y1="0" x2="500" y2="1000" />
           </g>
         </svg>
       </div>
@@ -53,16 +49,18 @@
 
     <!-- ============ Right rail: controls ============ -->
     <aside class="rail">
-      <!-- Dial control -->
-      <div class="card">
-        <div class="card-header">SHOT DISTANCE</div>
-        <div class="dial-row">
-          <button class="ghost square" data-dial="-1">−1</button>
-          <button class="ghost square" data-dial="-0.5">−½</button>
-          <div class="dial-display"><span id="dial-big">--.-</span><span class="unit">ft</span></div>
-          <button class="ghost square" data-dial="+0.5">+½</button>
-          <button class="ghost square" data-dial="+1">+1</button>
-        </div>
+      <!-- BIG SHOOT BUTTON ------------------------------------------>
+      <div class="card shoot-card">
+        <div class="card-header">FIRE CONTROL</div>
+        <button class="shoot-btn" id="shoot-btn">
+          <span class="shoot-label">SHOOT</span>
+          <span class="shoot-sub" id="shoot-sub">no target</span>
+        </button>
+        <p class="card-help">
+          Pi tracks the AprilTag, computes range + bearing, looks up the
+          right RPS from the calibration table. The driver controller is
+          disabled while AutoAim is running so the bot can rotate freely.
+        </p>
       </div>
 
       <!-- LaserCAN -->
@@ -74,6 +72,41 @@
           <span class="pill" id="laser-pill">NO READING</span>
         </div>
         <button class="primary" id="apply-laser">USE&nbsp;AS&nbsp;DIAL</button>
+      </div>
+
+      <!-- Manual dial -->
+      <div class="card">
+        <div class="card-header">SHOT DISTANCE (MANUAL)</div>
+        <div class="dial-row">
+          <button class="ghost square" data-dial="-1">−1</button>
+          <button class="ghost square" data-dial="-0.5">−½</button>
+          <div class="dial-display"><span id="dial-big">--.-</span><span class="unit">ft</span></div>
+          <button class="ghost square" data-dial="+0.5">+½</button>
+          <button class="ghost square" data-dial="+1">+1</button>
+        </div>
+      </div>
+
+      <!-- Calibration table -->
+      <div class="card">
+        <div class="card-header">SHOOTER CALIBRATION</div>
+        <p class="card-help">
+          Distance (ft) → flywheel RPS. Pi interpolates between points. Add a
+          row by shooting from a known distance with the right RPS dialed in.
+        </p>
+        <table class="cal-table" id="cal-table">
+          <thead>
+            <tr><th>Distance (ft)</th><th>RPS</th><th></th></tr>
+          </thead>
+          <tbody id="cal-body"></tbody>
+        </table>
+        <div class="cal-add">
+          <input id="cal-add-dist" type="number" step="0.1" placeholder="ft" />
+          <input id="cal-add-rps" type="number" step="0.5" placeholder="rps" />
+          <button class="primary" id="cal-add-btn">ADD&nbsp;POINT</button>
+        </div>
+        <button class="ghost" id="cal-snapshot-btn" title="Use the current LaserCAN distance + dialed RPS">
+          SNAPSHOT&nbsp;CURRENT&nbsp;SHOT
+        </button>
       </div>
 
       <!-- Gamepad mirror -->
@@ -106,21 +139,10 @@
         </div>
       </div>
 
-      <!-- Calibrate -->
-      <div class="card">
-        <div class="card-header">CALIBRATE SIGHT</div>
-        <p class="card-help">Dial the green line onto a real target, enter that target's true distance, hit calibrate.</p>
-        <div class="cal-row">
-          <input id="cal-true" type="number" inputmode="decimal" step="0.1" placeholder="true distance (ft)" />
-          <button class="primary" id="cal-go">CALIBRATE</button>
-        </div>
-      </div>
-
-      <!-- Auto-aim status / cancel -->
+      <!-- Auto-aim status -->
       <div class="card">
         <div class="card-header">AUTO AIM</div>
         <div class="aim-status" id="aim-status">IDLE</div>
-        <button class="danger" id="aim-cancel">CANCEL</button>
       </div>
     </aside>
   </main>

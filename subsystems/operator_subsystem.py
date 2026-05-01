@@ -84,6 +84,29 @@ class OperatorSubsystem(SubsystemBase):
             self.m_request.with_velocity(-tunables.shooter_velocity_rps())
         )
 
+    def shooterAtRps(self, rps: float):
+        """Spin the flywheel at an explicit RPS, bypassing the dial mapping.
+
+        Used by AutoAim, which gets its RPS from the Pi's calibration table
+        (a piecewise-linear distance→RPS lookup that's more accurate than
+        the rio's linear default mapping). Negative for CW, like shooterOut().
+        """
+        motorcontrollers.Shooter1Motor.set_control(
+            self.m_request.with_velocity(-float(rps))
+        )
+
+    def isAtRps(self, target_rps: float, tolerance_rps: float = 3.0) -> bool:
+        """True when the flywheel's measured velocity is within tolerance.
+
+        AutoAim waits on this before commanding the kicker/conveyor to feed —
+        firing into a not-yet-spun-up flywheel under-shoots badly.
+        """
+        try:
+            v = motorcontrollers.Shooter1Motor.get_velocity().value
+        except Exception:
+            return False
+        return abs(abs(v) - abs(target_rps)) <= tolerance_rps
+
     def stopShooter(self):
         # Drive the velocity PID to 0 rps so the wheel actively brakes instead of coasting
         # down from ~5700 rpm.
