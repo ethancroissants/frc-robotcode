@@ -23,11 +23,20 @@ function setConnected(ok) {
   connPill.className = "pill " + (ok ? "pill-good" : "pill-bad");
 }
 
-function setRobotEnabled(enabled) {
-  enabledPill.textContent = enabled ? "Robot enabled" : "Robot disabled";
-  enabledPill.className = "pill " + (enabled ? "pill-good" : "pill-bad");
-  // Toggle the body class so CSS grays out the action controls.
-  document.body.classList.toggle("controls-disabled", !enabled);
+function setRobotEnabled(enabled, connected) {
+  if (!connected) {
+    enabledPill.textContent = "Robot offline";
+    enabledPill.className = "pill";
+  } else if (enabled) {
+    enabledPill.textContent = "Robot enabled";
+    enabledPill.className = "pill pill-good";
+  } else {
+    enabledPill.textContent = "Robot disabled";
+    enabledPill.className = "pill pill-bad";
+  }
+  // Grey out action controls if the rio is offline OR disabled — both
+  // mean "pressing SHOOT will do nothing useful right now".
+  document.body.classList.toggle("controls-disabled", !connected || !enabled);
 }
 
 function setTarget(detected, tagId) {
@@ -69,27 +78,34 @@ const shootSub = $("shoot-sub");
 let lastTargetState = { detected: false, range_m: 0 };
 
 function refreshShootButton(state) {
-  // Armed = we have a target AND a known range AND the robot is enabled
-  // AND the driver isn't currently locked out by AutoAim. The button only
-  // turns red (.armed) when ALL preconditions are met — so a red button
-  // genuinely means "you can fire this right now".
+  // Armed = (rio connected) AND (target locked) AND (range known) AND
+  // (robot enabled) AND (driver not already locked out by AutoAim).
+  // The button only turns red when ALL preconditions hold — so a red
+  // SHOOT actually means "you can fire this right now."
+  const connected = !!state.connected;
   const hasRange = (state.lasercan_valid && state.lasercan_m > 0)
                 || (state.target?.detected && state.target.range_m > 0);
   const hasTarget = !!state.target?.detected;
   const robotEnabled = state.robot_enabled !== false;  // default true
-  const armed = hasTarget && hasRange && robotEnabled && !state.driver_lockout;
+  const armed = connected && hasTarget && hasRange
+                && robotEnabled && !state.driver_lockout;
 
   shootBtn.classList.toggle("armed", armed);
   shootBtn.disabled = !armed;
 
-  if (!robotEnabled) {
-    shootSub.textContent = "robot disabled";
+  // Order matters: pick the FIRST blocking condition so the user knows
+  // exactly what to fix. "rio offline" beats "no target" which beats
+  // "no range", etc.
+  if (!connected) {
+    shootSub.textContent = "rio offline — start robot code";
+  } else if (!robotEnabled) {
+    shootSub.textContent = "robot disabled — enable in DS";
   } else if (state.driver_lockout) {
     shootSub.textContent = "AutoAim running";
   } else if (!hasTarget) {
-    shootSub.textContent = "no target";
+    shootSub.textContent = "point camera at an AprilTag";
   } else if (!hasRange) {
-    shootSub.textContent = `tag #${state.target.tag_id} — no range`;
+    shootSub.textContent = `tag #${state.target.tag_id} — set distance below`;
   } else {
     const r = state.lasercan_valid ? state.lasercan_m : state.target.range_m;
     const rps = state.recommended_rps;
@@ -250,11 +266,14 @@ function fmt(v, digits, unit) {
 }
 
 function applyState(s) {
-  setConnected(!!s.connected);
+  const connected = !!s.connected;
+  setConnected(connected);
   // robot_enabled defaults true on the Pi side so a fresh setup with no
   // rio publisher doesn't grey out the whole UI; older rio code that
-  // doesn't publish the topic will still leave the UI usable.
-  setRobotEnabled(s.robot_enabled !== false);
+  // doesn't publish the topic will still leave the UI usable. Pass
+  // `connected` through so the pill can show "Robot offline" instead
+  // of confidently claiming "enabled" when the rio isn't even reachable.
+  setRobotEnabled(s.robot_enabled !== false, connected);
   setLockout(!!s.driver_lockout);
   const t = s.target || { detected: false };
   setTarget(t.detected, t.tag_id);

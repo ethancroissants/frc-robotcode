@@ -90,6 +90,11 @@ class MyRobot(wpilib.TimedRobot):
         CommandScheduler.getInstance().run()
         tunables.update(self.isEnabled())
         _publish_operator_state()
+        # Mirror the DS enabled state to the Pi so the Sight UI can grey
+        # out the SHOOT button + manual controls while the robot is
+        # disabled. Pi-side default is True so this is just a downgrade
+        # signal; if we forget to publish, the UI stays usable.
+        SmartDashboard.putBoolean("Sight/RobotEnabled", self.isEnabled())
 
     def disabledInit(self) -> None:
         # Phoenix 6 caches the last control request and resumes it on re-enable. Without this,
