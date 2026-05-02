@@ -568,17 +568,29 @@ def bridge_internet_for_setup(
     if apt_missing:
         _info(f"Missing apt packages: {' '.join(apt_missing)}")
     if need_wheels:
-        _info("Pi wheel cache is empty/stale — will pip download from PyPI.")
+        _info("Pi wheel cache looks empty/stale — would pip download from PyPI.")
     _info(
-        "We'll briefly connect the Pi's WiFi (wlan0) to a network with "
-        "internet, fetch what's needed, then disconnect. The Pi's robot "
-        "ethernet stays connected the whole time."
+        "Options:"
+    )
+    _info(
+        "  1. Type a WiFi SSID — Pi briefly bridges via wlan0, fetches deps, "
+        "disconnects. Works on Pis with built-in WiFi."
+    )
+    _info(
+        "  2. Type 'skip' (or leave blank) — assume deps are already on the "
+        "Pi (e.g. you ran orangepi/manual_net_install.sh while plugged into "
+        "a router). install.sh will tell you if anything's still missing."
     )
 
-    ssid = _ask_string("WiFi network name (SSID)", default="")
-    if not ssid:
-        _fail("No SSID provided — can't fetch Pi dependencies.")
-        return False
+    ssid = _ask_string("WiFi network name (SSID), or 'skip'", default="")
+    if not ssid or ssid.strip().lower() == "skip":
+        _info(
+            "Skipping the internet bridge — proceeding straight to install. "
+            "If the Pi is missing apt or pip deps, install.sh will fail "
+            "with a clear message and you can re-run with WiFi or use the "
+            "manual_net_install.sh path."
+        )
+        return True
     wifi_pass = _ask_password(
         f"Password for '{ssid}' (leave blank for open network)"
     ) or ""
