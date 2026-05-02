@@ -681,8 +681,10 @@ def bridge_internet_for_setup(
             f"python3 -m pip download --only-binary=:all: "
             f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
             f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
-            f"sha256sum {shlex.quote(INSTALL_DIR)}/requirements.txt "
-            f"| awk '{{print $1}}' "
+            # Strip CR before hashing so this stamp matches what the
+            # Windows-side laptop computes (same normalization).
+            f"tr -d '\\r' < {shlex.quote(INSTALL_DIR)}/requirements.txt "
+            f"| sha256sum | awk '{{print $1}}' "
             f"> {shlex.quote(INSTALL_DIR)}/vendor/wheels/.cache-stamp",
             "echo '[bridge] wheels downloaded.'",
         ]
@@ -717,7 +719,13 @@ def pi_wheel_cache_status(cfg: dict) -> bool:
     if not req.exists():
         return True  # nothing to install
     import hashlib
-    local_hash = hashlib.sha256(req.read_bytes()).hexdigest()
+    # Normalize line endings before hashing. Windows checkouts often have
+    # CRLF in requirements.txt while the Pi-side script (manual_net_install
+    # or the bridge) pulls/sees LF — without normalization, the SHAs
+    # mismatch and the wizard thinks the cache is stale even when the
+    # contents are conceptually identical.
+    content = req.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    local_hash = hashlib.sha256(content).hexdigest()
     target = ssh_target(cfg)
     probe = (
         f"cat {shlex.quote(INSTALL_DIR)}/vendor/wheels/.cache-stamp "

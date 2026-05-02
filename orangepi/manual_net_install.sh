@@ -72,8 +72,12 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 \
     -d "$INSTALL_DIR/vendor/wheels"
 
 # 4. Stamp the cache so setup_orangepi.py's pi_wheel_cache_status() check
-#    sees a match and skips the bridge step on the next run.
-sha256sum "$INSTALL_DIR/requirements.txt" | awk '{print $1}' \
+#    sees a match and skips the bridge step on the next run. Strip CR
+#    bytes before hashing — Windows checkouts of requirements.txt have
+#    CRLF endings; the laptop normalizes the same way, so this keeps the
+#    two hashes equal regardless of which checkout style the team uses.
+tr -d '\r' < "$INSTALL_DIR/requirements.txt" \
+  | sha256sum | awk '{print $1}' \
   > "$INSTALL_DIR/vendor/wheels/.cache-stamp"
 
 log "done."
