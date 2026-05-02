@@ -45,6 +45,25 @@ After install, the panel offers **Open Sight UI** — or visit
 > **There is no separate "update" script.** Setup is idempotent. Re-run
 > the same button to push code changes; nothing it does is destructive.
 
+## Pis without WiFi (Orange Pi 5 base, etc.)
+
+The wizard uses the Pi's `wlan0` to briefly bridge to the internet for
+the apt + pip download step. If your Pi has no built-in WiFi (the base
+**Orange Pi 5 v1.x** is ethernet-only), the bridge can't run.
+
+Workaround: plug the Pi into a network that already has internet (your
+home router, a hotspot, etc.), SSH in, and run:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/orangepi/manual_net_install.sh | bash
+```
+
+That installs the apt packages and downloads the pip wheels into the
+same `~/cold-fusion-sight/vendor/wheels/` location the wizard uses, then
+stamps the cache. Once it finishes, unplug the Pi from internet, move
+it back to the robot network, and run **Set up / Update Vision Pi** —
+the wizard will see the stamp and skip the bridge entirely.
+
 ## Tweaking the team / camera / target tags
 
 `/home/orangepi/cold-fusion-sight/sight.env` is read by the service:
