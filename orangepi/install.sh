@@ -138,6 +138,22 @@ fi
 # NetworkManager (modern Armbian default) first, then fall back to
 # /etc/network/interfaces.d/ which ifupdown respects.
 configure_static_ip() {
+  # Detect whether we're being run over an SSH session whose source IP
+  # would be cut off by switching this interface. If so, we defer the
+  # `nmcli connection up` step — bringing the new connection up
+  # immediately switches eth0's address out from under the active SSH
+  # session, the laptop sees `Connection reset`, and all subsequent
+  # install.sh log output is lost. Deferring with systemd-run lets
+  # install.sh exit cleanly first.
+  CURRENT_IP_ON_IFACE="$(ip -4 -o addr show "$STATIC_IFACE" 2>/dev/null \
+    | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+  SSH_DEST_IP="$(echo "${SSH_CONNECTION:-}" | awk '{print $3}')"
+  DEFER_BOUNCE=0
+  if [ -n "$SSH_DEST_IP" ] && [ "$SSH_DEST_IP" = "$CURRENT_IP_ON_IFACE" ] \
+     && [ "$CURRENT_IP_ON_IFACE" != "$PI_IP" ]; then
+    DEFER_BOUNCE=1
+  fi
+
   if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
     log "pinning $STATIC_IFACE to $PI_IP via NetworkManager"
     # Find or create a connection profile for this interface.
@@ -153,7 +169,16 @@ configure_static_ip() {
       ipv4.dns "$GATEWAY 1.1.1.1" \
       connection.autoconnect yes \
       connection.autoconnect-priority 100
-    sudo nmcli connection up "$CONN_NAME" || warn "couldn't bring up $CONN_NAME yet (cable not in robot network?)"
+    if [ "$DEFER_BOUNCE" = "1" ]; then
+      log "deferring connection bounce so this SSH session survives"
+      log "  → IP will switch to $PI_IP about 8s after install.sh exits"
+      sudo systemd-run --on-active=8s --unit=cf-pin-ip \
+        nmcli connection up "$CONN_NAME" >/dev/null 2>&1 || \
+        warn "systemd-run unavailable; reboot to apply the static IP."
+    else
+      sudo nmcli connection up "$CONN_NAME" \
+        || warn "couldn't bring up $CONN_NAME yet (cable not in robot network?)"
+    fi
     return 0
   fi
 
@@ -166,7 +191,14 @@ iface ${STATIC_IFACE} inet static
     netmask 255.255.255.0
     gateway ${GATEWAY}
 EOF
-    sudo systemctl restart networking || true
+    if [ "$DEFER_BOUNCE" = "1" ]; then
+      log "deferring networking restart so this SSH session survives"
+      sudo systemd-run --on-active=8s --unit=cf-pin-ip \
+        systemctl restart networking >/dev/null 2>&1 || \
+        warn "systemd-run unavailable; reboot to apply the static IP."
+    else
+      sudo systemctl restart networking || true
+    fi
     return 0
   fi
 

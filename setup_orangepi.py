@@ -1283,6 +1283,18 @@ def _read_team_number() -> str | None:
     return read_team_number()
 
 
+def _team_pinned_ip() -> str | None:
+    """Compute the static IP install.sh pins the Pi to: 10.TE.AM.11.
+
+    Mirrors install.sh's formula. None if the team number isn't available.
+    """
+    team = _read_team_number()
+    if not team or not team.isdigit():
+        return None
+    n = int(team)
+    return f"10.{n // 100}.{n % 100}.11"
+
+
 # ----- main flow -----
 
 def _logic() -> int:
@@ -1347,6 +1359,20 @@ def _logic() -> int:
         # install.sh itself failed midway.
         _remove_temp_nopasswd(cfg)
         return 1
+
+    # install.sh pins the Pi's eth0 to 10.TE.AM.11. If we connected via a
+    # different IP (DHCP, mDNS), the deferred IP bounce will switch the
+    # Pi onto the pinned address ~8s after install.sh exits. Update the
+    # cfg + give the Pi a moment so the next SSH calls reach it at the
+    # new address.
+    pinned_ip = _team_pinned_ip()
+    if pinned_ip and cfg.get("host") != pinned_ip:
+        _info(f"Pi will switch to pinned IP {pinned_ip} in ~8s — waiting…")
+        import time
+        time.sleep(12)
+        cfg = dict(cfg)
+        cfg["host"] = pinned_ip
+        save_cfg(cfg)
 
     write_team(cfg)
     write_target_file(cfg)
