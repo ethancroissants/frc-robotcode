@@ -6,7 +6,7 @@ Pi → rio (read here):
   Sight/Target/Detected      bool   — tag visible right now?
   Sight/Target/BearingDeg    double — signed angle from camera optical axis
                                        (positive = target is right of center)
-  Sight/Target/RangeM        double — PnP-derived range (fallback for LaserCAN)
+  Sight/Target/RangeM        double — PnP-derived range (meters)
   Sight/Target/TagID         int    — which tag we're tracking
   Sight/Aim/TargetRps        double — Pi's RPS recommendation from its
                                        distance→RPS calibration table
@@ -28,8 +28,7 @@ loop directly. Every cycle we read the *fresh* bearing from the Pi and feed
 0 as the setpoint to a PIDController. The output is yaw rate (rad/s),
 which goes straight into a swerve FieldCentric request with zero translation.
 
-Range comes from LaserCAN preferentially; the AprilTag PnP range is a
-fallback for momentary CAN dropouts.
+Range is PnP-derived on the Pi from a known tag size + camera intrinsics.
 
 If the tag drops out of view mid-aim we hold the last bearing for up to
 HOLD_LAST_BEARING_S; beyond that we abort. That keeps us from spinning
@@ -52,7 +51,6 @@ from wpilib import SmartDashboard, Timer
 from wpimath.controller import PIDController
 
 import tunables
-from subsystems.lasercan_subsystem import LaserCanSubsystem
 from subsystems.operator_subsystem import OperatorSubsystem
 
 
@@ -62,6 +60,7 @@ _NT_TARGET_BEARING  = "Sight/Target/BearingDeg"
 _NT_TARGET_RANGE_M  = "Sight/Target/RangeM"
 _NT_TARGET_TAG_ID   = "Sight/Target/TagID"
 _NT_TARGET_RPS      = "Sight/Aim/TargetRps"
+_NT_SPIN_UP_DELAY   = "Sight/Aim/SpinUpDelayS"
 _NT_STATUS          = "Sight/Aim/Status"
 _NT_LOCKOUT         = "Sight/DriverLockout"
 
@@ -75,8 +74,14 @@ _HEADING_KD = 0.2
 _HEADING_TOLERANCE_RAD = math.radians(1.5)  # within 1.5° of tag center = on target
 
 # Once heading is locked, give the flywheel time to settle (use the velocity
-# tolerance check too — whichever is later).
-_FLYWHEEL_SETTLE_S = 0.4
+# tolerance check too — whichever is later). Default value, used when the
+# Pi's `Sight/Aim/SpinUpDelayS` topic is missing or non-numeric. The Pi
+# republishes this every detection tick so it's normally always present —
+# the dashboard's calibrate page can tune it without redeploying the rio.
+_DEFAULT_FLYWHEEL_SETTLE_S = 0.4
+# Hard cap so a Pi-side typo can't lock us up forever. AutoAim has its own
+# overall timeout but a 30-second settle would still be a footgun.
+_FLYWHEEL_SETTLE_MAX_S = 5.0
 
 # How long to hold the last bearing if the tag temporarily drops out.
 _HOLD_LAST_BEARING_S = 0.4
@@ -105,11 +110,10 @@ class AutoAim(Command):
     fire so we never carry over integral windup from a prior aim.
     """
 
-    def __init__(self, drivetrain, operator: OperatorSubsystem, lasercan: LaserCanSubsystem):
+    def __init__(self, drivetrain, operator: OperatorSubsystem):
         super().__init__()
         self.drivetrain = drivetrain
         self.operator = operator
-        self.lasercan = lasercan
         # Requirements: holding both means scheduling AutoAim cancels the
         # default joystick-drive command, so the driver physically cannot
         # move the robot until end() runs. That IS the driver lockout —
@@ -135,6 +139,10 @@ class AutoAim(Command):
         self._target_rps: float = 0.0
         self._last_bearing_rad: float = 0.0
         self._phase = "idle"
+        # Settle window we actually used this run, snapshot at spin-up so
+        # the firing phase's "have we spun + fired long enough" check
+        # uses the same value (avoid the NT topic flickering mid-shot).
+        self._settle_used_s: float = _DEFAULT_FLYWHEEL_SETTLE_S
 
     # ----- lifecycle -----
 
@@ -185,7 +193,7 @@ class AutoAim(Command):
 
         # Refresh RPS each tick — distance changes if the bot is moving
         # (it shouldn't be, since we own drivetrain, but the Pi's
-        # recommendation reflects the current LaserCAN/PnP reading).
+        # recommendation reflects the current PnP reading).
         rps = float(SmartDashboard.getNumber(_NT_TARGET_RPS, 0.0))
         if rps > 0:
             self._target_rps = rps
@@ -204,7 +212,14 @@ class AutoAim(Command):
                 self.operator.shooterAtRps(self._target_rps)
             else:
                 self.operator.shooterOut()  # fallback to dial-derived RPS
-            settled = self._settle_timer.get() >= _FLYWHEEL_SETTLE_S
+            # Read the spin-up delay live from NT so the Pi's calibrate
+            # page can tune it without redeploying. NaN/missing → default.
+            settle_s = SmartDashboard.getNumber(_NT_SPIN_UP_DELAY, _DEFAULT_FLYWHEEL_SETTLE_S)
+            if not isinstance(settle_s, (int, float)) or settle_s != settle_s:
+                settle_s = _DEFAULT_FLYWHEEL_SETTLE_S
+            settle_s = max(0.0, min(_FLYWHEEL_SETTLE_MAX_S, float(settle_s)))
+            self._settle_used_s = settle_s
+            settled = self._settle_timer.get() >= settle_s
             at_speed = self._target_rps > 0 and self.operator.isAtRps(self._target_rps)
             if settled and (at_speed or self._target_rps == 0):
                 self._phase = "firing"
@@ -217,7 +232,7 @@ class AutoAim(Command):
                 self.operator.shooterAtRps(self._target_rps)
             self.operator.kickerIn()
             self.operator.conveyorFwd()
-            if self._timer.get() >= _FLYWHEEL_SETTLE_S + tunables.auto_fire_duration():
+            if self._timer.get() >= self._settle_used_s + tunables.auto_fire_duration():
                 self._phase = "done"
                 _publish_status("done")
 
@@ -269,10 +284,7 @@ class AutoAim(Command):
         return math.radians(SmartDashboard.getNumber(_NT_TARGET_BEARING, 0.0)), True
 
     def _best_range_m(self) -> float | None:
-        """LaserCAN if valid; tag PnP otherwise; None if neither."""
-        laser = self.lasercan.distance_m() or self.lasercan.last_known_distance_m()
-        if laser is not None and laser > 0.1:
-            return laser
+        """Tag PnP range from the Pi; None if no tag in view."""
         pnp = SmartDashboard.getNumber(_NT_TARGET_RANGE_M, 0.0)
         if pnp > 0.1:
             return pnp

@@ -48,7 +48,6 @@ from commands.stop_kicker import StopKicker
 from commands.stop_shooter import StopShooter
 from generated import tuner_constants
 from subsystems.elevator_subsystem import ElevatorSubsystem
-from subsystems.lasercan_subsystem import LaserCanSubsystem
 from subsystems.operator_subsystem import OperatorSubsystem
 from telemetry import Telemetry
 
@@ -57,7 +56,6 @@ class RobotContainer:
     # Static (class-level) subsystems, matching the Java layout
     operator = OperatorSubsystem()
     elevator = ElevatorSubsystem()
-    lasercan = LaserCanSubsystem()
     targetingMessage = ""
 
     def __init__(self):
@@ -279,7 +277,6 @@ class RobotContainer:
                 lambda: AutoAim(
                     self.drivetrain,
                     RobotContainer.operator,
-                    RobotContainer.lasercan,
                 ),
                 RobotContainer.operator,
                 self.drivetrain,

@@ -18,9 +18,11 @@ from robotcontainer import RobotContainer
 
 
 # Gamepad-state mirror for the Pi UI — published every robotPeriodic so the
-# web client's "OPERATOR" panel stays in sync with reality without the Pi
-# having to know which buttons are which.
-_OP_BUTTONS = (
+# web client's Operator + Driver panels stay in sync with reality without
+# the Pi having to know which buttons are which. Operator stays at the
+# original /Sight/Buttons/* path (back-compat with older Pi code); Driver
+# is namespaced under /Sight/Buttons/Driver/*.
+_GP_BUTTONS = (
     ("A", int(XboxController.Button.kA)),
     ("B", int(XboxController.Button.kB)),
     ("X", int(XboxController.Button.kX)),
@@ -30,22 +32,26 @@ _OP_BUTTONS = (
 )
 
 
-def _publish_operator_state() -> None:
-    """Mirror the operator joystick to /SmartDashboard/Sight/Buttons/*.
+def _publish_stick(js, prefix: str) -> None:
+    """Mirror one Joystick into NT under /SmartDashboard/<prefix>{POV,A,...}.
 
-    Cheap (1 POV read + 6 raw button reads); runs from robotPeriodic so it
-    matches the loop rate the Pi expects.
+    Cheap (1 POV read + 6 raw button reads); a try/except around each
+    access keeps a missing-controller from spamming joystick warnings.
     """
-    js = gamepads.operatorJoyStick
     try:
-        SmartDashboard.putNumber("Sight/Buttons/POV", js.getPOV())
+        SmartDashboard.putNumber(f"{prefix}POV", js.getPOV())
     except Exception:
-        SmartDashboard.putNumber("Sight/Buttons/POV", -1)
-    for label, idx in _OP_BUTTONS:
+        SmartDashboard.putNumber(f"{prefix}POV", -1)
+    for label, idx in _GP_BUTTONS:
         try:
-            SmartDashboard.putBoolean(f"Sight/Buttons/{label}", js.getRawButton(idx))
+            SmartDashboard.putBoolean(f"{prefix}{label}", js.getRawButton(idx))
         except Exception:
-            SmartDashboard.putBoolean(f"Sight/Buttons/{label}", False)
+            SmartDashboard.putBoolean(f"{prefix}{label}", False)
+
+
+def _publish_gamepad_state() -> None:
+    _publish_stick(gamepads.operatorJoyStick, "Sight/Buttons/")
+    _publish_stick(gamepads.driverJoyStick,   "Sight/Buttons/Driver/")
 
 
 class MyRobot(wpilib.TimedRobot):
@@ -89,7 +95,7 @@ class MyRobot(wpilib.TimedRobot):
         self.m_timeAndJoystickReplay.update()
         CommandScheduler.getInstance().run()
         tunables.update(self.isEnabled())
-        _publish_operator_state()
+        _publish_gamepad_state()
         # Mirror the DS enabled state to the Pi so the Sight UI can grey
         # out the SHOOT button + manual controls while the robot is
         # disabled. Pi-side default is True so this is just a downgrade

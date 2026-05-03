@@ -331,7 +331,7 @@ def run_deploy(extra_args: list[str]) -> int:
     rc, output = _run_robotpy(cmd)
 
     # `robotpy deploy` aborts if the laptop's installed packages don't match
-    # pyproject.toml — common after pulling new requirements like grapplefrc.
+    # pyproject.toml — common after pulling a new requirement.
     # Auto-run `python -m robotpy sync` to install them, then retry the deploy
     # exactly once. The sync also updates the rio bundle robotpy will upload.
     if rc != 0 and _looks_like_sync_needed(output):

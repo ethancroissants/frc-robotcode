@@ -13,17 +13,17 @@ seen it.
 ## How firing actually works (the new way)
 
 The old "click anywhere on the camera and the bot fires there" is gone.
-Replaced with: **the Pi tracks an AprilTag with the camera + LaserCAN,
-the operator presses SHOOT, the rio rotates onto the tag and fires
-using the calibrated RPS for that distance.** No clicking required.
+Replaced with: **the Pi tracks an AprilTag with the camera, the operator
+presses SHOOT, the rio rotates onto the tag and fires using the
+calibrated RPS for that distance.** No clicking required.
 
 **Step by step, when you press SHOOT:**
 
 1. The Pi has been running an AprilTag detector on every camera frame
    the whole time. It already knows: which tag, what angle off the
    robot's nose (bearing, in degrees), and approximately how far away
-   (range, in meters — but it prefers the LaserCAN reading because
-   that's an active sensor and more accurate).
+   (range, in meters — derived from solvePnP on the known tag size +
+   the camera intrinsics).
 2. The Pi looks up the right flywheel RPS from its **calibration
    table** (a list of distance → RPS pairs you fill in by shooting at
    known distances; see "Shooter calibration" below).
@@ -46,8 +46,8 @@ using the calibrated RPS for that distance.** No clicking required.
    e. Releases the lockout, returns control to the driver.
 
 **This means:** the only inputs that matter to firing are (a) what
-AprilTag the Pi sees, (b) the LaserCAN range, and (c) the calibration
-table. Everything else is automatic.
+AprilTag the Pi sees and (b) the calibration table. Everything else
+is automatic.
 
 ---
 
@@ -182,16 +182,19 @@ Two channels:
   *Pi → rio*:
   - `/Sight/Target/Detected` (bool) — tag visible right now?
   - `/Sight/Target/BearingDeg` — signed angle of tag from camera axis
-  - `/Sight/Target/RangeM` — PnP-derived range (LaserCAN preferred)
+  - `/Sight/Target/RangeM` — PnP-derived range (meters)
   - `/Sight/Target/TagID` — which tag is locked
+  - `/Sight/Target/SelectedID` — operator's clicked-tag selection
   - `/Sight/Aim/TargetRps` — calibrated flywheel RPS for current distance
+  - `/Sight/Aim/Ready` — bearing aligned + enabled + AutoAim idle
   - `/Sight/Shoot/RequestId` — bumped on SHOOT button press
 
   *rio → Pi*:
-  - `/Sight/LaserCAN/{DistanceM, Valid, Ambient}` — sensor mirror
+  - `/Sight/RobotEnabled` — DS enabled state mirror
   - `/Sight/Aim/Status` — `idle` / `rotating` / `spinning_up` / `firing` / `done` / `error`
   - `/Sight/DriverLockout` — true while AutoAim is running
   - `/Sight/Buttons/{A,B,X,Y,LB,RB,POV}` — operator gamepad mirror
+  - `/Sight/Buttons/Driver/{A,B,X,Y,LB,RB,POV}` — driver gamepad mirror
   - `/Tune/Shooter Distance (ft)` — manual dial value
 
 - **SSH (file pushes).** Used only for `orangepi_pusher.py` (rio →
@@ -423,49 +426,67 @@ PnP range estimation assumes a **6.5 inch (0.1651 m)** tag side length,
 which is the FRC standard. If you're testing with printed tags of a
 different size, set `TAG_SIZE_M` in `sight.env`. Range readings are
 linearly proportional to the assumed tag size, so a 2× error here gives
-a 2× error in the PnP range — but the LaserCAN takes precedence, so
-this only matters for sanity-checks on the UI.
+a 2× error in the range — set this to match the tag you actually print.
 
 ---
 
 ## Shooter calibration — making it accurate
 
-The rio used to map distance to flywheel RPS with a single linear
-formula. That works for a first try; it doesn't survive long-shot vs
-short-shot accuracy demands. So the Pi now keeps an **interpolation
-table** of (distance_ft, rps) pairs that you fill in by shooting at
-known distances.
+> **Operator-facing walkthrough:** see [`vision_setup.md`](vision_setup.md)
+> for the step-by-step "click tag → measure → save row" workflow plus
+> a quick troubleshooting table. The section below is the architecture
+> view of what's happening underneath.
 
-### How to calibrate
+Different shooting distances need different flywheel RPS — air drag and
+launch arc don't scale linearly with distance. So the Pi keeps an
+**interpolation table** of (distance_ft, rps) pairs that you fill in by
+shooting at known distances. The Pi reads the live tag-PnP range every
+frame, looks up the bracketing two table rows, linearly interpolates
+the RPS, and publishes the result to NT for AutoAim to consume.
 
-In the Sight UI right rail there's a **SHOOTER CALIBRATION** card with
-the current table and an **ADD POINT** form.
+### How to calibrate (the actual workflow)
 
-The fast workflow:
+In the Sight dashboard there's a **CALIBRATION** panel showing the
+current table, an **add** form, and a **snapshot current shot** button.
 
-1. Park the bot at a known distance from the goal (use a tape measure
-   or the field markings).
-2. Spin the shooter at a guess RPS using the manual dial; fire.
-3. Adjust RPS up/down until shots actually land in the goal.
-4. Type the distance + final RPS into the **ADD POINT** row, click
-   **ADD POINT**.
-5. Move to a new distance, repeat.
+The fast loop:
 
-After ~5 well-spaced points the curve is solid. The table is stored on
-the Pi at `/home/orangepi/cold-fusion-sight/sight_calibration.json` and
-survives reboots.
+1. **Park the bot at a known distance from the goal.** Tape measure or
+   field markings — what matters is that you trust the number.
+2. **Aim and shoot.** Click the goal AprilTag in the Camera panel so the
+   target is locked, then dial flywheel RPS up/down (the **Distance**
+   panel's `±1 / ±½` buttons step the dial in feet, which the rio's
+   shooter command turns into RPS). Fire manually.
+3. **Iterate the RPS** until shots actually land cleanly. This is the
+   hard part — it's calibrating to your shooter's geometry, not to math.
+4. **Save the row.** Either:
+   - Type the distance + final RPS into the **add** form and click
+     **add** — explicit, precise.
+   - Or click **snapshot current shot** — captures the live tag range
+     (in ft) + the dialed RPS automatically. Faster but only as accurate
+     as the tag-PnP range.
+5. **Move to a new distance, repeat.** Aim for ~5 evenly-spaced points
+   spanning your real shooting range (e.g. 4, 8, 12, 16 ft).
+
+The table is stored on the Pi at
+`/home/orangepi/cold-fusion-sight/sight_calibration.json` and survives
+reboots and re-pushes. Edit rows by deleting (the **remove** button per
+row) and re-adding.
 
 ### How interpolation works
 
-For a given distance `d`, the Pi looks up the bracketing pair `(d_lo,
-rps_lo)` and `(d_hi, rps_hi)` and linearly interpolates. Distances
-beyond the table's range clamp to the nearest endpoint — so cap your
-table at the maximum range you ever want to shoot from, otherwise the
-robot will under- or over-rotate the wheel for outside-the-table shots.
+For a given distance `d` (in ft):
+- If `d` is at or below the lowest table row: returns that row's RPS.
+- If `d` is at or above the highest table row: returns that row's RPS.
+- Otherwise: finds the two bracketing rows and linearly interpolates.
+
+**Cap your table at the maximum distance you'd ever shoot from**,
+otherwise the clamp will silently use the highest row's RPS for any
+shot beyond that — under-throwing the ball.
 
 ### Sensible starting table
 
-The default table the Pi installs with on first boot:
+The default table the Pi ships with:
 
 | Distance (ft) | RPS |
 | ------------- | --- |
@@ -475,103 +496,25 @@ The default table the Pi installs with on first boot:
 | 12            | 100 |
 | 16            | 110 |
 
-This matches the rio's old "10 RPS per foot" mapping at the low end and
-diminishes at the high end (because air resistance makes that linear
-mapping wrong far away). **It is a starting point. Replace it with real
-shot data as soon as you can.**
+This matches "10 RPS per foot" at the low end and diminishes at the
+high end (air resistance). **It is a starting point.** It will not
+score on your goal. Replace it with real shot data on day 1.
 
----
+### What's the SHOOT button doing with this?
 
-## LaserCAN — physical mounting + wiring
+When the operator clicks **SHOOT**:
+1. Pi sees a tag at e.g. `range_m = 2.40 m → 7.87 ft`.
+2. Looks up the calibration table → interpolates between the 4 ft and
+   8 ft rows → gets e.g. `78.7 RPS`.
+3. Publishes that to `/Sight/Aim/TargetRps`.
+4. Increments `/Sight/Shoot/RequestId`.
+5. Rio's AutoAim sees the new request, rotates onto the bearing the
+   Pi published, spins the wheel to 78.7 RPS, fires.
 
-The Grapple Robotics LaserCAN is a 1D time-of-flight sensor (think
-"single-pixel LiDAR"). The shooter uses it to read distance to the
-goal, which feeds the auto-aim dial.
-
-The Pi does **not** talk to the LaserCAN — it's a CAN bus device wired
-into the rio's CAN bus, exactly like a TalonFX. The Pi only reads the
-*resulting* distance value out of NetworkTables. So you don't need any
-USB or ethernet between the Pi and the LaserCAN.
-
-### Where to mount it
-
-- **On the shooter assembly**, pointed *forward along the launch line*
-  — i.e. parallel to the direction the ball will travel out of the
-  shooter, at roughly the height the ball exits.
-- Aim it so the laser hits the goal/target when the robot is squared up.
-  The shooter is fixed on this robot, so the LaserCAN's line of sight
-  needs to match the camera's. Use the camera image as your alignment
-  reference: when a target is centered in the camera, the LaserCAN dot
-  should land on it.
-- Keep it clear of the shooter's exit window so a passing ball doesn't
-  briefly trip the reading. ~1–2 inches above or below the ball's path
-  is plenty.
-- The body of the sensor is M3-mountable (two holes). Either bolt it to
-  the shooter frame directly, or print/laser-cut a small bracket.
-
-### Wiring
-
-LaserCAN is a CAN device, so it gets two pairs of wires:
-
-```
-                                 ┌──────────────┐
-                                 │  LaserCAN    │
-                                 │  (CAN ID 36) │
-                                 └─┬──┬──┬──┬───┘
-                                   │  │  │  │
-                                   │  │  │  └── CAN-LO (yellow)
-                                   │  │  └───── CAN-HI (green)
-                                   │  └──────── GND     (black)
-                                   └─────────── +5–24V  (red)
-                                                via the rest of the CAN
-                                                chain — share with the
-                                                CTRE network.
-```
-
-**CAN bus chain.** Splice it into the existing CTRE CAN bus (the same
-loop your TalonFXes ride on). Either daisy-chain it between two motor
-controllers or branch off a Y. Order on the bus doesn't matter as long
-as the chain still has terminating resistance at both ends — the rio
-provides one terminator, and the PDH/PDP at the far end provides the
-other. If you tap into the middle of the chain, that's fine.
-
-**Power.** LaserCAN runs on 5–24 V; the cleanest source is a 12 V tap
-from the PDH/PDP through a 1 A breaker, or from a CTRE CANcoder breakout
-board if you have one. Don't draw power off the rio's CAN connector
-itself.
-
-### CAN ID
-
-We expect `CAN ID 36`. That's defined in [`constants.py`][canids]:
-
-```python
-class CANIDs:
-    LASERCAN = 36
-```
-
-To set the ID, plug the LaserCAN into your laptop via USB-C and use
-Grapple's web flasher: <https://grapplerobotics.au/setup>. If your
-LaserCAN is on a different ID, change the constant — don't reflash
-unless you have a reason.
-
-[canids]: ../constants.py
-
-### How to verify it works
-
-After deploy:
-
-1. Power the bot, wait for the rio to enable.
-2. Open the Sight UI.
-3. The right rail has a **LIDAR** card. With the sensor pointed at a
-   wall ~1 m away, it should read approximately the right distance.
-4. If it shows **NO READING**:
-   - Double-check the CAN ID matches `CANIDs.LASERCAN`.
-   - SSH to the rio and tail the log: `tail -f /tmp/robot-log` — look
-     for `[lasercan]` lines or `grapplefrc` import errors.
-   - Verify the CAN bus is wired correctly: `Phoenix Tuner X` on the
-     laptop should show all your motors *and* the LaserCAN.
-5. If the camera centers on a target but the LaserCAN distance is
-   clearly wrong, the sensor isn't aligned with the camera. Re-aim it.
+If the table only has rows 0/4/8/12/16, a shot at 7.87 ft uses the
+4→8 ft slope. If you only have rows at 0 and 16, the Pi linearly
+interpolates across the entire range — usually wrong. **More rows in
+the range you actually shoot from = more accurate shots.**
 
 ---
 
@@ -591,7 +534,7 @@ end-to-end:
    `http://10.12.79.11:8080/` and show:
    - A live camera image (not a black square).
    - A green **CONNECTED** pill in the top bar (NT4 link to rio is up).
-   - Live RPS / dial / lidar readouts in the right rail.
+   - Live RPS / dial / tag-range readouts in the Distance + Target panels.
    - Operator gamepad mirror lighting up when you press buttons on the
      paired controller.
 5. Aim the camera at one of your target AprilTags. The
@@ -614,8 +557,9 @@ If any step fails, work through the **Troubleshooting** table below.
 - **Push code:** **Deploy to Robot**. Sends rio code, and the rio
   passes any orangepi/ changes to the Pi on next boot.
 - **Open the UI:** **Open Sight UI** (or bookmark `http://10.12.79.11:8080/`).
-- **Aim & shoot:** click on the camera. rio rotates, dials in distance
-  from LaserCAN, fires.
+- **Aim & shoot:** click the goal AprilTag in the Camera panel to lock
+  onto it, then press SHOOT. rio rotates, dials in the calibrated RPS
+  for the live tag-PnP range, fires.
 - **Force-push the Pi without rebooting the rio:** re-run **Set up / Update Vision Pi**. It rsyncs the latest code, restarts the service if anything changed, and skips the parts that are already done.
   Useful when iterating on HTML/CSS/JS — push from laptop, no rio reboot.
 
@@ -648,8 +592,8 @@ ssh orangepi@10.12.79.11      # Pi (admin's key trusted)
 | Web UI loads but says **DISCONNECTED**  | rio's down, or Pi can't reach `10.TE.AM.2`; ssh to Pi and ping it  |
 | New code didn't reach the Pi            | Check `journalctl -u cold-fusion-sight` and `/tmp/robot-log` on rio for `[orangepi-pusher]` lines |
 | Camera frame is black                   | `v4l2-ctl --list-devices` on the Pi; reseat USB                    |
-| LaserCAN reads "NO READING"             | CAN ID matches `constants.CANIDs.LASERCAN` (default 36)?           |
 | Pi UI laggy                             | Lower `CAMERA_FPS` in `sight.env` and `sudo systemctl restart cold-fusion-sight` |
+| Tag range looks wrong (off by 2×)       | Check `TAG_SIZE_M` in `sight.env` matches your printed tag (default 0.1651 m = 6.5"). For better accuracy, drop a chessboard-calibrated `cam_intrinsics.json` next to `server.py`. |
 | Pi works at home, fails on the robot    | Static IP needs `eth0`; if your Pi labels it `enP4p65s0` or similar, edit `/etc/NetworkManager/system-connections/cold-fusion-eth0.nmconnection` |
 
 ## When to re-run "Set up Vision Pi"

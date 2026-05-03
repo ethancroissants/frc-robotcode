@@ -1,398 +1,1039 @@
-/* Cold Fusion Sight — browser-side controller.
+/* Cold Fusion Sight — windowed dashboard.
  *
- * The Pi server owns AprilTag detection + RPS lookup; this file just:
- *   1. Subscribes to /api/state SSE and renders a live HUD (target lock,
- *      range/bearing/RPS readouts, gamepad mirror, lockout indicator).
- *   2. Wires the SHOOT button → POST /api/shoot. The rio takes over.
- *   3. Manages the calibration table (CRUD via /api/calibration*).
+ * Architecture:
+ *   - WindowManager owns each .panel: drag, resize, minimize, persistence
+ *     (localStorage key "cfsight.layout"). On first load (no key) it
+ *     applies a sane default layout computed from workspace dimensions.
+ *   - One EventSource on /api/state pumps the dashboard. Every view
+ *     listener reads from `state` (the latest snapshot) instead of
+ *     re-fetching — no polling. SSE flagged values are passed straight
+ *     through with their _ages_ms so the UI can dim stale data instead
+ *     of confidently displaying a default zero.
+ *   - One EventSource on /api/logs pumps the debug-console log tail.
+ *   - The camera panel hit-tests pointer clicks against the authoritative
+ *     pixel-corner data the server publishes for every detected tag, then
+ *     POSTs /api/target. No client-side detection — the server is the
+ *     source of truth so all dashboards stay consistent.
  *
- * No bundler, no framework — keep it serveable as static files from the Pi.
+ * No bundler, no framework. Run as static files.
  */
 
-const $ = (id) => document.getElementById(id);
+"use strict";
 
-// --- Status pills ----------------------------------------------------------
-const connPill    = $("conn-pill");
-const enabledPill = $("enabled-pill");
-const targetPill  = $("target-pill");
-const lockoutPill = $("lockout-pill");
-const aimPill     = $("aim-pill");
+// ============================================================
+// Tiny helpers
+// ============================================================
+const $  = (id) => document.getElementById(id);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
-function setConnected(ok) {
-  connPill.textContent = ok ? "Connected" : "Disconnected";
-  connPill.className = "pill " + (ok ? "pill-good" : "pill-bad");
-}
+// Bumped to v4: v3 layouts were computed against a topbar that wrapped
+// to two rows (4 children but only 3 grid columns) so the workspace
+// was 38px shorter than reality. Forcing fresh defaults instead of
+// asking everyone to click "reset layout" manually.
+const LAYOUT_KEY = "cfsight.layout.v4";
 
-function setRobotEnabled(enabled, connected) {
-  if (!connected) {
-    enabledPill.textContent = "Robot offline";
-    enabledPill.className = "pill";
-  } else if (enabled) {
-    enabledPill.textContent = "Robot enabled";
-    enabledPill.className = "pill pill-good";
-  } else {
-    enabledPill.textContent = "Robot disabled";
-    enabledPill.className = "pill pill-bad";
-  }
-  // Grey out action controls if the rio is offline OR disabled — both
-  // mean "pressing SHOOT will do nothing useful right now".
-  document.body.classList.toggle("controls-disabled", !connected || !enabled);
-}
-
-function setTarget(detected, tagId) {
-  if (detected) {
-    targetPill.textContent = `Lock #${tagId}`;
-    targetPill.className = "pill pill-good";
-  } else {
-    targetPill.textContent = "No target";
-    targetPill.className = "pill pill-bad";
-  }
-}
-
-function setLockout(locked) {
-  lockoutPill.style.display = locked ? "" : "none";
-  lockoutPill.textContent = "Driver locked";
-  lockoutPill.className = "pill pill-warn";
-}
-
-function setAimStatus(text, klass) {
-  const el = $("aim-status");
-  el.textContent = text;
-  el.className = "aim-status";
-  if (klass) el.classList.add(klass);
-  // Title-case the pill text so it reads like UI copy, not a CRT terminal.
-  const titled = text.charAt(0) + text.slice(1).toLowerCase();
-  aimPill.textContent = `Aim ${titled}`;
-  aimPill.className = "pill " + (
-    klass === "active" ? "pill-warn"
-    : klass === "done" ? "pill-good"
-    : klass === "fail" ? "pill-bad"
-    : ""
-  );
-}
-
-// --- SHOOT button ----------------------------------------------------------
-const shootBtn = $("shoot-btn");
-const shootSub = $("shoot-sub");
-
-let lastTargetState = { detected: false, range_m: 0 };
-
-function refreshShootButton(state) {
-  // Armed = (rio connected) AND (target locked) AND (range known) AND
-  // (robot enabled) AND (driver not already locked out by AutoAim).
-  // The button only turns red when ALL preconditions hold — so a red
-  // SHOOT actually means "you can fire this right now."
-  const connected = !!state.connected;
-  const hasRange = (state.lasercan_valid && state.lasercan_m > 0)
-                || (state.target?.detected && state.target.range_m > 0);
-  const hasTarget = !!state.target?.detected;
-  const robotEnabled = state.robot_enabled !== false;  // default true
-  const armed = connected && hasTarget && hasRange
-                && robotEnabled && !state.driver_lockout;
-
-  shootBtn.classList.toggle("armed", armed);
-  shootBtn.disabled = !armed;
-
-  // Order matters: pick the FIRST blocking condition so the user knows
-  // exactly what to fix. "rio offline" beats "no target" which beats
-  // "no range", etc.
-  if (!connected) {
-    shootSub.textContent = "rio offline — start robot code";
-  } else if (!robotEnabled) {
-    shootSub.textContent = "robot disabled — enable in DS";
-  } else if (state.driver_lockout) {
-    shootSub.textContent = "AutoAim running";
-  } else if (!hasTarget) {
-    shootSub.textContent = "point camera at an AprilTag";
-  } else if (!hasRange) {
-    shootSub.textContent = `tag #${state.target.tag_id} — set distance below`;
-  } else {
-    const r = state.lasercan_valid ? state.lasercan_m : state.target.range_m;
-    const rps = state.recommended_rps;
-    shootSub.textContent = rps != null
-      ? `tag #${state.target.tag_id} · ${r.toFixed(2)}m · ${rps.toFixed(1)} rps`
-      : `tag #${state.target.tag_id} · ${r.toFixed(2)}m`;
-  }
-}
-
-shootBtn.addEventListener("click", async () => {
-  if (shootBtn.disabled) return;
-  // Optimistic UI: flash the button to confirm the press, even before the
-  // rio responds. The aim status pill catches up via SSE.
-  shootBtn.classList.add("armed");
-  try {
-    const r = await fetch("/api/shoot", { method: "POST" });
-    if (!r.ok) throw new Error(await r.text());
-  } catch (err) {
-    console.error(err);
-    setAimStatus("REQUEST FAILED", "fail");
-  }
-});
-
-// --- Bearing tick on overlay -----------------------------------------------
-// The server-side overlay already draws the tag box on the JPEG, but the
-// SVG here adds a vertical "bearing tick" that lags by zero and follows the
-// SSE feed even if the MJPEG stream stalls — useful as a sanity check.
-const bearingTickG = $("bearing-tick");
-const bearingLine  = $("bearing-line");
-
-function updateBearingTick(target) {
-  if (!target?.detected) {
-    bearingTickG.style.display = "none";
-    return;
-  }
-  const x = target.cx_norm * 1000;
-  bearingLine.setAttribute("x1", x);
-  bearingLine.setAttribute("x2", x);
-  bearingTickG.style.display = "";
-}
-
-// --- Dial bumps ------------------------------------------------------------
-document.querySelectorAll("[data-dial]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const delta = parseFloat(btn.dataset.dial);
-    const cur = parseFloat($("dial-big").textContent) || 0;
-    const next = Math.max(0, cur + delta);
-    await fetch("/api/dial", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ft: next }),
-    });
-  });
-});
-
-// --- LaserCAN-as-dial ------------------------------------------------------
-$("apply-laser").addEventListener("click", async () => {
-  const m = parseFloat($("laser-big").textContent);
-  if (!isFinite(m)) return;
-  const ft = m / 0.3048;
-  await fetch("/api/dial", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ft }),
-  });
-});
-
-// --- Calibration table -----------------------------------------------------
-const calBody = $("cal-body");
-
-function renderCalibration(points) {
-  calBody.innerHTML = "";
-  for (const p of points) {
-    const tr = document.createElement("tr");
-    const td1 = document.createElement("td");
-    td1.textContent = p.distance_ft.toFixed(2);
-    const td2 = document.createElement("td");
-    td2.textContent = p.rps.toFixed(1);
-    const td3 = document.createElement("td");
-    td3.className = "right-edge";
-    const del = document.createElement("button");
-    del.textContent = "remove";
-    del.className = "row-del";
-    del.addEventListener("click", () => removeCalPoint(p.distance_ft));
-    td3.appendChild(del);
-    tr.append(td1, td2, td3);
-    calBody.appendChild(tr);
-  }
-}
-
-async function loadCalibration() {
-  try {
-    const r = await fetch("/api/calibration");
-    const j = await r.json();
-    renderCalibration(j.points || []);
-  } catch (err) {
-    console.error("calibration load failed", err);
-  }
-}
-
-async function addCalPoint(distance_ft, rps) {
-  const r = await fetch("/api/calibration/add", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ distance_ft, rps }),
-  });
-  const j = await r.json();
-  renderCalibration(j.points || []);
-}
-
-async function removeCalPoint(distance_ft) {
-  const r = await fetch("/api/calibration/remove", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ distance_ft }),
-  });
-  const j = await r.json();
-  renderCalibration(j.points || []);
-}
-
-$("cal-add-btn").addEventListener("click", () => {
-  const d = parseFloat($("cal-add-dist").value);
-  const r = parseFloat($("cal-add-rps").value);
-  if (!isFinite(d) || !isFinite(r) || d < 0 || r < 0) {
-    $("cal-add-dist").focus();
-    return;
-  }
-  addCalPoint(d, r);
-  $("cal-add-dist").value = "";
-  $("cal-add-rps").value = "";
-});
-
-$("cal-snapshot-btn").addEventListener("click", () => {
-  // "Snapshot current shot": use the live LaserCAN distance + currently
-  // dialed RPS (computed from the manual dial via the same RPS-per-foot
-  // mapping the rio uses). If the laser isn't valid, fall back to dial.
-  const m = parseFloat($("laser-big").textContent);
-  const dialFt = parseFloat($("dial-big").textContent);
-  const distFt = isFinite(m) ? m / 0.3048 : dialFt;
-  // Rough RPS assumption: 10 rps/ft from the rio's _SHOOTER_RPS_PER_FOOT
-  // default. Operator can correct it inline before saving by editing the
-  // table, but giving them a starting value beats a blank input.
-  const rps = isFinite(dialFt) ? dialFt * 10.0 : 0;
-  if (!isFinite(distFt) || distFt <= 0) return;
-  addCalPoint(distFt, rps);
-});
-
-// --- Live state via SSE ----------------------------------------------------
-const POV_TO_NAME = {
-  0: "N", 45: "NE", 90: "E", 135: "SE",
-  180: "S", 225: "SW", 270: "W", 315: "NW",
-};
+// Workspace background grid is 24px (see .workspace::backround-image
+// in style.css). Snap drag + resize to it so panels line up cleanly
+// with the grid the eye is already trained to see.
+const GRID = 24;
+const snap = (v) => Math.round(v / GRID) * GRID;
 
 function fmt(v, digits, unit) {
-  if (!isFinite(v)) return `--.- ${unit}`.trim();
-  const u = unit ? ` ${unit}` : "";
-  return `${v.toFixed(digits)}${u}`;
+  if (v == null || !isFinite(v)) return unit ? `—` : "—";
+  return `${v.toFixed(digits)}${unit ? unit : ""}`;
 }
 
-function applyState(s) {
-  const connected = !!s.connected;
-  setConnected(connected);
-  // robot_enabled defaults true on the Pi side so a fresh setup with no
-  // rio publisher doesn't grey out the whole UI; older rio code that
-  // doesn't publish the topic will still leave the UI usable. Pass
-  // `connected` through so the pill can show "Robot offline" instead
-  // of confidently claiming "enabled" when the rio isn't even reachable.
-  setRobotEnabled(s.robot_enabled !== false, connected);
-  setLockout(!!s.driver_lockout);
-  const t = s.target || { detected: false };
-  setTarget(t.detected, t.tag_id);
-  lastTargetState = t;
-
-  // Top-bar readouts
-  if (t.detected) {
-    $("r-range").textContent   = fmt(t.range_m, 2, "m");
-    $("r-bearing").textContent = `${t.bearing_deg >= 0 ? "+" : ""}${t.bearing_deg.toFixed(1)}°`;
-    $("r-tag").textContent     = `#${t.tag_id}`;
-  } else {
-    $("r-range").textContent   = "—";
-    $("r-bearing").textContent = "—";
-    $("r-tag").textContent     = "—";
-  }
-  $("r-rps").textContent = isFinite(s.recommended_rps)
-    ? s.recommended_rps.toFixed(1)
-    : "—";
-
-  // "Seen tags" hint in the camera card header — distinct from the
-  // configured TARGET_TAG_IDS so users debugging "no detection" can
-  // see whether the detector is actually working.
-  const seen = Array.isArray(s.seen_tags) ? s.seen_tags : [];
-  const seenEl = $("seen-tag-list");
-  if (seenEl) {
-    seenEl.textContent = seen.length ? seen.join(", ") : "(none)";
-  }
-
-  // Manual dial readouts
-  $("dial-big").textContent  = isFinite(s.dial_ft) ? s.dial_ft.toFixed(1) : "--.-";
-  $("laser-big").textContent = isFinite(s.lasercan_m) ? s.lasercan_m.toFixed(2) : "--.--";
-
-  const laserPill = $("laser-pill");
-  if (s.lasercan_valid) {
-    laserPill.textContent = "LIVE";
-    laserPill.className = "pill pill-good";
-  } else {
-    laserPill.textContent = "NO READING";
-    laserPill.className = "pill pill-bad";
-  }
-
-  // Gamepad mirror
-  const povName = POV_TO_NAME[s.pov] || null;
-  document.querySelectorAll(".dpad-cell").forEach((c) => {
-    const want = c.dataset.pov;
-    c.classList.toggle("active", want && want !== "C" && want === povName);
-  });
-  for (const k of ["A", "B", "X", "Y", "LB", "RB"]) {
-    const el = document.querySelector(`[data-btn="${k}"]`);
-    if (el) el.classList.toggle("active", !!s[`btn_${k.toLowerCase()}`]);
-  }
-
-  // Aim status — keep the raw string from NT for the class lookup, but
-  // display it in title case so it doesn't read like a CRT terminal.
-  const raw = String(s.aim_status || "idle").toLowerCase();
-  let klass = "";
-  if (raw === "rotating" || raw === "spinning_up" || raw === "firing") {
-    klass = "active";
-  } else if (raw === "done") {
-    klass = "done";
-  } else if (raw === "error") {
-    klass = "fail";
-  }
-  // "spinning_up" → "Spinning up"
-  const display = raw.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
-  setAimStatus(display, klass);
-
-  updateBearingTick(t);
-  refreshShootButton(s);
+function signFmt(v, digits) {
+  if (v == null || !isFinite(v)) return "—";
+  const s = v >= 0 ? "+" : "";
+  return `${s}${v.toFixed(digits)}°`;
 }
 
-function startSSE() {
-  const es = new EventSource("/api/state");
-  es.onmessage = (ev) => {
-    try { applyState(JSON.parse(ev.data)); } catch (e) { console.error(e); }
-  };
-  es.onerror = () => {
-    setConnected(false);
-    es.close();
-    setTimeout(startSSE, 1000);
-  };
-}
+// ============================================================
+// Window manager
+// ============================================================
+//
+// Each .panel inside #workspace becomes a draggable, resizable,
+// minimizable window. Layout for all panels is persisted as a single
+// blob under LAYOUT_KEY so we read/write once per change.
 
-// --- Healthz + tag list bootstrap ------------------------------------------
-async function loadHealth() {
-  try {
-    const j = await (await fetch("/api/healthz")).json();
-    if (j.target_tag_ids?.length) {
-      $("target-tag-list").textContent = j.target_tag_ids.join(", ");
-    } else {
-      $("target-tag-list").textContent = "(any)";
+class WindowManager {
+  constructor(workspaceEl) {
+    this.workspace = workspaceEl;
+    this.panels = new Map();  // id -> {el, minimized}
+    this._zCounter = 1;
+    $$(".panel", workspaceEl).forEach((el) => this._registerPanel(el));
+    this._loadLayout();
+    window.addEventListener("resize", () => this._clampAll());
+    $("reset-layout-btn").addEventListener("click", () => this.resetLayout());
+  }
+
+  _registerPanel(el) {
+    const id = el.id;
+    const rec = { el, minimized: false };
+    this.panels.set(id, rec);
+    const header = el.querySelector(".panel-header");
+    const resize = el.querySelector(".panel-resize");
+    const minBtn = el.querySelector(".panel-min");
+    if (header) this._installDrag(rec, header);
+    if (resize) this._installResize(rec, resize);
+    if (minBtn) {
+      minBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._toggleMinimize(rec);
+      });
     }
-  } catch (err) {
-    $("target-tag-list").textContent = "?";
+    el.addEventListener("pointerdown", () => this._bringToFront(rec));
+  }
+
+  _installDrag(rec, header) {
+    header.addEventListener("pointerdown", (e) => {
+      // Don't start a drag if the click landed on a button inside the header.
+      if (e.target.closest("button")) return;
+      const r = rec.el.getBoundingClientRect();
+      const ws = this.workspace.getBoundingClientRect();
+      const startX = e.clientX, startY = e.clientY;
+      const startLeft = r.left - ws.left;
+      const startTop  = r.top  - ws.top;
+      header.setPointerCapture(e.pointerId);
+      rec.el.classList.add("dragging");
+      this._bringToFront(rec);
+      const onMove = (ev) => {
+        const w = rec.el.offsetWidth;
+        const h = rec.el.offsetHeight;
+        const maxX = this.workspace.clientWidth  - 24; // keep at least the corner visible
+        const maxY = this.workspace.clientHeight - 24;
+        const minX = -w + 80;                          // and 80px draggable handle on the other side
+        const minY = 0;
+        let x = startLeft + (ev.clientX - startX);
+        let y = startTop  + (ev.clientY - startY);
+        // Snap to the workspace's 24px grid so panels line up visibly.
+        x = snap(x);
+        y = snap(y);
+        x = Math.max(minX, Math.min(maxX, x));
+        y = Math.max(minY, Math.min(maxY, y));
+        rec.el.style.left = `${x}px`;
+        rec.el.style.top  = `${y}px`;
+      };
+      const onUp = (ev) => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        rec.el.classList.remove("dragging");
+        try { header.releasePointerCapture(ev.pointerId); } catch (_) {}
+        this._saveLayout();
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+    });
+  }
+
+  _installResize(rec, handle) {
+    handle.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      const r = rec.el.getBoundingClientRect();
+      const startX = e.clientX, startY = e.clientY;
+      const startW = r.width, startH = r.height;
+      handle.setPointerCapture(e.pointerId);
+      rec.el.classList.add("resizing");
+      this._bringToFront(rec);
+      const onMove = (ev) => {
+        let w = Math.max(200, startW + (ev.clientX - startX));
+        let h = Math.max(100, startH + (ev.clientY - startY));
+        // Snap to grid; clamp again post-snap in case snap pulled below
+        // the minimum.
+        w = Math.max(GRID * 8, snap(w));
+        h = Math.max(GRID * 4, snap(h));
+        rec.el.style.width  = `${w}px`;
+        rec.el.style.height = `${h}px`;
+      };
+      const onUp = (ev) => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        rec.el.classList.remove("resizing");
+        try { handle.releasePointerCapture(ev.pointerId); } catch (_) {}
+        this._saveLayout();
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+    });
+  }
+
+  _toggleMinimize(rec) {
+    rec.minimized = !rec.minimized;
+    rec.el.classList.toggle("minimized", rec.minimized);
+    rec.el.querySelector(".panel-min").textContent = rec.minimized ? "+" : "−";
+    this._saveLayout();
+  }
+
+  _bringToFront(rec) {
+    this._zCounter += 1;
+    rec.el.style.zIndex = String(this._zCounter);
+  }
+
+  _layoutData() {
+    const out = {};
+    const ws = this.workspace.getBoundingClientRect();
+    for (const [id, rec] of this.panels) {
+      const r = rec.el.getBoundingClientRect();
+      out[id] = {
+        x: Math.round(r.left - ws.left),
+        y: Math.round(r.top  - ws.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        z: parseInt(rec.el.style.zIndex || "1", 10),
+        m: rec.minimized,
+      };
+    }
+    return out;
+  }
+
+  _applyLayout(layout) {
+    let maxZ = 0;
+    for (const [id, rec] of this.panels) {
+      const d = layout[id];
+      if (!d) continue;
+      rec.el.style.left = `${d.x}px`;
+      rec.el.style.top  = `${d.y}px`;
+      rec.el.style.width  = `${d.w}px`;
+      rec.el.style.height = `${d.h}px`;
+      rec.el.style.zIndex = String(d.z || 1);
+      maxZ = Math.max(maxZ, d.z || 1);
+      rec.minimized = !!d.m;
+      rec.el.classList.toggle("minimized", rec.minimized);
+      const minBtn = rec.el.querySelector(".panel-min");
+      if (minBtn) minBtn.textContent = rec.minimized ? "+" : "−";
+    }
+    this._zCounter = maxZ;
+  }
+
+  _saveLayout() {
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(this._layoutData()));
+    } catch (_) {}
+  }
+
+  _loadLayout() {
+    let raw = null;
+    try { raw = localStorage.getItem(LAYOUT_KEY); } catch (_) {}
+    if (raw) {
+      try { this._applyLayout(JSON.parse(raw)); return; } catch (_) {}
+    }
+    this._applyLayout(this._defaultLayout());
+  }
+
+  resetLayout() {
+    try { localStorage.removeItem(LAYOUT_KEY); } catch (_) {}
+    this._applyLayout(this._defaultLayout());
+    this._saveLayout();
+  }
+
+  _clampAll() {
+    // After window resize, drag any panel that's now off-screen back in.
+    const W = this.workspace.clientWidth;
+    const H = this.workspace.clientHeight;
+    for (const [, rec] of this.panels) {
+      const r = rec.el.getBoundingClientRect();
+      const ws = this.workspace.getBoundingClientRect();
+      const x = r.left - ws.left;
+      const y = r.top  - ws.top;
+      const w = r.width;
+      const newX = Math.max(0, Math.min(W - 80, x));
+      const newY = Math.max(0, Math.min(H - 24, y));
+      if (newX !== x) rec.el.style.left = `${newX}px`;
+      if (newY !== y) rec.el.style.top  = `${newY}px`;
+    }
+    this._saveLayout();
+  }
+
+  _defaultLayout() {
+    // Computed from current workspace size, rounded to the 24px grid so
+    // the default layout looks tidy on the grid background. Layout:
+    //   left top: camera (dominant)
+    //   right top column: target / fire / dial (stacked)
+    //   bottom row: calibration | operator | driver | debug (across full width)
+    const ws = this.workspace;
+    const W = Math.max(960, ws.clientWidth);
+    const H = Math.max(640, ws.clientHeight);
+    const m = GRID;            // outer margin on all sides
+    const gap = GRID;          // gap between panels
+    const usableW = W - 2 * m;
+    const usableH = H - 2 * m;
+
+    // Right column (target/fire/dial) — narrow. Snap to grid.
+    let rightW = snap(Math.max(240, Math.min(312, Math.floor(W * 0.22))));
+    let leftW  = snap(usableW - rightW - gap);
+
+    // Top half is the camera + right column.
+    let topH = snap(Math.max(360, Math.floor(H * 0.60)));
+    let bottomH = snap(usableH - topH - gap);
+    let rightItemH = snap(Math.floor((topH - 2 * gap) / 3));
+
+    // Bottom row: 4 panels side by side. Each gets a snap-aligned share
+    // of the total bottom width.
+    const bottomTotalW = usableW;
+    const calW = snap(Math.floor(bottomTotalW * 0.28));
+    const opW  = snap(Math.floor(bottomTotalW * 0.18));
+    const drW  = snap(Math.floor(bottomTotalW * 0.18));
+    // Debug fills the rest so the row reaches the right edge regardless
+    // of rounding.
+    const dbgW = bottomTotalW - calW - opW - drW - 3 * gap;
+
+    const rightX = m + leftW + gap;
+    const bottomY = m + topH + gap;
+
+    return {
+      "panel-camera":   { x: m, y: m, w: leftW, h: topH, z: 1, m: false },
+      "panel-target":   { x: rightX, y: m,                              w: rightW, h: rightItemH, z: 2, m: false },
+      "panel-fire":     { x: rightX, y: m + rightItemH + gap,           w: rightW, h: rightItemH, z: 3, m: false },
+      "panel-dial":     { x: rightX, y: m + 2 * (rightItemH + gap),     w: rightW, h: rightItemH, z: 4, m: false },
+      "panel-cal":      { x: m,                                  y: bottomY, w: calW, h: bottomH, z: 5, m: false },
+      "panel-operator": { x: m + calW + gap,                     y: bottomY, w: opW,  h: bottomH, z: 6, m: false },
+      "panel-driver":   { x: m + calW + opW + 2 * gap,           y: bottomY, w: drW,  h: bottomH, z: 7, m: false },
+      "panel-debug":    { x: m + calW + opW + drW + 3 * gap,     y: bottomY, w: dbgW, h: bottomH, z: 8, m: false },
+    };
   }
 }
 
-// --- Stream FPS estimator --------------------------------------------------
-const fpsMeter = $("fps-meter");
-const stream   = $("stream");
-let frameWindow = [];
-stream.addEventListener("load", () => {
-  const t = performance.now();
-  frameWindow.push(t);
-  while (frameWindow.length > 30) frameWindow.shift();
-  if (frameWindow.length > 1) {
-    const dt = (frameWindow[frameWindow.length - 1] - frameWindow[0]) / 1000;
-    const fps = (frameWindow.length - 1) / dt;
-    fpsMeter.textContent = `stream: ${fps.toFixed(1)} fps`;
+// ============================================================
+// Click-to-target
+// ============================================================
+
+function pointInQuad(px, py, quad) {
+  // Same-sign-cross test for a convex quad. AprilTag corners are always
+  // convex so this is exact.
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const [x1, y1] = quad[i];
+    const [x2, y2] = quad[(i + 1) % 4];
+    const c = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+    if (c !== 0) {
+      const s = c > 0 ? 1 : -1;
+      if (sign === 0) sign = s;
+      else if (sign !== s) return false;
+    }
   }
+  return true;
+}
+
+class CameraPanel {
+  constructor() {
+    this.frame = $("camera-frame");
+    this.svg = $("overlay");
+    this.hoverLayer = $("tag-hover-layer");
+    this.selectLayer = $("tag-select-layer");
+    this.imgEl = $("stream");
+    this.imageW = 1;
+    this.imageH = 1;
+    this.allTags = [];
+    this.selectedId = null;
+
+    this.frame.addEventListener("click", (e) => this._onClick(e));
+    this.frame.addEventListener("mousemove", (e) => this._onMove(e));
+    this.frame.addEventListener("mouseleave", () => this._clearHover());
+
+    $("clear-target-btn").addEventListener("click", () => this._post(null));
+  }
+
+  setImageSize(w, h) {
+    if (w === this.imageW && h === this.imageH) return;
+    this.imageW = w;
+    this.imageH = h;
+    // SVG viewBox in image-pixel space + preserveAspectRatio="xMidYMid meet"
+    // makes the SVG content area match the IMG's object-fit:contain area.
+    // We can then draw with raw pixel coords and they line up exactly.
+    this.svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    this.svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  }
+
+  setTags(allTags, selectedId) {
+    this.allTags = allTags || [];
+    this.selectedId = (selectedId == null) ? null : Number(selectedId);
+    this._render();
+  }
+
+  _render() {
+    // Selection ring around the locked tag (if any + visible).
+    while (this.selectLayer.firstChild) this.selectLayer.removeChild(this.selectLayer.firstChild);
+    if (this.selectedId != null) {
+      const tag = this.allTags.find(t => Number(t.tag_id) === this.selectedId);
+      if (tag && tag.corners_px) {
+        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        poly.setAttribute("points", tag.corners_px.map(([x,y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("class", "tag-box");
+        this.selectLayer.appendChild(poly);
+      }
+    }
+  }
+
+  _eventToImagePoint(ev) {
+    // Converts a screen-space click into image-pixel space using the
+    // SVG's CTM (which already accounts for preserveAspectRatio meet).
+    const pt = this.svg.createSVGPoint();
+    pt.x = ev.clientX;
+    pt.y = ev.clientY;
+    const ctm = this.svg.getScreenCTM();
+    if (!ctm) return null;
+    return pt.matrixTransform(ctm.inverse());
+  }
+
+  _onClick(ev) {
+    const p = this._eventToImagePoint(ev);
+    if (!p) return;
+    // Out of image bounds = clicked the letterbox; clear selection.
+    if (p.x < 0 || p.y < 0 || p.x > this.imageW || p.y > this.imageH) {
+      this._post(null);
+      return;
+    }
+    let hit = null;
+    for (const tag of this.allTags) {
+      if (!tag.corners_px || tag.corners_px.length < 4) continue;
+      if (pointInQuad(p.x, p.y, tag.corners_px)) { hit = tag; break; }
+    }
+    this._post(hit ? Number(hit.tag_id) : null);
+  }
+
+  _onMove(ev) {
+    const p = this._eventToImagePoint(ev);
+    if (!p) return this._clearHover();
+    if (p.x < 0 || p.y < 0 || p.x > this.imageW || p.y > this.imageH) {
+      return this._clearHover();
+    }
+    while (this.hoverLayer.firstChild) this.hoverLayer.removeChild(this.hoverLayer.firstChild);
+    for (const tag of this.allTags) {
+      if (!tag.corners_px || tag.corners_px.length < 4) continue;
+      if (Number(tag.tag_id) === this.selectedId) continue;
+      if (pointInQuad(p.x, p.y, tag.corners_px)) {
+        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        poly.setAttribute("points", tag.corners_px.map(([x,y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("class", "tag-box");
+        this.hoverLayer.appendChild(poly);
+        break;
+      }
+    }
+  }
+
+  _clearHover() {
+    while (this.hoverLayer.firstChild) this.hoverLayer.removeChild(this.hoverLayer.firstChild);
+  }
+
+  async _post(tagId) {
+    try {
+      await fetch("/api/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tag_id: tagId }),
+      });
+    } catch (e) {
+      console.error("target post failed", e);
+    }
+  }
+}
+
+// ============================================================
+// State view (top bar pills + most readouts)
+// ============================================================
+
+const STALE_MS = 2000;  // values older than this dim out
+
+function isStale(ageMs) {
+  return ageMs == null || ageMs > STALE_MS;
+}
+
+class StateView {
+  constructor(camera) {
+    this.camera = camera;
+
+    this.rioStatus   = $("rio-status");
+    this.enabledPill = $("enabled-pill");
+    this.lockPill    = $("lock-pill");
+    this.readyPill   = $("ready-pill");
+    this.lockoutPill = $("lockout-pill");
+    this.recPill     = $("recording-pill");
+    this.recBtn      = $("rec-btn");
+    this.calPill     = $("calibrate-pill");
+
+    this.lastTopics = {};
+
+    // Record toggle. The button reflects the server's view of recording
+    // state via _refreshRecording() each tick — clicks just flip it.
+    if (this.recBtn) {
+      this.recBtn.addEventListener("click", async () => {
+        const isRec = this.recBtn.classList.contains("recording");
+        const url = isRec ? "/api/record/stop" : "/api/record/start";
+        try {
+          const r = await fetch(url, { method: "POST" });
+          if (!r.ok) {
+            const text = await r.text();
+            console.error("record toggle failed", text);
+            cfAlert("Recording failed:\n\n" + text, { title: "Recording", kind: "error" });
+          }
+        } catch (e) {
+          console.error(e);
+          cfAlert("Recording failed:\n\n" + e.message, { title: "Recording", kind: "error" });
+        }
+      });
+    }
+
+    // Manual dial bumpers. Click → POST /api/dial with new value.
+    $$("[data-dial]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const delta = parseFloat(btn.dataset.dial);
+        const cur = parseFloat($("dial-big").textContent) || 0;
+        const next = Math.max(0, cur + delta);
+        try {
+          await fetch("/api/dial", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ft: next }),
+          });
+        } catch (e) { console.error(e); }
+      });
+    });
+
+    // Tag-PnP range → dial. The Distance panel shows the live tag range
+    // (in feet); this button copies it into the manual dial so the
+    // operator can hand-tune around it.
+    $("apply-tag-range").addEventListener("click", async () => {
+      const ft = parseFloat($("tag-range-big").textContent);
+      if (!isFinite(ft) || ft <= 0) return;
+      try {
+        await fetch("/api/dial", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ft }),
+        });
+      } catch (e) { console.error(e); }
+    });
+
+    // SHOOT button.
+    $("shoot-btn").addEventListener("click", async () => {
+      if ($("shoot-btn").disabled) return;
+      try {
+        const r = await fetch("/api/shoot", { method: "POST" });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (e) {
+        console.error(e);
+        $("aim-status").textContent = "request failed";
+        $("aim-status").className = "aim-status-line fail";
+      }
+    });
+  }
+
+  apply(s) {
+    const connected = !!s.connected;
+    const ages = s._ages_ms || {};
+
+    // ----- big rio status indicator + topbar pills -----
+    this._setRioStatus(connected);
+
+    const enabled = s.robot_enabled !== false;
+    if (!connected) {
+      this._setPill(this.enabledPill, "rio offline", "");
+    } else if (enabled) {
+      this._setPill(this.enabledPill, "enabled", "good");
+    } else {
+      this._setPill(this.enabledPill, "disabled", "bad");
+    }
+
+    if (s.selected_tag_id != null) {
+      this._setPill(this.lockPill, `lock #${s.selected_tag_id}`, "info");
+    } else {
+      this._setPill(this.lockPill, "no lock", "");
+    }
+
+    const ready = !!(s.target && s.target.ready);
+    this._setPill(this.readyPill, ready ? "ready" : "not ready",
+                  ready ? "good" : "bad");
+
+    if (s.driver_lockout) {
+      this.lockoutPill.style.display = "";
+    } else {
+      this.lockoutPill.style.display = "none";
+    }
+
+    document.body.classList.toggle("controls-disabled", !connected || !enabled);
+
+    // ----- target panel -----
+    const t = s.target || { detected: false };
+    if (t.detected) {
+      $("r-tag").textContent     = `#${t.tag_id}`;
+      $("r-range").textContent   = fmt(t.range_m, 2, " m");
+      $("r-bearing").textContent = signFmt(t.bearing_deg, 1);
+    } else {
+      $("r-tag").textContent     = "—";
+      $("r-range").textContent   = "—";
+      $("r-bearing").textContent = "—";
+    }
+    $("r-rps").textContent = isFinite(s.recommended_rps)
+      ? s.recommended_rps.toFixed(1) : "—";
+
+    const stateEl = $("r-target-state");
+    if (t.detected) {
+      if (t.selected_locked) {
+        stateEl.textContent = `locked #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
+        stateEl.className = "target-state locked";
+      } else {
+        stateEl.textContent = `auto-pick #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
+        stateEl.className = "target-state locked";
+      }
+    } else if (s.selected_tag_id != null) {
+      stateEl.textContent = `searching for #${s.selected_tag_id}…`;
+      stateEl.className = "target-state searching";
+    } else {
+      stateEl.textContent = "no target";
+      stateEl.className = "target-state notarget";
+    }
+
+    // ----- distance panel (manual dial + live tag-PnP range) -----
+    // If the dial topic is stale or never received, show "—" instead of
+    // displaying the default-zero. Confidently rendering "0.0 ft" when
+    // the rio is gone is what the operator (rightly) called "fake details".
+    const dialEl = $("dial-big");
+    const dialFresh = isFinite(s.dial_ft) && !isStale(ages.dial_ft);
+    if (dialFresh) {
+      dialEl.textContent = s.dial_ft.toFixed(1);
+      dialEl.classList.remove("stale");
+    } else {
+      dialEl.textContent = "—";
+      dialEl.classList.add("stale");
+    }
+    // Tag range comes from the Pi-side detector (target.range_m), not
+    // from rio. We display it in feet to match the dial's unit so the
+    // operator can compare them side-by-side.
+    const tagRangeEl = $("tag-range-big");
+    if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+      tagRangeEl.textContent = (t.range_m / 0.3048).toFixed(1);
+      tagRangeEl.classList.remove("stale");
+    } else {
+      tagRangeEl.textContent = "—";
+      tagRangeEl.classList.add("stale");
+    }
+
+    // ----- gamepad mirror — operator + driver -----
+    // Each panel has its own [data-stick=...] body, so we scope the
+    // active-class flips to that subtree. Avoids one click on the
+    // operator's A button lighting up both panels.
+    this._applyStick('[data-stick="operator"]', s.operator || {});
+    this._applyStick('[data-stick="driver"]',   s.driver   || {});
+
+    // ----- aim status line -----
+    const raw = String(s.aim_status || "idle").toLowerCase();
+    let klass = "";
+    if (["rotating", "spinning_up", "firing"].includes(raw)) klass = "active";
+    else if (raw === "done") klass = "done";
+    else if (raw === "error") klass = "fail";
+    const display = raw.replace(/_/g, " ");
+    const aimEl = $("aim-status");
+    aimEl.textContent = display;
+    aimEl.className = `aim-status-line ${klass}`;
+
+    // ----- shoot button -----
+    this._refreshShoot(s, t, ready, connected, enabled);
+
+    // ----- recording state (panel button + topbar pill + brand timer) ---
+    this._refreshRecording(s.recording || { active: false });
+
+    // ----- calibrate-mode pill (visibility toggle) -----
+    if (this.calPill) {
+      const calActive = !!(s.calibrate && s.calibrate.active);
+      this.calPill.style.display = calActive ? "" : "none";
+    }
+
+    // ----- camera overlays + image-size sync -----
+    if (s.image_size) {
+      this.camera.setImageSize(s.image_size.w, s.image_size.h);
+    }
+    this.camera.setTags(s.all_tags || [], s.selected_tag_id);
+
+    // ----- debug stats panel -----
+    this._refreshStats(s);
+
+    // ----- debug topics table -----
+    this._refreshTopics(s, ages);
+  }
+
+  _setPill(el, text, kind) {
+    el.textContent = text;
+    el.className = "pill" + (kind ? ` pill-${kind}` : "");
+  }
+
+  _setRioStatus(connected) {
+    if (!this.rioStatus) return;
+    this.rioStatus.classList.toggle("connected", connected);
+    this.rioStatus.classList.toggle("disconnected", !connected);
+    const txt = this.rioStatus.querySelector(".rio-text");
+    if (txt) txt.textContent = connected ? "rio link up" : "rio disconnected";
+  }
+
+  _applyStick(rootSelector, data) {
+    const root = document.querySelector(rootSelector);
+    if (!root) return;
+    const POV_TO_NAME = {
+      0: "N", 45: "NE", 90: "E", 135: "SE",
+      180: "S", 225: "SW", 270: "W", 315: "NW",
+    };
+    const povName = POV_TO_NAME[data.pov] || null;
+    root.querySelectorAll(".dpad-cell").forEach((c) => {
+      const want = c.dataset.pov;
+      c.classList.toggle("active", !!want && want === povName);
+    });
+    for (const k of ["A", "B", "X", "Y", "LB", "RB"]) {
+      const el = root.querySelector(`[data-btn="${k}"]`);
+      if (el) el.classList.toggle("active", !!data[`btn_${k.toLowerCase()}`]);
+    }
+  }
+
+  _refreshRecording(rec) {
+    const active = !!rec.active;
+    if (this.recBtn) {
+      this.recBtn.classList.toggle("recording", active);
+      this.recBtn.textContent = active ? "■ stop" : "● rec";
+      this.recBtn.title = active ? "Stop recording" : "Start recording";
+    }
+    if (this.recPill) {
+      if (active) {
+        this.recPill.style.display = "";
+        const elapsed = Math.max(0, Math.floor(rec.elapsed_s || 0));
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
+        const ss = String(elapsed % 60).padStart(2, "0");
+        this.recPill.textContent = `● rec ${mm}:${ss}`;
+      } else {
+        this.recPill.style.display = "none";
+      }
+    }
+  }
+
+  _refreshShoot(s, t, ready, connected, enabled) {
+    const btn = $("shoot-btn");
+    const sub = $("shoot-sub");
+    const hasRange = t.detected && t.range_m > 0;
+    const armed = connected && t.detected && hasRange
+                  && enabled && !s.driver_lockout && ready;
+    btn.classList.toggle("armed", armed);
+    btn.disabled = !armed;
+
+    if (!connected)             sub.textContent = "rio offline";
+    else if (!enabled)          sub.textContent = "robot disabled";
+    else if (s.driver_lockout)  sub.textContent = "AutoAim running";
+    else if (!t.detected) {
+      sub.textContent = s.selected_tag_id != null
+        ? `searching for #${s.selected_tag_id}`
+        : "click a tag to lock";
+    }
+    else if (!hasRange)         sub.textContent = `tag #${t.tag_id} · no range`;
+    else if (!ready)            sub.textContent = `tag #${t.tag_id} · off-bearing`;
+    else {
+      const rps = s.recommended_rps;
+      sub.textContent = rps != null
+        ? `#${t.tag_id} · ${t.range_m.toFixed(2)}m · ${rps.toFixed(1)} rps`
+        : `#${t.tag_id} · ${t.range_m.toFixed(2)}m`;
+    }
+  }
+
+  _refreshStats(s) {
+    if (s.fps) {
+      $("s-cap-fps").textContent = isFinite(s.fps.capture) ? s.fps.capture.toFixed(1) : "—";
+      $("s-det-fps").textContent = isFinite(s.fps.detect)  ? s.fps.detect.toFixed(1)  : "—";
+    }
+    if (s.image_size) $("s-imgsize").textContent = `${s.image_size.w}×${s.image_size.h}`;
+    if (s.intrinsics_source) $("s-intrinsics").textContent = s.intrinsics_source;
+    if (s.target_tag_ids) $("s-target-tags").textContent = s.target_tag_ids.join(", ") || "(any)";
+    if (Array.isArray(s.seen_tags)) $("s-seen-tags").textContent = s.seen_tags.length ? s.seen_tags.join(", ") : "(none)";
+    if (s.version) $("s-version").textContent = s.version;
+    $("brand-version").textContent = s.version ? `v${s.version}` : "";
+  }
+
+  _refreshTopics(s, ages) {
+    // Render a small fixed set of NT topics that matter for debugging.
+    // The full state object is too noisy to dump verbatim. Operator +
+    // driver buttons share rows so the table stays scannable; ages key
+    // is still flat (op_btn_a/dr_btn_a etc.) since we expose ages per
+    // raw NT topic, not per-stick.
+    const tbody = $("topic-body");
+    const op = s.operator || {};
+    const dr = s.driver || {};
+    const rows = [
+      ["connected", s.connected, null],
+      ["robot_enabled", s.robot_enabled, ages.robot_enabled],
+      ["driver_lockout", s.driver_lockout, ages.driver_lockout],
+      ["aim_status", s.aim_status, ages.aim_status],
+      ["dial_ft", s.dial_ft, ages.dial_ft],
+      ["operator.pov", op.pov, ages.op_pov],
+      ["operator.A/B/X/Y", `${+!!op.btn_a}${+!!op.btn_b}${+!!op.btn_x}${+!!op.btn_y}`, ages.op_btn_a],
+      ["operator.LB/RB", `${+!!op.btn_lb}${+!!op.btn_rb}`, ages.op_btn_lb],
+      ["driver.pov", dr.pov, ages.dr_pov],
+      ["driver.A/B/X/Y", `${+!!dr.btn_a}${+!!dr.btn_b}${+!!dr.btn_x}${+!!dr.btn_y}`, ages.dr_btn_a],
+      ["driver.LB/RB", `${+!!dr.btn_lb}${+!!dr.btn_rb}`, ages.dr_btn_lb],
+      ["selected_tag_id", s.selected_tag_id, null],
+      ["target.detected", s.target ? s.target.detected : false, null],
+      ["target.tag_id", s.target ? s.target.tag_id : null, null],
+      ["target.bearing_deg", s.target ? s.target.bearing_deg : null, null],
+      ["target.range_m", s.target ? s.target.range_m : null, null],
+      ["target.ready", s.target ? s.target.ready : false, null],
+      ["recommended_rps", s.recommended_rps, null],
+      ["recording.active", s.recording ? s.recording.active : false, null],
+    ];
+    const html = rows.map(([k, v, age]) => {
+      const stale = age != null && age > STALE_MS;
+      const ageStr = age == null ? "—"
+                   : age < 1000 ? `${age}ms`
+                   : `${(age/1000).toFixed(1)}s`;
+      const vStr = v == null ? "—"
+                 : typeof v === "number" ? Number(v).toFixed(3).replace(/\.?0+$/, "")
+                 : String(v);
+      return `<tr class="${stale ? "stale" : ""}">
+        <td class="k">${k}</td>
+        <td class="v">${escapeHtml(vStr)}</td>
+        <td class="age ${stale ? "stale" : ""}">${ageStr}</td>
+      </tr>`;
+    }).join("");
+    tbody.innerHTML = html;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+// ============================================================
+// Calibration table view
+// ============================================================
+
+class CalibrationView {
+  constructor() {
+    this.body = $("cal-body");
+    this.lastTagRangeFt = NaN;
+    this.lastDialFt = NaN;
+
+    $("cal-add-btn").addEventListener("click", () => {
+      const d = parseFloat($("cal-add-dist").value);
+      const r = parseFloat($("cal-add-rps").value);
+      if (!isFinite(d) || !isFinite(r) || d < 0 || r < 0) {
+        $("cal-add-dist").focus();
+        return;
+      }
+      this._add(d, r);
+      $("cal-add-dist").value = "";
+      $("cal-add-rps").value = "";
+    });
+
+    $("cal-snapshot-btn").addEventListener("click", () => {
+      // Prefer the live tag-PnP range; fall back to the dial (operator
+      // measured the distance themselves and dialed it in).
+      const distFt = isFinite(this.lastTagRangeFt) && this.lastTagRangeFt > 0
+        ? this.lastTagRangeFt
+        : this.lastDialFt;
+      // 10 rps/ft is the rio's _SHOOTER_RPS_PER_FOOT default. Operator
+      // can edit the row inline before saving — better than blank.
+      const rps = isFinite(this.lastDialFt) ? this.lastDialFt * 10.0 : 0;
+      if (!isFinite(distFt) || distFt <= 0) return;
+      this._add(distFt, rps);
+    });
+
+    this._load();
+  }
+
+  noteState(s) {
+    const t = s.target || {};
+    if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+      this.lastTagRangeFt = t.range_m / 0.3048;
+    } else {
+      this.lastTagRangeFt = NaN;
+    }
+    if (isFinite(s.dial_ft)) this.lastDialFt = s.dial_ft;
+  }
+
+  async _load() {
+    try {
+      const r = await fetch("/api/calibration");
+      const j = await r.json();
+      this._render(j.points || []);
+    } catch (e) { console.error(e); }
+  }
+
+  async _add(d, r) {
+    try {
+      const resp = await fetch("/api/calibration/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ distance_ft: d, rps: r }),
+      });
+      const j = await resp.json();
+      this._render(j.points || []);
+    } catch (e) { console.error(e); }
+  }
+
+  async _remove(d) {
+    try {
+      const resp = await fetch("/api/calibration/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ distance_ft: d }),
+      });
+      const j = await resp.json();
+      this._render(j.points || []);
+    } catch (e) { console.error(e); }
+  }
+
+  _render(points) {
+    this.body.innerHTML = "";
+    for (const p of points) {
+      const tr = document.createElement("tr");
+      const td1 = document.createElement("td");
+      td1.textContent = p.distance_ft.toFixed(2);
+      const td2 = document.createElement("td");
+      td2.textContent = p.rps.toFixed(1);
+      const td3 = document.createElement("td");
+      td3.style.textAlign = "right";
+      const del = document.createElement("button");
+      del.textContent = "remove";
+      del.className = "row-del";
+      del.addEventListener("click", () => this._remove(p.distance_ft));
+      td3.appendChild(del);
+      tr.append(td1, td2, td3);
+      this.body.appendChild(tr);
+    }
+  }
+}
+
+// ============================================================
+// Debug-console log tail (SSE on /api/logs)
+// ============================================================
+
+class LogConsole {
+  constructor() {
+    this.el = $("debug-log");
+    this.maxLines = 400;
+    this.start();
+  }
+
+  start() {
+    if (this._es) try { this._es.close(); } catch (_) {}
+    this._es = new EventSource("/api/logs");
+    this._es.onmessage = (ev) => {
+      try {
+        const entry = JSON.parse(ev.data);
+        this.append(entry);
+      } catch (_) {}
+    };
+    this._es.onerror = () => {
+      try { this._es.close(); } catch (_) {}
+      setTimeout(() => this.start(), 1500);
+    };
+  }
+
+  append(entry) {
+    const div = document.createElement("div");
+    div.className = `log-line lvl-${entry.level || "INFO"}`;
+    const ts = new Date((entry.ts || 0) * 1000)
+      .toTimeString().slice(0, 8);
+    const tsSpan = document.createElement("span");
+    tsSpan.className = "ts";
+    tsSpan.textContent = ts;
+    div.appendChild(tsSpan);
+    div.appendChild(document.createTextNode(entry.msg || ""));
+    this.el.appendChild(div);
+    while (this.el.childNodes.length > this.maxLines) {
+      this.el.removeChild(this.el.firstChild);
+    }
+    // Auto-scroll only if user is already at the bottom.
+    if (this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 40) {
+      this.el.scrollTop = this.el.scrollHeight;
+    }
+  }
+}
+
+// ============================================================
+// State SSE (one connection, all consumers fan out from here)
+// ============================================================
+
+class StateFeed {
+  constructor(consumers) {
+    this.consumers = consumers;
+    this.start();
+  }
+
+  start() {
+    if (this._es) try { this._es.close(); } catch (_) {}
+    this._es = new EventSource("/api/state");
+    this._es.onmessage = (ev) => {
+      let s;
+      try { s = JSON.parse(ev.data); } catch (e) { return; }
+      for (const c of this.consumers) {
+        try { c(s); } catch (e) { console.error(e); }
+      }
+    };
+    this._es.onerror = () => {
+      try { this._es.close(); } catch (_) {}
+      // Mark the rio status as disconnected immediately so the operator
+      // sees "rio disconnected" while we reconnect (1s backoff).
+      const rs = $("rio-status");
+      if (rs) {
+        rs.classList.remove("connected");
+        rs.classList.add("disconnected");
+        const txt = rs.querySelector(".rio-text");
+        if (txt) txt.textContent = "rio disconnected";
+      }
+      setTimeout(() => this.start(), 1000);
+    };
+  }
+}
+
+// ============================================================
+// Debug-tab switching
+// ============================================================
+
+function wireDebugTabs() {
+  $$(".debug-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const which = btn.dataset.tab;
+      $$(".debug-tab").forEach((b) => b.classList.toggle("active", b === btn));
+      $$(".debug-pane").forEach((p) => {
+        p.classList.toggle("active", p.dataset.pane === which);
+      });
+    });
+  });
+}
+
+// ============================================================
+// Stream FPS estimator
+// ============================================================
+
+function wireStreamFps() {
+  const stream = $("stream");
+  const target = $("s-stream-fps");
+  if (!stream || !target) return;
+  const window_ = [];
+  stream.addEventListener("load", () => {
+    const t = performance.now();
+    window_.push(t);
+    while (window_.length > 30) window_.shift();
+    if (window_.length > 1) {
+      const dt = (window_[window_.length - 1] - window_[0]) / 1000;
+      const fps = (window_.length - 1) / dt;
+      target.textContent = fps.toFixed(1);
+    }
+  });
+}
+
+// ============================================================
+// Bootstrap
+// ============================================================
+
+window.addEventListener("DOMContentLoaded", () => {
+  new WindowManager($("workspace"));
+  wireDebugTabs();
+  wireStreamFps();
+
+  const camera = new CameraPanel();
+  const stateView = new StateView(camera);
+  const calView = new CalibrationView();
+  new LogConsole();
+
+  new StateFeed([
+    (s) => stateView.apply(s),
+    (s) => calView.noteState(s),
+  ]);
 });
-
-// Local clock (uptime indicator).
-setInterval(() => {
-  const d = new Date();
-  $("ts").textContent = d.toLocaleTimeString();
-}, 1000);
-
-// Bootstrap.
-loadHealth();
-loadCalibration();
-startSSE();

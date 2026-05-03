@@ -121,10 +121,20 @@ if [ ! -f "$INSTALL_DIR/sight.env" ]; then
   cat > "$INSTALL_DIR/sight.env" <<EOF
 TEAM=${TEAM}
 CAMERA_DEVICE=/dev/video0
-CAMERA_WIDTH=1280
-CAMERA_HEIGHT=720
+# 640x480 is the universal hardware-MJPEG mode on USB cameras and gives
+# the AprilTag detector enough headroom to hit 30 fps end-to-end on the
+# Pi 5. Bump to 1280x720 if your camera + lens warrant it.
+CAMERA_WIDTH=640
+CAMERA_HEIGHT=480
 CAMERA_FPS=30
 HTTP_PORT=8080
+
+# Comma-separated AprilTag IDs that count as "the goal" by default. The
+# operator can override per-shot by clicking a tag in the UI.
+TARGET_TAG_IDS=3,4,7,8
+
+# Ready-to-fire bearing band — SHOOT only arms when |bearing| <= this.
+READY_BEARING_DEG=2.5
 EOF
 else
   # Replace TEAM= line so re-running with a new team picks up the change.

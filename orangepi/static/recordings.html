@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sight · Recordings</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="page-recordings">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚡</span>
+      <span class="brand-name">SIGHT</span>
+      <span class="brand-version">recordings</span>
+    </div>
+    <div class="status-line"></div>
+    <div class="topbar-right">
+      <a class="topbar-link topbar-link-back" href="/">dashboard</a>
+      <button class="ghost small" id="refresh-btn">refresh</button>
+    </div>
+  </header>
+  <main class="recordings-main">
+    <div class="recordings-meta" id="rec-meta">loading…</div>
+    <table class="rec-table">
+      <thead>
+        <tr><th>file</th><th>size</th><th>recorded</th><th></th></tr>
+      </thead>
+      <tbody id="rec-body"></tbody>
+    </table>
+    <div class="rec-empty" id="rec-empty" style="display:none">
+      no recordings yet — start one from the dashboard's record button
+    </div>
+  </main>
+  <script src="/static/modals.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function fmtBytes(n) {
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n/1024).toFixed(1)} KB`;
+      if (n < 1024 * 1024 * 1024) return `${(n/(1024*1024)).toFixed(1)} MB`;
+      return `${(n/(1024*1024*1024)).toFixed(2)} GB`;
+    }
+    function fmtTime(t) {
+      const d = new Date(t * 1000);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      const hh = String(d.getHours()).padStart(2,"0");
+      const mi = String(d.getMinutes()).padStart(2,"0");
+      const ss = String(d.getSeconds()).padStart(2,"0");
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+    }
+
+    async function load() {
+      $("rec-meta").textContent = "loading…";
+      try {
+        const r = await fetch("/api/recordings");
+        const j = await r.json();
+        const items = j.items || [];
+        $("rec-meta").textContent = `${items.length} recording${items.length === 1 ? "" : "s"} in ${j.dir}`;
+        $("rec-empty").style.display = items.length ? "none" : "";
+        const tbody = $("rec-body");
+        tbody.innerHTML = "";
+        for (const it of items) {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          const a = document.createElement("a");
+          a.href = `/recordings/${encodeURIComponent(it.name)}`;
+          a.textContent = it.name;
+          a.setAttribute("download", it.name);
+          tdName.appendChild(a);
+          const tdSize = document.createElement("td");
+          tdSize.className = "num";
+          tdSize.textContent = fmtBytes(it.size);
+          const tdMtime = document.createElement("td");
+          tdMtime.className = "num";
+          tdMtime.textContent = fmtTime(it.mtime);
+          const tdAct = document.createElement("td");
+          tdAct.style.textAlign = "right";
+          const dlBtn = document.createElement("a");
+          dlBtn.className = "primary tiny";
+          dlBtn.textContent = "download";
+          dlBtn.href = a.href;
+          dlBtn.setAttribute("download", it.name);
+          const delBtn = document.createElement("button");
+          delBtn.className = "danger tiny";
+          delBtn.textContent = "delete";
+          delBtn.addEventListener("click", async () => {
+            const ok = await cfConfirm(
+              `Delete ${it.name}?\n\nThis can't be undone.`,
+              { title: "Delete recording", ok: "Delete", danger: true },
+            );
+            if (!ok) return;
+            const dr = await fetch(`/api/recordings/${encodeURIComponent(it.name)}`, { method: "DELETE" });
+            if (!dr.ok) {
+              await cfAlert("Delete failed:\n\n" + (await dr.text()), { title: "Delete recording", kind: "error" });
+              return;
+            }
+            load();
+          });
+          tdAct.append(dlBtn, " ", delBtn);
+          tr.append(tdName, tdSize, tdMtime, tdAct);
+          tbody.appendChild(tr);
+        }
+      } catch (e) {
+        $("rec-meta").textContent = "error: " + e.message;
+      }
+    }
+    $("refresh-btn").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>

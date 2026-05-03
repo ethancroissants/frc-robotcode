@@ -13,16 +13,18 @@ End-to-end flow
    to BGR by libv4l2). One frame, one numpy array, no ffmpeg.
 2. cv2.aruco's ArucoDetector runs the AprilTag 36h11 detector on a
    downscaled grey copy of every frame. ~10–20 ms on a Pi 5.
-3. We pick the largest tag whose ID is in TARGET_TAG_IDS as the goal.
+3. Target selection:
+     - If the operator clicked a tag in the UI (selected_tag_id is set)
+       and that tag is visible, that tag wins.
+     - Otherwise we pick the largest tag whose ID is in TARGET_TAG_IDS.
+     - Otherwise no target.
 4. From the tag's pixel location + image size we compute:
      bearing_deg — signed angle of the tag from camera optical axis
                    (negative = left of center, positive = right)
      range_m    — distance from PnP (assumes a known tag side length)
-   The LaserCAN range is more accurate (active sensor, not derived from a
-   geometry estimate), so the rio prefers LaserCAN; the Pi-PnP range is a
-   fallback only.
 5. We publish target state continuously to NetworkTables under
-   /Sight/Target/*. The rio's AutoAim command reads these every cycle.
+   /Sight/Target/* (plus /Sight/Aim/Ready when the bot is on-target). The
+   rio's AutoAim command reads these every cycle.
 6. The browser SHOOT button POSTs /api/shoot, which bumps
    /Sight/Shoot/RequestId. The rio's button-press trigger watches that id
    and schedules AutoAim, which:
@@ -31,15 +33,13 @@ End-to-end flow
      - dials shooter RPS from the Pi's calibration lookup
      - fires
      - sets /Sight/DriverLockout=false on end
-7. The Pi also serves a calibration-table editor at /api/calibration.
-   Operators add (distance, rps) pairs from real shots; the table is
-   linearly interpolated and the resulting target RPS is published
-   continuously as /Sight/Aim/TargetRps.
+7. The Pi serves a calibration-table editor at /api/calibration, plus a
+   live debug-log feed at /api/logs and a click-to-target endpoint at
+   /api/target. The browser dashboard owns the windowing/UX; this file
+   only exposes data.
 
 The browser stream is the *same* numpy frames after we draw an overlay
-(target box, crosshair, range readout) and re-encode to JPEG. Slightly
-more CPU than the old ffmpeg passthrough, but worth it for the live
-target visualization.
+(target box, crosshair, range readout) and re-encode to JPEG.
 
 Run with: uvicorn server:app --host 0.0.0.0 --port 8080
 The systemd unit calls exactly that.
@@ -48,6 +48,7 @@ The systemd unit calls exactly that.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -69,20 +70,40 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 
+# ===== Version =====
+# Bumped on every meaningful change so the UI footer can prove the right
+# code is running. Kept in lockstep with start.py's version for the
+# Vision-Pi Setup wizard, but the Pi can be ahead/behind during a push.
+VERSION = "2.3.0"
+
+
 # ===== Config (env-overridable) =====
 TEAM = int(os.environ.get("TEAM", "1279"))
 NT_SERVER = os.environ.get("NT_SERVER", "")
 CAMERA_DEVICE = os.environ.get("CAMERA_DEVICE", "/dev/video0")
-CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "1280"))
-CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "720"))
+# 640x480 is the universal hardware-MJPEG mode on USB cameras and gives the
+# detector 2-3x more headroom than 720p — at 480p we comfortably hit 30 fps
+# end-to-end on the Pi 5 with cycles to spare. Bump if you're sure your
+# camera + Pi can hold it.
+CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "640"))
+CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "480"))
 CAMERA_FPS = int(os.environ.get("CAMERA_FPS", "30"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
 
-# Camera geometry. Used by the AprilTag PnP fallback to convert a tag's
-# pixel size to a metric range. Override via env if your camera has a
-# different field-of-view or you've solved a calibrated camera matrix.
+# Camera geometry. Overridden by cam_intrinsics.json if present (preferred —
+# real chessboard-calibrated K + dist coeffs give sub-degree bearings and
+# accurate range). The synthetic FOV path is a sane default for a fresh
+# install where no one has calibrated yet.
 CAMERA_HFOV_DEG = float(os.environ.get("CAMERA_HFOV_DEG", "60.0"))
 TAG_SIZE_M = float(os.environ.get("TAG_SIZE_M", "0.1651"))  # 6.5"
+
+# Bearing band that counts as "ready to fire". The flywheel is forgiving
+# in distance (calibration interpolates) but unforgiving in heading — so
+# we publish ready=True only when we're inside this many degrees of
+# centered. AutoAim has its own (tighter) tolerance for the actual fire,
+# but the operator UI uses this looser one for the "armed" indicator.
+READY_BEARING_DEG = float(os.environ.get("READY_BEARING_DEG", "2.5"))
+
 # JPEG encode quality for the browser stream. 75 is a good speed/quality
 # tradeoff on the Pi 5; drop to 60 if CPU pegs.
 STREAM_QUALITY = int(os.environ.get("STREAM_QUALITY", "75"))
@@ -90,10 +111,12 @@ STREAM_QUALITY = int(os.environ.get("STREAM_QUALITY", "75"))
 DETECT_EVERY = int(os.environ.get("DETECT_EVERY", "1"))
 # Downscale factor used only for detection (stream stays full res). Smaller
 # = faster detection at the cost of some accuracy on small/distant tags.
-DETECT_DOWNSCALE = float(os.environ.get("DETECT_DOWNSCALE", "0.5"))
-# Comma-separated list of tag IDs that count as "the goal". Override per
-# game/season. Default targets the 2024 Crescendo speaker tags so the
-# system is functional out of the box on a typical FRC field.
+# At 640x480 we run detection full-res by default — there's no headroom
+# pressure and corner refinement is more accurate without the resize.
+DETECT_DOWNSCALE = float(os.environ.get("DETECT_DOWNSCALE", "1.0"))
+# Comma-separated list of tag IDs that count as "the goal" by default.
+# Operator can override per-shot by clicking a tag in the UI; if no tag is
+# selected and none of the visible tags match this list, target=None.
 TARGET_TAG_IDS = {
     int(s.strip())
     for s in os.environ.get("TARGET_TAG_IDS", "3,4,7,8").split(",")
@@ -103,6 +126,28 @@ TARGET_TAG_IDS = {
 REPO = Path(__file__).resolve().parent
 STATIC_DIR = REPO / "static"
 CALIBRATION_PATH = REPO / "sight_calibration.json"
+INTRINSICS_PATH = REPO / "cam_intrinsics.json"
+# Range-scale multiplier — corrects systematic PnP-range error caused by
+# slightly-wrong camera intrinsics or tag size, as a single scalar.
+# Persists across restarts so the calibration survives reboots/re-pushes
+# (rsync without --delete leaves files not in source alone).
+RANGE_CAL_PATH = REPO / "range_calibration.json"
+
+# Recordings live OUTSIDE the install dir on purpose: the laptop's
+# "Set up / Update Vision Pi" wizard rsync's `orangepi/` over the
+# install dir on every push, so anything inside it would be wiped.
+# $HOME/cold-fusion-sight-recordings survives reinstalls.
+RECORDINGS_DIR = Path(
+    os.environ.get("CFS_RECORDINGS_DIR")
+    or (Path.home() / "cold-fusion-sight-recordings")
+)
+try:
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    # Fall back to a tmp path if HOME isn't writable. The endpoint will
+    # surface the failure rather than silently dropping recordings.
+    RECORDINGS_DIR = Path("/tmp/cold-fusion-sight-recordings")
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Default calibration if nothing on disk yet. Keep the floor at 0/0 so
 # interpolation is well-defined at any distance >= 0; clamp at the top.
@@ -115,8 +160,82 @@ DEFAULT_CALIBRATION = [
 ]
 _FOOT_TO_M = 0.3048
 
+
+# ===== In-memory log buffer =====
+# The debug-console panel in the UI tails this. Cap at a few hundred lines
+# so a runaway log loop can't OOM the Pi. Each entry is a dict ready to be
+# JSON-dumped — building it in the handler is cheaper than building it in
+# the SSE loop on every fetch.
+
+_LOG_RING: collections.deque = collections.deque(maxlen=500)
+_log_seq = 0
+_log_lock = threading.Lock()
+_log_cv = threading.Condition(_log_lock)
+
+
+class _RingHandler(logging.Handler):
+    """Tee log records into _LOG_RING. SSE consumers wake on _log_cv."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _log_seq
+        try:
+            text = self.format(record)
+        except Exception:
+            text = record.getMessage()
+        with _log_cv:
+            _log_seq += 1
+            _LOG_RING.append({
+                "seq": _log_seq,
+                "ts": record.created,
+                "level": record.levelname,
+                "name": record.name,
+                "msg": text,
+            })
+            _log_cv.notify_all()
+
+
+_ring_handler = _RingHandler()
+_ring_handler.setFormatter(logging.Formatter("%(message)s"))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger().addHandler(_ring_handler)
 log = logging.getLogger("sight")
+
+
+# ===== Camera intrinsics =====
+
+def _load_intrinsics() -> tuple[np.ndarray, np.ndarray, str]:
+    """Returns (K, dist_coeffs, source_label).
+
+    cam_intrinsics.json (preferred):
+      {"K": [[fx,0,cx],[0,fy,cy],[0,0,1]], "dist": [k1,k2,p1,p2,k3]}
+      OR flat: {"fx": ..., "fy": ..., "cx": ..., "cy": ..., "dist": [...]}
+
+    Synthesizes from CAMERA_HFOV_DEG if no file. Returns float64 arrays so
+    cv2.solvePnP doesn't have to upcast every frame.
+    """
+    if INTRINSICS_PATH.exists():
+        try:
+            data = json.loads(INTRINSICS_PATH.read_text())
+            if "K" in data:
+                K = np.array(data["K"], dtype=np.float64)
+            else:
+                K = np.array([
+                    [float(data["fx"]), 0.0, float(data["cx"])],
+                    [0.0, float(data["fy"]), float(data["cy"])],
+                    [0.0, 0.0, 1.0],
+                ], dtype=np.float64)
+            dist = np.array(data.get("dist", [0, 0, 0, 0, 0]), dtype=np.float64).flatten()
+            if dist.size < 5:
+                dist = np.concatenate([dist, np.zeros(5 - dist.size)])
+            return K, dist, f"calibrated ({INTRINSICS_PATH.name})"
+        except Exception as e:
+            log.warning("intrinsics load failed (%s); using FOV synthesis", e)
+    focal_x = (CAMERA_WIDTH / 2.0) / math.tan(math.radians(CAMERA_HFOV_DEG) / 2.0)
+    focal_y = focal_x  # square pixels assumption
+    cx, cy = CAMERA_WIDTH / 2.0, CAMERA_HEIGHT / 2.0
+    K = np.array([[focal_x, 0, cx], [0, focal_y, cy], [0, 0, 1]], dtype=np.float64)
+    return K, np.zeros(5, dtype=np.float64), f"synthetic (HFOV={CAMERA_HFOV_DEG:.1f}°)"
 
 
 # ===== Calibration table =====
@@ -226,25 +345,33 @@ class NTBridge:
 
     READ_DOUBLE = {
         "dial_ft": "/SmartDashboard/Tune/Shooter Distance (ft)",
-        "lasercan_m": "/SmartDashboard/Sight/LaserCAN/DistanceM",
     }
     READ_BOOL = {
-        "lasercan_valid": "/SmartDashboard/Sight/LaserCAN/Valid",
         "driver_lockout": "/SmartDashboard/Sight/DriverLockout",
         # Robot enabled state — rio publishes this from the matching robot
         # code; UI grays out controls when False so we can't fire while the
         # bot is disabled. Defaults True at the subscription so a fresh
         # setup doesn't soft-brick the UI before the rio publishes.
         "robot_enabled": "/SmartDashboard/Sight/RobotEnabled",
-        "btn_a": "/SmartDashboard/Sight/Buttons/A",
-        "btn_b": "/SmartDashboard/Sight/Buttons/B",
-        "btn_x": "/SmartDashboard/Sight/Buttons/X",
-        "btn_y": "/SmartDashboard/Sight/Buttons/Y",
-        "btn_lb": "/SmartDashboard/Sight/Buttons/LB",
-        "btn_rb": "/SmartDashboard/Sight/Buttons/RB",
+        # Operator stick (kept at the original /Sight/Buttons/* path for
+        # back-compat with older Pi/rio code).
+        "op_btn_a": "/SmartDashboard/Sight/Buttons/A",
+        "op_btn_b": "/SmartDashboard/Sight/Buttons/B",
+        "op_btn_x": "/SmartDashboard/Sight/Buttons/X",
+        "op_btn_y": "/SmartDashboard/Sight/Buttons/Y",
+        "op_btn_lb": "/SmartDashboard/Sight/Buttons/LB",
+        "op_btn_rb": "/SmartDashboard/Sight/Buttons/RB",
+        # Driver stick (new — rio publishes under /Sight/Buttons/Driver/*).
+        "dr_btn_a": "/SmartDashboard/Sight/Buttons/Driver/A",
+        "dr_btn_b": "/SmartDashboard/Sight/Buttons/Driver/B",
+        "dr_btn_x": "/SmartDashboard/Sight/Buttons/Driver/X",
+        "dr_btn_y": "/SmartDashboard/Sight/Buttons/Driver/Y",
+        "dr_btn_lb": "/SmartDashboard/Sight/Buttons/Driver/LB",
+        "dr_btn_rb": "/SmartDashboard/Sight/Buttons/Driver/RB",
     }
     READ_INT = {
-        "pov": "/SmartDashboard/Sight/Buttons/POV",
+        "op_pov": "/SmartDashboard/Sight/Buttons/POV",
+        "dr_pov": "/SmartDashboard/Sight/Buttons/Driver/POV",
     }
     READ_STR = {
         "aim_status": "/SmartDashboard/Sight/Aim/Status",
@@ -262,15 +389,27 @@ class NTBridge:
         "target_rps": "/SmartDashboard/Sight/Aim/TargetRps",
         # Manual dial setpoint, used by the on-screen +/- buttons.
         "shooter_dial_ft": "/SmartDashboard/Tune/Shooter Distance (ft)",
+        # Flywheel spin-up delay (seconds): how long AutoAim waits after
+        # commanding the wheel to spin up before pulling the trigger.
+        # Tunable from the calibrate page so we don't have to redeploy
+        # the rio to lengthen the settle window.
+        "spin_up_delay_s": "/SmartDashboard/Sight/Aim/SpinUpDelayS",
     }
     WRITE_INT = {
         "target_tag_id": "/SmartDashboard/Sight/Target/TagID",
         # Bumped on SHOOT button press; rio's trigger watches this for a
         # rising edge and schedules AutoAim.
         "shoot_request_id": "/SmartDashboard/Sight/Shoot/RequestId",
+        # Mirrors the operator's clicked-tag selection so other consumers
+        # (e.g. dashboards on other clients) can see what we're locked to.
+        "selected_tag_id": "/SmartDashboard/Sight/Target/SelectedID",
     }
     WRITE_BOOL = {
         "target_detected": "/SmartDashboard/Sight/Target/Detected",
+        # True when target is detected, bearing is inside READY_BEARING_DEG,
+        # robot is enabled, and AutoAim isn't already running. Rio can wire
+        # this to e.g. a controller rumble or a pre-fire indicator.
+        "target_ready": "/SmartDashboard/Sight/Aim/Ready",
     }
 
     def __init__(self) -> None:
@@ -315,19 +454,43 @@ class NTBridge:
 
         self._shoot_request_id = 0
 
+    def _sub_age_ms(self, sub: nt4_client.Subscriber) -> int | None:
+        """Time since this subscription's last update, in ms.
+
+        None means we've never received a value (so the rio-side publisher
+        is missing — distinct from "value is fresh and is False/0").
+        """
+        last_us = getattr(sub._state, "last_update_us", 0)
+        if not last_us:
+            return None
+        now_us = int(time.time() * 1_000_000)
+        return max(0, (now_us - last_us) // 1000)
+
     def snapshot(self) -> dict:
         snap: dict[str, object] = {"connected": self.inst.is_connected()}
+        ages: dict[str, int | None] = {}
         for key, sub in self._d_subs.items():
             snap[key] = sub.get()
+            ages[key] = self._sub_age_ms(sub)
         for key, sub in self._b_subs.items():
             snap[key] = sub.get()
+            ages[key] = self._sub_age_ms(sub)
         for key, sub in self._i_subs.items():
             snap[key] = sub.get()
+            ages[key] = self._sub_age_ms(sub)
         for key, sub in self._s_subs.items():
             snap[key] = sub.get()
+            ages[key] = self._sub_age_ms(sub)
+        snap["_ages_ms"] = ages
         return snap
 
-    def publish_target(self, det: "Detection | None", rps_hint: float | None) -> None:
+    def publish_spin_up_delay(self, seconds: float) -> None:
+        self._d_pubs["spin_up_delay_s"].set(float(seconds))
+
+    def publish_target(
+        self, det: "Detection | None", rps_hint: float | None,
+        ready: bool, selected_id: int | None,
+    ) -> None:
         """Push the current detection + RPS recommendation to NT.
 
         Called from the detection thread every detector tick. Always
@@ -349,6 +512,8 @@ class NTBridge:
             self._d_pubs["target_cx"].set(det.cx_norm)
             self._d_pubs["target_cy"].set(det.cy_norm)
             self._i_pubs["target_tag_id"].set(det.tag_id)
+        self._b_pubs["target_ready"].set(bool(ready))
+        self._i_pubs["selected_tag_id"].set(int(selected_id) if selected_id is not None else 0)
         if rps_hint is not None:
             self._d_pubs["target_rps"].set(float(rps_hint))
 
@@ -361,22 +526,122 @@ class NTBridge:
         self._d_pubs["shooter_dial_ft"].set(float(ft))
 
 
+# ===== Recording =====
+
+# Filename-safe identifier matcher. Recording filenames are returned as-is
+# in URLs, so we stamp them ourselves and reject anything else (no path
+# traversal, no shell metachars).
+import re as _re
+_FILENAME_RE = _re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+class Recording:
+    """One open MP4 writer fed by the CameraEngine.
+
+    Recording is intentionally a sink the engine pushes BGR frames to,
+    not a separate consumer thread — that way we record the *rendered*
+    frame (with overlay/crosshair/box drawn) and avoid a second copy.
+    Recording at the camera's frame rate; the writer is opened at the
+    actual capture size.
+
+    The first start() call may pick `mp4v`, `avc1`, or `MJPG` depending
+    on what the local OpenCV's ffmpeg backend supports — we fall through
+    until VideoWriter.isOpened() succeeds. MJPG-AVI is the universal
+    fallback (no external codec).
+    """
+
+    _CODECS = (
+        ("mp4", "mp4v"),  # MPEG-4 Part 2 — usually available
+        ("mp4", "avc1"),  # H.264 — sometimes available depending on build
+        ("avi", "MJPG"),  # always available
+    )
+
+    def __init__(self, dirpath: Path, fps: float, size: tuple[int, int]) -> None:
+        self.dirpath = dirpath
+        self.fps = max(1.0, float(fps))
+        self.size = (int(size[0]), int(size[1]))
+        self.path: Path | None = None
+        self.codec: str | None = None
+        self.started_at: float = 0.0
+        self.frames: int = 0
+        self._writer: cv2.VideoWriter | None = None
+        self._lock = threading.Lock()
+
+    def start(self) -> Path:
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        for ext, fourcc in self._CODECS:
+            path = self.dirpath / f"sight-{ts}.{ext}"
+            fcc = cv2.VideoWriter_fourcc(*fourcc)
+            writer = cv2.VideoWriter(str(path), fcc, self.fps, self.size)
+            if writer.isOpened():
+                self._writer = writer
+                self.path = path
+                self.codec = fourcc
+                self.started_at = time.time()
+                log.info("recording → %s (%s @ %.1f fps)", path.name, fourcc, self.fps)
+                return path
+            try: writer.release()
+            except Exception: pass
+        raise RuntimeError("no working VideoWriter codec — recording disabled")
+
+    def write(self, bgr: np.ndarray) -> None:
+        # Called from the camera thread; guard with a lock so a concurrent
+        # stop() can't release mid-write.
+        with self._lock:
+            if self._writer is None:
+                return
+            try:
+                self._writer.write(bgr)
+                self.frames += 1
+            except Exception as e:
+                log.warning("recording write failed: %s", e)
+
+    def stop(self) -> Path | None:
+        with self._lock:
+            if self._writer is None:
+                return None
+            try:
+                self._writer.release()
+            except Exception:
+                pass
+            self._writer = None
+            log.info(
+                "recording stopped: %s (%d frames, %.1fs)",
+                self.path.name if self.path else "?",
+                self.frames,
+                time.time() - self.started_at,
+            )
+            return self.path
+
+    def status(self) -> dict:
+        return {
+            "active": self._writer is not None,
+            "path": self.path.name if self.path else None,
+            "codec": self.codec,
+            "frames": self.frames,
+            "elapsed_s": (time.time() - self.started_at) if self.started_at else 0.0,
+            "size": list(self.size),
+            "fps": self.fps,
+        }
+
+
 # ===== Camera + AprilTag detection =====
 
 class Detection:
     __slots__ = ("tag_id", "bearing_deg", "range_m", "cx_norm", "cy_norm",
-                 "corners_px", "ts")
+                 "corners_px", "ts", "selected_locked")
 
     def __init__(self, tag_id: int, bearing_deg: float, range_m: float,
                  cx_norm: float, cy_norm: float, corners_px: np.ndarray,
-                 ts: float):
+                 ts: float, selected_locked: bool):
         self.tag_id = tag_id
         self.bearing_deg = bearing_deg
         self.range_m = range_m
         self.cx_norm = cx_norm
         self.cy_norm = cy_norm
-        self.corners_px = corners_px
+        self.corners_px = corners_px  # shape (4, 2), float pixels
         self.ts = ts
+        self.selected_locked = selected_locked  # operator clicked this tag
 
 
 class CameraEngine:
@@ -387,8 +652,8 @@ class CameraEngine:
     Stream consumers wait on a condition variable for the latest JPEG.
 
     Separating capture from detection isn't worth the complexity at our
-    rate (30 fps × 720p): the V4L2 read is bounded by the camera, and
-    detection at half-res fits inside one frame interval on a Pi 5.
+    rate (30 fps × 480p): the V4L2 read is bounded by the camera, and
+    detection at full-res fits inside one frame interval on a Pi 5.
     """
 
     def __init__(self, nt: NTBridge, calibration: Calibration) -> None:
@@ -399,14 +664,54 @@ class CameraEngine:
         self._latest_jpeg: bytes = b""
         self._frame_idx = 0
         self._latest_det: Detection | None = None
-        # All tag IDs visible in the latest detection tick (targeted or not).
-        # Lets the renderer draw non-targeted tags in a different color and
-        # the UI surface "we see IDs X, Y" so users debugging "no detection"
-        # can immediately see the detector IS working — they just need to
-        # update TARGET_TAG_IDS.
+        # All tag IDs visible in the latest detection tick (targeted or not),
+        # in image-pixel coords. Lets the renderer draw non-targeted tags in
+        # a different color, the UI surface "we see IDs X, Y" so users
+        # debugging "no detection" can immediately see the detector IS
+        # working, and the click-to-target hit-test work without re-running
+        # detection on the browser side.
         self._latest_all: list[tuple[int, np.ndarray]] = []
         self._cond = threading.Condition()
         self._frame_token = 0  # bumped each new JPEG; used to wake subscribers
+
+        # Operator's click-locked target (or None). When set, the tag with
+        # this ID becomes the chosen target whenever it's visible. If it
+        # drops out, target_detected goes False (the operator decides
+        # whether to clear or wait for it to come back) — we don't
+        # auto-fall-back to TARGET_TAG_IDS because that'd silently aim at a
+        # different tag than what the operator clicked.
+        self._selected_tag_id: int | None = None
+
+        # Active recording (or None). Owned by the camera thread; the API
+        # endpoints flip this on/off via start_recording/stop_recording
+        # which serialize through the engine lock.
+        self._recording: Recording | None = None
+        self._rec_lock = threading.Lock()
+
+        # Calibration mode. When `_calibrate_active` is True, _rps_hint_for
+        # returns `_manual_rps` instead of doing the table interpolation —
+        # so the operator can iterate RPS by hand on the calibrate page,
+        # fire, observe, log the row that worked, and move on.
+        # `_spin_up_delay_s` mirrors `/Sight/Aim/SpinUpDelayS` to NT every
+        # detection tick; AutoAim reads it for its flywheel-settle window.
+        self._calibrate_active = False
+        self._manual_rps: float = float(
+            os.environ.get("CFS_DEFAULT_MANUAL_RPS", "60.0")
+        )
+        self._spin_up_delay_s: float = float(
+            os.environ.get("CFS_DEFAULT_SPIN_UP_DELAY_S", "0.4")
+        )
+        # Multiplier applied to PnP-derived range. 1.0 = no correction.
+        # Loaded from RANGE_CAL_PATH on init (so it survives reboots);
+        # a single-shot calibration (true distance entered on the
+        # calibrate page) updates it via solve scale = true / measured.
+        self._range_scale: float = self._load_range_scale()
+
+        # Rolling FPS estimates for the debug panel.
+        self._fps_capture = 0.0
+        self._fps_detect = 0.0
+        self._last_capture_t = 0.0
+        self._last_detect_t = 0.0
 
         # Detector setup. The 36h11 family is what FRC standardized on in
         # 2023; opencv ships the dictionary built-in, no extra deps.
@@ -417,14 +722,10 @@ class CameraEngine:
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self._detector = cv2.aruco.ArucoDetector(dictionary, params)
 
-        # Synthetic camera matrix from FOV. If you want sub-degree bearings,
-        # replace this with values from cv2.calibrateCamera; the math here
-        # only needs focal_x, optical_center_x, and the equivalents in y.
-        focal_x = (CAMERA_WIDTH / 2.0) / math.tan(math.radians(CAMERA_HFOV_DEG) / 2.0)
-        focal_y = focal_x  # square pixels assumption
-        cx, cy = CAMERA_WIDTH / 2.0, CAMERA_HEIGHT / 2.0
-        self._K = np.array([[focal_x, 0, cx], [0, focal_y, cy], [0, 0, 1]], dtype=np.float64)
-        self._dist = np.zeros(5, dtype=np.float64)
+        # Real intrinsics if available; otherwise FOV synthesis. Logged at
+        # startup so the debug panel can show which path is in use.
+        self._K, self._dist, self.intrinsics_source = _load_intrinsics()
+        log.info("intrinsics: %s", self.intrinsics_source)
         # Object points for one tag, centered at origin in the tag's frame.
         # Order matches the corner order ArucoDetector returns
         # (top-left, top-right, bottom-right, bottom-left, looking at the tag).
@@ -432,6 +733,174 @@ class CameraEngine:
         self._tag_obj_points = np.array([
             [-s,  s, 0], [ s,  s, 0], [ s, -s, 0], [-s, -s, 0]
         ], dtype=np.float64)
+
+    # ----- selection (click-to-target) -----
+
+    def set_selected_tag(self, tag_id: int | None) -> None:
+        if tag_id is None:
+            if self._selected_tag_id is not None:
+                log.info("selected tag cleared")
+            self._selected_tag_id = None
+            return
+        if self._selected_tag_id != tag_id:
+            log.info("selected tag → #%d", tag_id)
+        self._selected_tag_id = int(tag_id)
+
+    def selected_tag_id(self) -> int | None:
+        return self._selected_tag_id
+
+    # ----- calibrate mode (manual RPS override + spin-up delay) -----
+
+    def set_calibrate_mode(self, active: bool) -> dict:
+        prev = self._calibrate_active
+        self._calibrate_active = bool(active)
+        if prev != self._calibrate_active:
+            log.info("calibrate mode → %s", "ON" if self._calibrate_active else "OFF")
+        return self.calibrate_status()
+
+    def set_manual_rps(self, rps: float) -> dict:
+        # Clamp to a sane envelope. 0..500 covers any FRC shooter; we want
+        # to refuse NaN / huge values that'd be a UI typo.
+        try:
+            v = float(rps)
+        except (TypeError, ValueError):
+            raise ValueError("rps must be a number")
+        if not math.isfinite(v):
+            raise ValueError("rps must be finite")
+        self._manual_rps = max(0.0, min(500.0, v))
+        return self.calibrate_status()
+
+    def set_spin_up_delay(self, seconds: float) -> dict:
+        try:
+            v = float(seconds)
+        except (TypeError, ValueError):
+            raise ValueError("seconds must be a number")
+        if not math.isfinite(v):
+            raise ValueError("seconds must be finite")
+        # Cap at 5s — anything longer is almost certainly a typo and
+        # blocks the entire firing pipeline. Floor at 0.
+        self._spin_up_delay_s = max(0.0, min(5.0, v))
+        return self.calibrate_status()
+
+    def calibrate_status(self) -> dict:
+        det = self._latest_det
+        # `last_range_m` is what _detect() produced this tick (already
+        # scale-applied). Surface the *unscaled* value too so the
+        # calibrate page can compute "you'd get X if scale were 1" if
+        # it ever wants to.
+        last_range_m = float(det.range_m) if det is not None else None
+        last_unscaled_range_m = (
+            (last_range_m / self._range_scale)
+            if (last_range_m is not None and self._range_scale > 0)
+            else None
+        )
+        return {
+            "active": self._calibrate_active,
+            "manual_rps": self._manual_rps,
+            "spin_up_delay_s": self._spin_up_delay_s,
+            "range_scale": self._range_scale,
+            "last_range_m": last_range_m,
+            "last_unscaled_range_m": last_unscaled_range_m,
+            "tag_id": int(det.tag_id) if det is not None else None,
+        }
+
+    # ----- range-scale persistence -----
+
+    def _load_range_scale(self) -> float:
+        try:
+            if RANGE_CAL_PATH.exists():
+                data = json.loads(RANGE_CAL_PATH.read_text())
+                v = float(data.get("scale", 1.0))
+                if math.isfinite(v) and 0.1 <= v <= 10.0:
+                    log.info("range_scale loaded from disk: %.4f", v)
+                    return v
+                log.warning("range_scale on disk out of range (%s); using 1.0", v)
+        except Exception as e:
+            log.warning("range_scale load failed (%s); using 1.0", e)
+        return 1.0
+
+    def _save_range_scale(self) -> None:
+        try:
+            RANGE_CAL_PATH.write_text(
+                json.dumps({"scale": self._range_scale}, indent=2) + "\n"
+            )
+        except Exception as e:
+            log.warning("range_scale save failed: %s", e)
+
+    def set_range_scale(self, scale: float) -> dict:
+        try:
+            v = float(scale)
+        except (TypeError, ValueError):
+            raise ValueError("scale must be a number")
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError("scale must be positive and finite")
+        # Clamp to a sane envelope. 0.1..10 covers any plausible
+        # intrinsics / tag-size error; outside that range the user
+        # should fix `cam_intrinsics.json` or `TAG_SIZE_M` instead.
+        v = max(0.1, min(10.0, v))
+        if abs(v - self._range_scale) > 1e-6:
+            log.info("range_scale: %.4f → %.4f", self._range_scale, v)
+            self._range_scale = v
+            self._save_range_scale()
+        return self.calibrate_status()
+
+    def calibrate_range_from_measurement(self, true_ft: float) -> dict:
+        """Solve a new range_scale from the current detection.
+
+        scale = (true distance) / (currently-reported, scale-applied distance)
+              = (true distance) / (measured-PnP * old-scale)
+
+        We compute against the live `range_m` (which has the previous
+        scale already baked in), so the new scale supersedes the old
+        one cleanly: applying it to the *unscaled* PnP value gives the
+        true distance.
+        """
+        try:
+            true_ft_v = float(true_ft)
+        except (TypeError, ValueError):
+            raise ValueError("true_ft must be a number")
+        if not math.isfinite(true_ft_v) or true_ft_v <= 0:
+            raise ValueError("true_ft must be positive")
+        det = self._latest_det
+        if det is None or det.range_m <= 0.05:
+            raise ValueError("no tag in view — aim at the target first")
+        true_m = true_ft_v * _FOOT_TO_M
+        # det.range_m is already scale-applied. We want:
+        #   new_scale * unscaled_pnp = true_m
+        #   unscaled_pnp = det.range_m / old_scale
+        #   ⇒ new_scale = true_m * old_scale / det.range_m
+        new_scale = true_m * self._range_scale / det.range_m
+        return self.set_range_scale(new_scale)
+
+    def reset_range_scale(self) -> dict:
+        return self.set_range_scale(1.0)
+
+    # ----- recording -----
+
+    def start_recording(self) -> dict:
+        with self._rec_lock:
+            if self._recording is not None:
+                return self._recording.status()
+            # Use the actual capture FPS we're achieving (clamped) — better
+            # than hard-coding CAMERA_FPS, which is the *requested* fps.
+            fps = self._fps_capture if self._fps_capture > 1 else float(CAMERA_FPS)
+            rec = Recording(RECORDINGS_DIR, fps=fps, size=(CAMERA_WIDTH, CAMERA_HEIGHT))
+            rec.start()
+            self._recording = rec
+            return rec.status()
+
+    def stop_recording(self) -> dict:
+        with self._rec_lock:
+            rec = self._recording
+            if rec is None:
+                return {"active": False}
+            path = rec.stop()
+            self._recording = None
+            return {"active": False, "path": path.name if path else None}
+
+    def recording_status(self) -> dict:
+        with self._rec_lock:
+            return self._recording.status() if self._recording else {"active": False}
 
     # ----- lifecycle -----
 
@@ -464,8 +933,9 @@ class CameraEngine:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._cap = cap
         log.info(
-            "camera open: %dx%d @ %d fps target_tags=%s",
+            "camera open: %dx%d @ %d fps target_tags=%s intrinsics=%s",
             CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS, sorted(TARGET_TAG_IDS),
+            self.intrinsics_source,
         )
         return True
 
@@ -485,47 +955,86 @@ class CameraEngine:
                 time.sleep(0.5)
                 continue
 
+            now = time.monotonic()
+            if self._last_capture_t > 0:
+                dt = now - self._last_capture_t
+                if dt > 1e-3:
+                    # EWMA — stable enough for a debug readout.
+                    self._fps_capture = 0.85 * self._fps_capture + 0.15 * (1.0 / dt)
+            self._last_capture_t = now
+
             self._frame_idx += 1
             det = self._latest_det
             if self._frame_idx % max(1, DETECT_EVERY) == 0:
+                t0 = time.monotonic()
                 det = self._detect(frame)
                 self._latest_det = det
+                if self._last_detect_t > 0:
+                    dt = t0 - self._last_detect_t
+                    if dt > 1e-3:
+                        self._fps_detect = 0.85 * self._fps_detect + 0.15 * (1.0 / dt)
+                self._last_detect_t = t0
                 # Publish target + recommended RPS to NT every detection
                 # tick — the rio sees the freshest values without any
                 # request/response.
                 rps_hint = self._rps_hint_for(det)
+                ready = self._compute_ready(det)
                 try:
-                    self.nt.publish_target(det, rps_hint)
+                    self.nt.publish_target(
+                        det, rps_hint, ready, self._selected_tag_id,
+                    )
+                    self.nt.publish_spin_up_delay(self._spin_up_delay_s)
                 except Exception as e:
                     log.warning("nt publish failed: %s", e)
 
             # Draw overlay + encode. We always re-encode (even if the
             # detection didn't run) so the stream stays smooth.
             jpeg = self._render(frame, det)
+            # If recording, capture the *rendered* frame (overlay + box +
+            # crosshair drawn). Reading after _render means the writer
+            # gets the same image the operator saw.
+            rec = self._recording
+            if rec is not None:
+                rec.write(frame)
             with self._cond:
                 self._latest_jpeg = jpeg
                 self._frame_token += 1
                 self._cond.notify_all()
 
+    def _compute_ready(self, det: "Detection | None") -> bool:
+        if det is None:
+            return False
+        if abs(det.bearing_deg) > READY_BEARING_DEG:
+            return False
+        # Don't claim ready while AutoAim is already running (it owns the
+        # heading PID; a "ready" indicator would be misleading).
+        if self.nt._b_subs["driver_lockout"].get():
+            return False
+        if not self.nt._b_subs["robot_enabled"].get():
+            return False
+        return True
+
     def _rps_hint_for(self, det: Detection | None) -> float | None:
-        # Prefer LaserCAN for distance — it's an active sensor; tag-PnP
-        # range degrades quickly past a few meters because tag pixel size
-        # is small and quantized.
-        snap_d = self.nt._d_subs["lasercan_m"].get()
-        snap_v = self.nt._b_subs["lasercan_valid"].get()
-        if snap_v and snap_d > 0.05:
-            distance_ft = snap_d / _FOOT_TO_M
-        elif det is not None and det.range_m > 0.05:
-            distance_ft = det.range_m / _FOOT_TO_M
-        else:
+        # Calibrate-mode override: publish the operator's hand-set RPS
+        # instead of the table lookup. When calibrating, the dashboard
+        # is iterating manual RPS values — we want SHOOT to fire at the
+        # value the operator picked, not at whatever the table says.
+        if self._calibrate_active:
+            return float(self._manual_rps)
+        # Distance comes from PnP on the visible tag. Accuracy drops past
+        # a few meters because tag pixel size shrinks; calibrate the
+        # camera (cam_intrinsics.json) for sub-degree bearings + better
+        # range at distance.
+        if det is None or det.range_m <= 0.05:
             return None
-        return self.calibration.lookup_rps(distance_ft)
+        return self.calibration.lookup_rps(det.range_m / _FOOT_TO_M)
 
     # ----- detection -----
 
     def _detect(self, bgr: np.ndarray) -> Detection | None:
-        # Detection runs on a downscaled grey copy — much faster, accuracy
-        # loss is small for tags occupying >30 px even after downscale.
+        # Detection runs on a downscaled grey copy when DETECT_DOWNSCALE<1.
+        # At 480p we run full-res by default — corner refinement is more
+        # accurate without the resize and we have CPU to spare.
         if DETECT_DOWNSCALE != 1.0:
             small = cv2.resize(bgr, None, fx=DETECT_DOWNSCALE, fy=DETECT_DOWNSCALE,
                                interpolation=cv2.INTER_AREA)
@@ -543,28 +1052,48 @@ class CameraEngine:
         scaled_corners = [c * scale for c in corners_list]
 
         # Cache every detected tag so the renderer + UI can show non-target
-        # detections in a different color. Critical for debugging "tags
-        # aren't being detected" — usually they ARE, but TARGET_TAG_IDS
-        # doesn't include the IDs the user is testing with.
+        # detections in a different color and so the click-to-target hit
+        # test on the browser side works against authoritative pixel coords.
         self._latest_all = [
-            (int(tid), c)
+            (int(tid), c.reshape(-1, 2).astype(np.float32))
             for tid, c in zip(ids.flatten().tolist(), scaled_corners)
         ]
 
-        candidates: list[tuple[int, np.ndarray]] = []
-        for tag_id, corners in zip(ids.flatten().tolist(), scaled_corners):
-            if not TARGET_TAG_IDS or int(tag_id) in TARGET_TAG_IDS:
-                candidates.append((int(tag_id), corners))
-        if not candidates:
-            return None
+        # Target selection:
+        # - If the operator clicked a tag (selected_tag_id is set), only
+        #   that tag can be the target. If it's not visible right now we
+        #   return None — DON'T silently fall back to TARGET_TAG_IDS or
+        #   we'd auto-aim at a different tag than what the operator
+        #   picked. The selection ID stays so the UI can show
+        #   "tag #7 — searching".
+        # - Otherwise (no manual lock), pick the largest tag whose ID is
+        #   in TARGET_TAG_IDS.
+        selected = self._selected_tag_id
+        chosen_corners: np.ndarray | None = None
+        chosen_id: int | None = None
+        chosen_locked = False
 
-        # "Best" target = largest area in pixels (closest / most reliable).
-        def area(c: np.ndarray) -> float:
-            return float(cv2.contourArea(c.reshape(-1, 2).astype(np.float32)))
-        tag_id, corners = max(candidates, key=lambda c: area(c[1]))
+        if selected is not None:
+            for tag_id, corners in self._latest_all:
+                if tag_id == selected:
+                    chosen_id = tag_id
+                    chosen_corners = corners
+                    chosen_locked = True
+                    break
+            if chosen_corners is None:
+                return None
+        else:
+            candidates = [
+                (tid, c) for tid, c in self._latest_all
+                if not TARGET_TAG_IDS or tid in TARGET_TAG_IDS
+            ]
+            if not candidates:
+                return None
+            def area(c: np.ndarray) -> float:
+                return float(cv2.contourArea(c.astype(np.float32)))
+            chosen_id, chosen_corners = max(candidates, key=lambda c: area(c[1]))
 
-        # Tag center in image-pixel coordinates.
-        pts = corners.reshape(-1, 2)
+        pts = chosen_corners.reshape(-1, 2)
         cx_px = float(pts[:, 0].mean())
         cy_px = float(pts[:, 1].mean())
 
@@ -586,24 +1115,35 @@ class CameraEngine:
             range_m = float(np.linalg.norm(tvec)) if ok else 0.0
         except Exception:
             range_m = 0.0
+        # Apply the user's range-scale correction. PnP-range error is
+        # multiplicative (caused by intrinsics or tag-size mis-spec, both
+        # of which scale linearly), so a single scalar fixes it. Default
+        # scale is 1.0 (no correction).
+        range_m *= self._range_scale
 
         return Detection(
-            tag_id=tag_id,
+            tag_id=int(chosen_id) if chosen_id is not None else 0,
             bearing_deg=bearing_deg,
             range_m=range_m,
             cx_norm=cx_px / CAMERA_WIDTH,
             cy_norm=cy_px / CAMERA_HEIGHT,
             corners_px=pts,
             ts=time.monotonic(),
+            selected_locked=chosen_locked,
         )
 
     # ----- rendering -----
 
     def _render(self, frame: np.ndarray, det: Detection | None) -> bytes:
-        # Center crosshair (always on).
+        # Center crosshair (always on). Color by ready-state so the operator
+        # gets a "good to fire" signal without taking eyes off the camera.
         h, w = frame.shape[:2]
-        cv2.line(frame, (w // 2, 0), (w // 2, h), (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.line(frame, (0, h // 2), (w, h // 2), (255, 255, 255), 1, cv2.LINE_AA)
+        if det is not None and abs(det.bearing_deg) <= READY_BEARING_DEG:
+            crosshair = (0, 255, 0)  # green = ready
+        else:
+            crosshair = (255, 255, 255)
+        cv2.line(frame, (w // 2, 0), (w // 2, h), crosshair, 1, cv2.LINE_AA)
+        cv2.line(frame, (0, h // 2), (w, h // 2), crosshair, 1, cv2.LINE_AA)
 
         # Draw every non-targeted detection first, in a muted orange, so
         # the user can see when the detector is working but their target
@@ -624,8 +1164,14 @@ class CameraEngine:
         if det is not None:
             color = (0, 212, 0) if (not TARGET_TAG_IDS or det.tag_id in TARGET_TAG_IDS) else (0, 165, 255)
             pts = det.corners_px.astype(np.int32).reshape(-1, 2)
+            thickness = 3 if det.selected_locked else 2
             cv2.polylines(frame, [pts], isClosed=True, color=color,
-                          thickness=2, lineType=cv2.LINE_AA)
+                          thickness=thickness, lineType=cv2.LINE_AA)
+            # Draw a dotted-style outline for operator-locked targets so it
+            # reads as "you picked this one" vs "auto-picked by ID list".
+            if det.selected_locked:
+                for i, p in enumerate(pts):
+                    cv2.circle(frame, tuple(p), 4, color, -1, cv2.LINE_AA)
             cx, cy = int(det.cx_norm * w), int(det.cy_norm * h)
             cv2.circle(frame, (cx, cy), 4, color, -1, cv2.LINE_AA)
             label = f"#{det.tag_id}  {det.bearing_deg:+.1f}°"
@@ -703,7 +1249,18 @@ async def stream_mjpg() -> StreamingResponse:
 
 @app.get("/api/state")
 async def api_state(request: Request) -> StreamingResponse:
-    """Server-Sent Events feed of robot + target state for the live HUD."""
+    """Server-Sent Events feed of robot + target state for the live HUD.
+
+    Includes:
+      - rio-side NT topics (with per-topic age in ms so the UI can dim
+        stale values rather than confidently displaying defaults)
+      - the chosen target detection (with image-pixel corners for the UI
+        to draw an overlay box that doesn't depend on the MJPEG arriving)
+      - every detected tag with image-pixel corners (for the click-to-
+        target hit-test on the browser)
+      - selected_tag_id (operator's locked tag, if any)
+      - image_size, recommended_rps, fps counters, version
+    """
     async def event_stream() -> AsyncIterator[str]:
         last_payload = ""
         # Cap how many times in a row we'll swallow a per-tick exception
@@ -715,6 +1272,10 @@ async def api_state(request: Request) -> StreamingResponse:
             try:
                 snap = nt.snapshot()
                 det = camera._latest_det
+                # Ready-to-fire is computed by the engine each detect tick;
+                # recompute here too so the SSE always has the latest
+                # value even when detection lags by one tick.
+                ready = camera._compute_ready(det)
                 if det is not None:
                     snap["target"] = {
                         "detected": True,
@@ -723,15 +1284,55 @@ async def api_state(request: Request) -> StreamingResponse:
                         "range_m": det.range_m,
                         "cx_norm": det.cx_norm,
                         "cy_norm": det.cy_norm,
+                        "corners_px": det.corners_px.tolist(),
+                        "selected_locked": det.selected_locked,
+                        "ready": ready,
                         "age_ms": int((time.monotonic() - det.ts) * 1000),
                     }
                 else:
-                    snap["target"] = {"detected": False}
+                    snap["target"] = {"detected": False, "ready": False}
                 snap["recommended_rps"] = camera._rps_hint_for(det)
-                # Surface every tag ID the detector saw this tick (target
-                # or not). Lets the UI show "seen: 14, 22" so users know
-                # the detector is working when no targeted tag is in view.
+                # Every tag the detector saw this tick. Browser uses this
+                # to hit-test clicks against authoritative pixel coords.
+                snap["all_tags"] = [
+                    {"tag_id": int(tid), "corners_px": c.tolist()}
+                    for tid, c in camera._latest_all
+                ]
                 snap["seen_tags"] = sorted({tid for tid, _ in camera._latest_all})
+                snap["selected_tag_id"] = camera.selected_tag_id()
+                snap["image_size"] = {"w": CAMERA_WIDTH, "h": CAMERA_HEIGHT}
+                snap["fps"] = {
+                    "capture": round(camera._fps_capture, 1),
+                    "detect": round(camera._fps_detect, 1),
+                }
+                snap["version"] = VERSION
+                snap["intrinsics_source"] = camera.intrinsics_source
+                snap["target_tag_ids"] = sorted(TARGET_TAG_IDS)
+                snap["ready_bearing_deg"] = READY_BEARING_DEG
+                # Reshape the flat op_*/dr_* button keys into per-stick
+                # blocks so the UI can render two panels with one loop.
+                # Older flat keys are dropped from the SSE shape — the UI
+                # was already going to be rewritten.
+                snap["operator"] = {
+                    "pov": snap.pop("op_pov", -1),
+                    "btn_a": snap.pop("op_btn_a", False),
+                    "btn_b": snap.pop("op_btn_b", False),
+                    "btn_x": snap.pop("op_btn_x", False),
+                    "btn_y": snap.pop("op_btn_y", False),
+                    "btn_lb": snap.pop("op_btn_lb", False),
+                    "btn_rb": snap.pop("op_btn_rb", False),
+                }
+                snap["driver"] = {
+                    "pov": snap.pop("dr_pov", -1),
+                    "btn_a": snap.pop("dr_btn_a", False),
+                    "btn_b": snap.pop("dr_btn_b", False),
+                    "btn_x": snap.pop("dr_btn_x", False),
+                    "btn_y": snap.pop("dr_btn_y", False),
+                    "btn_lb": snap.pop("dr_btn_lb", False),
+                    "btn_rb": snap.pop("dr_btn_rb", False),
+                }
+                snap["recording"] = camera.recording_status()
+                snap["calibrate"] = camera.calibrate_status()
                 payload = json.dumps(snap, default=float)
                 if payload != last_payload:
                     last_payload = payload
@@ -750,6 +1351,242 @@ async def api_state(request: Request) -> StreamingResponse:
             await asyncio.sleep(0.05)  # 20 Hz max
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/logs")
+async def api_logs(request: Request) -> StreamingResponse:
+    """Server-Sent Events feed of recent server log lines.
+
+    Sends the current ring buffer immediately on connect (so the panel
+    isn't blank), then waits on _log_cv for new entries. Each event is a
+    JSON object — see _RingHandler for the shape.
+    """
+    async def event_stream() -> AsyncIterator[str]:
+        # Snapshot the existing ring so we can deliver it before any new
+        # writes arrive. Using sequence numbers means we never resend the
+        # same line twice, even if the buffer wraps.
+        with _log_lock:
+            initial = list(_LOG_RING)
+            last_seq = initial[-1]["seq"] if initial else 0
+        for entry in initial:
+            if await request.is_disconnected():
+                return
+            yield f"data: {json.dumps(entry)}\n\n"
+
+        # Then poll for new entries. We can't use threading.Condition.wait
+        # directly from async code; run it in a thread executor.
+        loop = asyncio.get_running_loop()
+
+        def _wait_for_new(prev_seq: int, timeout: float) -> list[dict]:
+            with _log_cv:
+                _log_cv.wait_for(
+                    lambda: (_LOG_RING and _LOG_RING[-1]["seq"] > prev_seq),
+                    timeout=timeout,
+                )
+                return [e for e in _LOG_RING if e["seq"] > prev_seq]
+
+        while not await request.is_disconnected():
+            new_entries = await loop.run_in_executor(None, _wait_for_new, last_seq, 1.0)
+            for entry in new_entries:
+                yield f"data: {json.dumps(entry)}\n\n"
+                last_seq = entry["seq"]
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/target")
+async def api_target(payload: dict) -> JSONResponse:
+    """Set or clear the operator's locked target.
+
+    Body: {"tag_id": <int>} to lock onto a tag, or {"tag_id": null} to
+    fall back to TARGET_TAG_IDS-based selection.
+    """
+    raw = payload.get("tag_id") if isinstance(payload, dict) else None
+    if raw is None or raw == "" or (isinstance(raw, str) and raw.lower() == "null"):
+        camera.set_selected_tag(None)
+        return JSONResponse({"ok": True, "selected_tag_id": None})
+    try:
+        tag_id = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="tag_id must be int or null")
+    camera.set_selected_tag(tag_id)
+    return JSONResponse({"ok": True, "selected_tag_id": tag_id})
+
+
+@app.post("/api/record/start")
+async def api_record_start() -> JSONResponse:
+    """Start a new recording. No-op if already recording."""
+    try:
+        status = camera.start_recording()
+        return JSONResponse({"ok": True, **status})
+    except Exception as e:
+        log.exception("recording start failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/record/stop")
+async def api_record_stop() -> JSONResponse:
+    """Stop the active recording. No-op if nothing's recording."""
+    status = camera.stop_recording()
+    return JSONResponse({"ok": True, **status})
+
+
+@app.get("/api/record/status")
+async def api_record_status() -> JSONResponse:
+    return JSONResponse(camera.recording_status())
+
+
+@app.get("/api/recordings")
+async def api_recordings_list() -> JSONResponse:
+    """List recordings under RECORDINGS_DIR with size + mtime."""
+    out = []
+    try:
+        for p in sorted(RECORDINGS_DIR.iterdir(), key=lambda x: x.name, reverse=True):
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except Exception:
+                continue
+            out.append({
+                "name": p.name,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+            })
+    except FileNotFoundError:
+        pass
+    return JSONResponse({"dir": str(RECORDINGS_DIR), "items": out})
+
+
+@app.get("/recordings/{name}")
+async def api_recording_download(name: str) -> FileResponse:
+    """Download one recording. The filename is restricted to the safe
+    charset we generate ourselves — no slashes, no traversal."""
+    if not _FILENAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="bad filename")
+    path = RECORDINGS_DIR / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    # Resolve and re-check parent — defense in depth against symlink races.
+    try:
+        path = path.resolve()
+        if RECORDINGS_DIR.resolve() not in path.parents:
+            raise HTTPException(status_code=400, detail="bad path")
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad path")
+    # MP4 first; fall back on AVI.
+    media = "video/mp4" if path.suffix.lower() == ".mp4" else "video/x-msvideo"
+    return FileResponse(path, media_type=media, filename=name)
+
+
+@app.delete("/api/recordings/{name}")
+async def api_recording_delete(name: str) -> JSONResponse:
+    if not _FILENAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="bad filename")
+    path = RECORDINGS_DIR / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        path.unlink()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return JSONResponse({"ok": True})
+
+
+@app.get("/recordings.html")
+async def recordings_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "recordings.html")
+
+
+@app.get("/api/calibrate/status")
+async def api_calibrate_status() -> JSONResponse:
+    return JSONResponse(camera.calibrate_status())
+
+
+@app.post("/api/calibrate/mode")
+async def api_calibrate_mode(payload: dict) -> JSONResponse:
+    """Toggle calibrate mode. Body: {"active": true|false}.
+
+    When active, the Pi publishes the operator's `manual_rps` to
+    /Sight/Aim/TargetRps instead of the calibration-table interpolation.
+    SHOOT then fires at exactly that RPS — letting the operator iterate
+    by hand and log the row that worked.
+    """
+    active = bool(payload.get("active", False)) if isinstance(payload, dict) else False
+    return JSONResponse({"ok": True, **camera.set_calibrate_mode(active)})
+
+
+@app.post("/api/calibrate/rps")
+async def api_calibrate_rps(payload: dict) -> JSONResponse:
+    """Set the manual RPS override used while calibrate mode is active.
+
+    Body: {"rps": <number>}. Range is clamped to [0, 500].
+    """
+    if not isinstance(payload, dict) or "rps" not in payload:
+        raise HTTPException(status_code=400, detail="rps (number) required")
+    try:
+        return JSONResponse({"ok": True, **camera.set_manual_rps(payload["rps"])})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/calibrate/spin_up_delay")
+async def api_calibrate_spin_up_delay(payload: dict) -> JSONResponse:
+    """Set the flywheel spin-up delay AutoAim uses (seconds).
+
+    Body: {"seconds": <number>}. Range is clamped to [0, 5].
+    """
+    if not isinstance(payload, dict) or "seconds" not in payload:
+        raise HTTPException(status_code=400, detail="seconds (number) required")
+    try:
+        return JSONResponse({"ok": True, **camera.set_spin_up_delay(payload["seconds"])})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/calibrate/range/scale")
+async def api_calibrate_range_scale(payload: dict) -> JSONResponse:
+    """Set the PnP range-scale multiplier directly.
+
+    Body: {"scale": <number>}. Range is clamped to [0.1, 10]. Scale is
+    persisted to RANGE_CAL_PATH so it survives Pi restarts.
+    """
+    if not isinstance(payload, dict) or "scale" not in payload:
+        raise HTTPException(status_code=400, detail="scale (number) required")
+    try:
+        return JSONResponse({"ok": True, **camera.set_range_scale(payload["scale"])})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/calibrate/range/calibrate")
+async def api_calibrate_range_from_measurement(payload: dict) -> JSONResponse:
+    """Solve range_scale from one measurement.
+
+    Body: {"true_ft": <number>}. Operator stands at a known distance,
+    aims the camera at the goal tag, types in the actual distance — the
+    server uses the current (scale-applied) PnP range to compute
+    scale = true / measured and applies it. Persisted on success.
+
+    Errors with 400 if no tag is currently visible.
+    """
+    if not isinstance(payload, dict) or "true_ft" not in payload:
+        raise HTTPException(status_code=400, detail="true_ft (number) required")
+    try:
+        return JSONResponse({"ok": True, **camera.calibrate_range_from_measurement(payload["true_ft"])})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/calibrate/range/reset")
+async def api_calibrate_range_reset() -> JSONResponse:
+    """Reset range_scale to 1.0 (no correction). Persists."""
+    return JSONResponse({"ok": True, **camera.reset_range_scale()})
+
+
+@app.get("/calibrate.html")
+async def calibrate_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "calibrate.html")
 
 
 @app.post("/api/shoot")
@@ -826,9 +1663,12 @@ async def api_calibration_remove(payload: dict) -> JSONResponse:
 async def healthz() -> dict:
     return {
         "ok": True,
-        "nt_connected": nt.inst.isConnected(),
+        "version": VERSION,
+        "nt_connected": nt.inst.is_connected(),
         "target_tag_ids": sorted(TARGET_TAG_IDS),
         "calibration_points": len(calibration.points()),
+        "intrinsics_source": camera.intrinsics_source,
+        "image_size": {"w": CAMERA_WIDTH, "h": CAMERA_HEIGHT},
     }
 
 

@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sight · Calibrate</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="page-calibrate">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚡</span>
+      <span class="brand-name">SIGHT</span>
+      <span class="brand-version">calibrate</span>
+    </div>
+    <div class="rio-status" id="rio-status">
+      <span class="rio-dot" aria-hidden="true"></span>
+      <span class="rio-text">connecting…</span>
+    </div>
+    <div class="status-line">
+      <span id="cal-mode-pill" class="pill pill-bad">mode off</span>
+      <span id="cal-tag-pill" class="pill">no target</span>
+    </div>
+    <div class="topbar-right">
+      <a class="topbar-link topbar-link-back" href="/">dashboard</a>
+    </div>
+  </header>
+
+  <main class="calibrate-main">
+    <!-- ======== Camera + live target ======== -->
+    <section class="cal-card cal-camera-card">
+      <div class="cal-card-h">Camera</div>
+      <div class="cal-camera">
+        <img src="/stream.mjpg" alt="camera feed" draggable="false" />
+      </div>
+      <div class="cal-target-grid">
+        <div class="kv"><span class="k">tag</span><span class="v" id="c-tag">—</span></div>
+        <div class="kv"><span class="k">range (ft)</span><span class="v" id="c-range-ft">—</span></div>
+        <div class="kv"><span class="k">range (m)</span><span class="v" id="c-range-m">—</span></div>
+        <div class="kv"><span class="k">bearing</span><span class="v" id="c-bearing">—</span></div>
+      </div>
+    </section>
+
+    <!-- ======== Range calibration ======== -->
+    <section class="cal-card">
+      <div class="cal-card-h">AprilTag range calibration</div>
+      <p class="cal-help">
+        The Pi's range comes from solving the tag's geometry against
+        the camera intrinsics. If those are slightly off (the default
+        FOV-synthesized intrinsics often are), every reading is off by
+        the same factor. <strong>Stand at a known distance, aim at the
+        tag, type the actual distance below, and click Calibrate</strong>
+        — the server solves the correction in one shot. Persists across
+        restarts. Reset to 1.0 to remove all correction.
+      </p>
+
+      <div class="cal-range-row">
+        <div class="kv"><span class="k">live tag range</span><span class="v" id="c-range-current">—</span></div>
+        <div class="kv"><span class="k">if uncorrected</span><span class="v" id="c-range-raw">—</span></div>
+        <div class="kv"><span class="k">scale</span><span class="v" id="c-range-scale">1.0000</span></div>
+      </div>
+
+      <div class="cal-rps-row">
+        <label for="c-true-dist" class="cal-input-label">true distance (ft)</label>
+        <input type="number" id="c-true-dist" step="0.1" min="0" placeholder="ft" />
+        <button class="primary tiny" id="c-range-cal-btn">calibrate from this</button>
+        <button class="ghost small" id="c-range-reset-btn" title="Reset scale to 1.0 (no correction)">reset to 1.0</button>
+      </div>
+      <div class="cal-log-hint" id="c-range-hint"></div>
+    </section>
+
+    <!-- ======== Calibrate controls ======== -->
+    <section class="cal-card">
+      <div class="cal-card-h">Manual RPS override</div>
+      <p class="cal-help">
+        Turn on <strong>calibrate mode</strong> and the Pi publishes the
+        manual RPS below to the rio instead of the table-interpolated
+        value. Press <strong>Fire</strong>, watch where the ball lands,
+        adjust, repeat. When you find an RPS that scores at this
+        distance, click <strong>Log this point</strong>.
+      </p>
+      <div class="cal-mode-row">
+        <label class="cal-toggle">
+          <input type="checkbox" id="c-mode-toggle" />
+          <span class="cal-toggle-track"><span class="cal-toggle-knob"></span></span>
+          <span class="cal-toggle-label">calibrate mode</span>
+        </label>
+        <span class="cal-mode-hint" id="c-mode-hint">when off, SHOOT uses the table</span>
+      </div>
+
+      <div class="cal-rps-row">
+        <label for="c-rps-input" class="cal-input-label">manual RPS</label>
+        <input type="number" id="c-rps-input" step="0.5" min="0" max="500" value="60.0" />
+        <div class="cal-bumpers">
+          <button class="ghost square" data-rps="-1">−1</button>
+          <button class="ghost square" data-rps="-0.5">−½</button>
+          <button class="ghost square" data-rps="+0.5">+½</button>
+          <button class="ghost square" data-rps="+1">+1</button>
+        </div>
+      </div>
+
+      <div class="cal-rps-row">
+        <label for="c-spin-input" class="cal-input-label">spin-up delay (s)</label>
+        <input type="number" id="c-spin-input" step="0.05" min="0" max="5" value="0.40" />
+        <span class="cal-input-hint">how long AutoAim waits after commanding the wheel before firing</span>
+      </div>
+
+      <button class="primary cal-fire-btn" id="c-fire-btn">FIRE</button>
+      <div class="cal-aim-status" id="c-aim-status">aim status: idle</div>
+    </section>
+
+    <!-- ======== Log a point ======== -->
+    <section class="cal-card">
+      <div class="cal-card-h">Log this point</div>
+      <p class="cal-help">
+        Captures the (distance, RPS) pair as a new row in the
+        calibration table. Distance defaults to the live tag range —
+        edit it if your tape measure disagrees.
+      </p>
+      <div class="cal-log-row">
+        <label class="cal-input-label">distance (ft)</label>
+        <input type="number" id="c-log-dist" step="0.1" min="0" placeholder="ft" />
+        <button class="ghost small" id="c-log-use-tag" title="Copy live tag-PnP range into this field">use tag range</button>
+      </div>
+      <div class="cal-log-row">
+        <label class="cal-input-label">rps</label>
+        <input type="number" id="c-log-rps" step="0.5" min="0" placeholder="rps" />
+        <button class="ghost small" id="c-log-use-manual" title="Copy current manual RPS into this field">use manual</button>
+      </div>
+      <button class="primary" id="c-log-btn">Log this point</button>
+      <div class="cal-log-hint" id="c-log-hint"></div>
+    </section>
+
+    <!-- ======== Existing table ======== -->
+    <section class="cal-card cal-table-card">
+      <div class="cal-card-h">Calibration table
+        <a class="cal-link" href="/" title="Open the main dashboard's Calibration panel for the same data">on dashboard →</a>
+      </div>
+      <table class="cal-table">
+        <thead><tr><th>distance (ft)</th><th>rps</th><th></th></tr></thead>
+        <tbody id="c-cal-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/modals.js"></script>
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+
+    // ======== State + helpers ========
+    let calMode = false;
+    let manualRps = 60.0;
+    let spinUpDelay = 0.4;
+    let lastTagRangeFt = NaN;
+
+    function setRio(connected) {
+      const el = $("rio-status");
+      el.classList.toggle("connected", connected);
+      el.classList.toggle("disconnected", !connected);
+      el.querySelector(".rio-text").textContent = connected ? "rio link up" : "rio disconnected";
+    }
+    function setCalPill(active) {
+      const el = $("cal-mode-pill");
+      el.textContent = active ? "MODE ON" : "mode off";
+      // Off = neutral grey (it's an inactive state, not an error). On =
+      // warn (yellow) to match the dashboard's calibrate-mode pill.
+      el.className = "pill " + (active ? "pill-warn" : "");
+    }
+    function setCalUI(active) {
+      // Single source of truth for "the page reflects calibrate mode = X".
+      // Called both from the toggle handler (optimistic) and applyState
+      // (server-authoritative) so all three visible elements (pill,
+      // checkbox, hint) flip in lockstep — no lag between them.
+      calMode = !!active;
+      setCalPill(calMode);
+      $("c-mode-toggle").checked = calMode;
+      $("c-mode-hint").textContent = calMode
+        ? "ON — FIRE shoots at manual RPS"
+        : "off — SHOOT uses the calibration table";
+    }
+    function setTagPill(detected, tagId) {
+      const el = $("cal-tag-pill");
+      if (detected) {
+        el.textContent = `lock #${tagId}`;
+        el.className = "pill pill-good";
+      } else {
+        el.textContent = "no target";
+        el.className = "pill";
+      }
+    }
+
+    // ======== Manual RPS / spin-up delay → server ========
+    let _rpsPostTimer = null;
+    function postManualRps(v) {
+      manualRps = v;
+      if (_rpsPostTimer) clearTimeout(_rpsPostTimer);
+      _rpsPostTimer = setTimeout(async () => {
+        try {
+          await fetch("/api/calibrate/rps", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rps: v }),
+          });
+        } catch (e) { console.error(e); }
+      }, 60);
+    }
+    let _spinPostTimer = null;
+    function postSpinUpDelay(v) {
+      spinUpDelay = v;
+      if (_spinPostTimer) clearTimeout(_spinPostTimer);
+      _spinPostTimer = setTimeout(async () => {
+        try {
+          await fetch("/api/calibrate/spin_up_delay", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ seconds: v }),
+          });
+        } catch (e) { console.error(e); }
+      }, 60);
+    }
+
+    $("c-rps-input").addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      if (isFinite(v) && v >= 0) postManualRps(v);
+    });
+    document.querySelectorAll("[data-rps]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const delta = parseFloat(btn.dataset.rps);
+        const cur = parseFloat($("c-rps-input").value) || 0;
+        const next = Math.max(0, Math.round((cur + delta) * 10) / 10);
+        $("c-rps-input").value = next.toFixed(1);
+        postManualRps(next);
+      });
+    });
+    $("c-spin-input").addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      if (isFinite(v) && v >= 0 && v <= 5) postSpinUpDelay(v);
+    });
+
+    // ======== Range calibration ========
+    function showRangeHint(text, kind) {
+      const el = $("c-range-hint");
+      el.textContent = text;
+      el.className = "cal-log-hint" + (kind ? " " + kind : "");
+      if (text) setTimeout(() => {
+        if (el.textContent === text) { el.textContent = ""; el.className = "cal-log-hint"; }
+      }, 5000);
+    }
+    $("c-range-cal-btn").addEventListener("click", async () => {
+      const trueFt = parseFloat($("c-true-dist").value);
+      if (!isFinite(trueFt) || trueFt <= 0) {
+        showRangeHint("type a positive distance in feet first", "err");
+        $("c-true-dist").focus();
+        return;
+      }
+      try {
+        const r = await fetch("/api/calibrate/range/calibrate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ true_ft: trueFt }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        const newScale = j.range_scale;
+        showRangeHint(`scale → ${newScale.toFixed(4)} (range readings now match ${trueFt.toFixed(2)} ft) ✓`, "ok");
+      } catch (err) {
+        showRangeHint("calibrate failed: " + (err.message || err), "err");
+      }
+    });
+    $("c-range-reset-btn").addEventListener("click", async () => {
+      const ok = await cfConfirm(
+        "Reset range scale to 1.0?\n\nAll PnP range readings will revert to raw values.",
+        { title: "Reset range calibration", ok: "Reset", danger: true },
+      );
+      if (!ok) return;
+      try {
+        const r = await fetch("/api/calibrate/range/reset", { method: "POST" });
+        if (!r.ok) throw new Error(await r.text());
+        showRangeHint("scale reset to 1.0", "ok");
+      } catch (err) {
+        showRangeHint("reset failed: " + (err.message || err), "err");
+      }
+    });
+
+    // ======== Calibrate mode toggle ========
+    // Optimistic UI: reflect the new state immediately so the pill +
+    // hint stay in lockstep with the checkbox even before the POST
+    // round-trip + next SSE tick. Revert on failure.
+    $("c-mode-toggle").addEventListener("change", async (e) => {
+      const active = e.target.checked;
+      setCalUI(active);
+      try {
+        const r = await fetch("/api/calibrate/mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ active }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (err) {
+        console.error(err);
+        setCalUI(!active);
+      }
+    });
+
+    // ======== Fire ========
+    $("c-fire-btn").addEventListener("click", async () => {
+      if (!calMode) {
+        const ok = await cfConfirm(
+          "Calibrate mode is OFF.\n\nSHOOT will fire at the table-interpolated RPS for the current distance, not the manual RPS you typed.\n\nFire anyway?",
+          { title: "Calibrate mode off", ok: "Fire anyway", danger: true },
+        );
+        if (!ok) return;
+      }
+      try {
+        const r = await fetch("/api/shoot", { method: "POST" });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (err) {
+        console.error(err);
+        cfAlert("Fire failed:\n\n" + err.message, { title: "Fire", kind: "error" });
+      }
+    });
+
+    // ======== Log point ========
+    $("c-log-use-tag").addEventListener("click", () => {
+      if (isFinite(lastTagRangeFt) && lastTagRangeFt > 0) {
+        $("c-log-dist").value = lastTagRangeFt.toFixed(2);
+      }
+    });
+    $("c-log-use-manual").addEventListener("click", () => {
+      $("c-log-rps").value = manualRps.toFixed(1);
+    });
+    $("c-log-btn").addEventListener("click", async () => {
+      const d = parseFloat($("c-log-dist").value);
+      const r = parseFloat($("c-log-rps").value);
+      if (!isFinite(d) || d < 0 || !isFinite(r) || r < 0) {
+        $("c-log-hint").textContent = "fill in both distance and rps";
+        return;
+      }
+      try {
+        const resp = await fetch("/api/calibration/add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ distance_ft: d, rps: r }),
+        });
+        const j = await resp.json();
+        renderCalTable(j.points || []);
+        $("c-log-hint").textContent = `logged ${d.toFixed(2)} ft → ${r.toFixed(1)} rps ✓`;
+        // Auto-clear hint after a moment so it doesn't read as a permanent label.
+        setTimeout(() => { $("c-log-hint").textContent = ""; }, 4000);
+      } catch (err) {
+        $("c-log-hint").textContent = "log failed: " + err.message;
+      }
+    });
+
+    // ======== Calibration table render ========
+    function renderCalTable(points) {
+      const tbody = $("c-cal-body");
+      tbody.innerHTML = "";
+      for (const p of points) {
+        const tr = document.createElement("tr");
+        const td1 = document.createElement("td");
+        td1.textContent = p.distance_ft.toFixed(2);
+        const td2 = document.createElement("td");
+        td2.textContent = p.rps.toFixed(1);
+        const td3 = document.createElement("td");
+        td3.style.textAlign = "right";
+        const del = document.createElement("button");
+        del.className = "row-del";
+        del.textContent = "remove";
+        del.addEventListener("click", async () => {
+          const resp = await fetch("/api/calibration/remove", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ distance_ft: p.distance_ft }),
+          });
+          const j = await resp.json();
+          renderCalTable(j.points || []);
+        });
+        td3.appendChild(del);
+        tr.append(td1, td2, td3);
+        tbody.appendChild(tr);
+      }
+    }
+    async function loadCalTable() {
+      try {
+        const r = await fetch("/api/calibration");
+        const j = await r.json();
+        renderCalTable(j.points || []);
+      } catch (e) { console.error(e); }
+    }
+
+    // ======== SSE state feed ========
+    function applyState(s) {
+      setRio(!!s.connected);
+      const t = s.target || { detected: false };
+      setTagPill(t.detected, t.tag_id);
+      $("c-tag").textContent     = t.detected ? `#${t.tag_id}` : "—";
+      $("c-bearing").textContent = (t.detected && isFinite(t.bearing_deg))
+          ? `${t.bearing_deg >= 0 ? "+" : ""}${t.bearing_deg.toFixed(1)}°` : "—";
+      if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+        const ft = t.range_m / 0.3048;
+        lastTagRangeFt = ft;
+        $("c-range-ft").textContent = ft.toFixed(2);
+        $("c-range-m").textContent  = t.range_m.toFixed(2);
+      } else {
+        lastTagRangeFt = NaN;
+        $("c-range-ft").textContent = "—";
+        $("c-range-m").textContent  = "—";
+      }
+
+      // aim-status mirror
+      const raw = String(s.aim_status || "idle").toLowerCase();
+      $("c-aim-status").textContent = `aim status: ${raw.replace(/_/g, " ")}`;
+
+      // calibrate state — only sync inputs from server when the user
+      // isn't actively typing in them, so we don't fight their cursor.
+      const c = s.calibrate || { active: false };
+      // setCalUI is the single source of truth — pill, checkbox, hint
+      // all updated together. (Toggle handler also calls this for
+      // optimistic UI; this call is the server-authoritative one.)
+      setCalUI(!!c.active);
+
+      const rpsEl = $("c-rps-input");
+      if (document.activeElement !== rpsEl && isFinite(c.manual_rps)) {
+        rpsEl.value = Number(c.manual_rps).toFixed(1);
+        manualRps = c.manual_rps;
+      }
+      const spinEl = $("c-spin-input");
+      if (document.activeElement !== spinEl && isFinite(c.spin_up_delay_s)) {
+        spinEl.value = Number(c.spin_up_delay_s).toFixed(2);
+        spinUpDelay = c.spin_up_delay_s;
+      }
+
+      // Range-calibration readouts.
+      const rs = isFinite(c.range_scale) ? c.range_scale : 1.0;
+      $("c-range-scale").textContent = rs.toFixed(4) + (Math.abs(rs - 1.0) < 1e-4 ? " (no correction)" : "");
+      if (isFinite(c.last_range_m) && c.last_range_m > 0) {
+        const ft = c.last_range_m / 0.3048;
+        $("c-range-current").textContent = `${ft.toFixed(2)} ft (${c.last_range_m.toFixed(2)} m)`;
+      } else {
+        $("c-range-current").textContent = "—";
+      }
+      if (isFinite(c.last_unscaled_range_m) && c.last_unscaled_range_m > 0
+          && Math.abs(rs - 1.0) > 1e-4) {
+        const ft = c.last_unscaled_range_m / 0.3048;
+        $("c-range-raw").textContent = `${ft.toFixed(2)} ft (raw PnP)`;
+      } else {
+        $("c-range-raw").textContent = "—";
+      }
+    }
+
+    function startSSE() {
+      const es = new EventSource("/api/state");
+      es.onmessage = (ev) => {
+        try { applyState(JSON.parse(ev.data)); } catch (e) { console.error(e); }
+      };
+      es.onerror = () => {
+        try { es.close(); } catch (_) {}
+        setRio(false);
+        setTimeout(startSSE, 1000);
+      };
+    }
+
+    // Bootstrap.
+    loadCalTable();
+    startSSE();
+  </script>
+</body>
+</html>
