@@ -9,6 +9,7 @@ with the freshly-pulled code. (If the user closes the window without
 clicking, we respawn anyway so they're never left stranded.)
 """
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -58,9 +59,30 @@ def _spawn_start() -> None:
         # Strip the restart flag so the new panel doesn't propagate it.
         env = dict(os.environ)
         env.pop("CFR_RESTART_AFTER_UPDATE", None)
-        subprocess.Popen(
-            [sys.executable, str(start_py)], cwd=str(REPO_DIR), env=env,
-        )
+        if sys.platform == "darwin":
+            # On macOS a plain Popen of the Tk launcher gets hidden by the
+            # window server (no LaunchServices/dock activation context) and
+            # the panel silently never appears. Routing through Terminal.app
+            # via osascript gives the relaunched python a real shell parent,
+            # so its Tk window actually shows up. The shell command matches
+            # the standard "run in Terminal" pattern: cd, run, echo exit,
+            # exit so the Terminal tab can close itself.
+            shell_cmd = (
+                f"cd {shlex.quote(str(REPO_DIR))} && "
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(start_py))} && "
+                f"echo Exit status: $? && exit 1"
+            )
+            # AppleScript double-quoted string: escape backslashes and quotes.
+            safe = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+            osa = (
+                f'tell application "Terminal" to do script "{safe}"\n'
+                'tell application "Terminal" to activate'
+            )
+            subprocess.Popen(["osascript", "-e", osa])
+        else:
+            subprocess.Popen(
+                [sys.executable, str(start_py)], cwd=str(REPO_DIR), env=env,
+            )
     except Exception:
         pass
 

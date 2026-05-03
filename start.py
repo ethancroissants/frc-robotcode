@@ -58,6 +58,20 @@ DEFAULT_TEAM = "1279"
 ROBOT_SSID = "FRC-1279"
 STATUS_POLL_MS = 5000
 
+# Detected OS — used to gate Windows-only actions (Driver Station, netsh
+# WiFi, firewall) and to surface "what platform am I on?" in the header.
+# `platform.system()` returns "Darwin" on macOS, which we prettify for the UI.
+OS_NAME = platform.system()
+OS_DISPLAY = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(OS_NAME, OS_NAME)
+IS_WINDOWS = OS_NAME == "Windows"
+
+# Cards that only do anything useful on Windows — Connect/Disconnect drive
+# netsh, the FRC Driver Station, and elevated firewall toggles, none of
+# which exist on macOS/Linux. We grey them out instead of hiding so users
+# on other OSes can see what's missing rather than wondering why the menu
+# looks different on the team Windows laptop.
+WINDOWS_ONLY_CARD_IDS = {"connect", "disconnect"}
+
 
 def _build_version() -> str:
     """Monotonic build version derived from git history.
@@ -499,6 +513,17 @@ def main() -> int:
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 10),
+    ).pack(anchor="w", pady=(1, 0))
+    os_text = f"Detected OS: {OS_DISPLAY}"
+    if not IS_WINDOWS:
+        os_text += " — some Windows-only actions disabled"
+    tk.Label(
+        htitles,
+        text=os_text,
+        bg=PANEL,
+        fg=DIM if IS_WINDOWS else FAIL_COLOR,
+        font=("Helvetica", 9),
+        anchor="w",
     ).pack(anchor="w", pady=(1, 0))
 
     # Live connection indicators. Each dot recolors as we re-poll every
@@ -985,11 +1010,13 @@ def main() -> int:
                 "Connect",
                 "Disable firewall, join FRC-1279 WiFi, and ping the robot.",
                 _prep_bot_clicked,
+                "connect",
             ),
             (
                 "Disconnect",
                 "Re-enable firewall and leave the robot WiFi.",
                 _disconnect_clicked,
+                "disconnect",
             ),
             (
                 "SSH to Robot",
@@ -1054,6 +1081,11 @@ def main() -> int:
             #   - pi_setup is always enabled (it's the entry point + updater)
             disabled_ids = {"ssh", "wipe", "pi_open", "pi_ssh"}
             initial_enabled = card_id not in disabled_ids
+            # On non-Windows, hard-disable Windows-only cards and rewrite
+            # their subtitle so the user sees *why* they're greyed out.
+            if not IS_WINDOWS and card_id in WINDOWS_ONLY_CARD_IDS:
+                subtitle = f"Windows only — needs netsh, FRC Driver Station, and elevated firewall control."
+                initial_enabled = False
             card = Card(grid, title, subtitle, cmd, enabled=initial_enabled)
             card.grid(row=j // 2, column=j % 2, sticky="nsew", padx=4, pady=4)
             if card_id:
