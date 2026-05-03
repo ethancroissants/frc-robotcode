@@ -39,12 +39,12 @@ const GRID = 24;
 const snap = (v) => Math.round(v / GRID) * GRID;
 
 function fmt(v, digits, unit) {
-  if (v == null || !isFinite(v)) return unit ? `—` : "—";
+  if (v == null || !Number.isFinite(v)) return unit ? `—` : "—";
   return `${v.toFixed(digits)}${unit ? unit : ""}`;
 }
 
 function signFmt(v, digits) {
-  if (v == null || !isFinite(v)) return "—";
+  if (v == null || !Number.isFinite(v)) return "—";
   const s = v >= 0 ? "+" : "";
   return `${s}${v.toFixed(digits)}°`;
 }
@@ -495,7 +495,7 @@ class StateView {
     // operator can hand-tune around it.
     $("apply-tag-range").addEventListener("click", async () => {
       const ft = parseFloat($("tag-range-big").textContent);
-      if (!isFinite(ft) || ft <= 0) return;
+      if (!Number.isFinite(ft) || ft <= 0) return;
       try {
         await fetch("/api/dial", {
           method: "POST",
@@ -564,7 +564,7 @@ class StateView {
       $("r-range").textContent   = "—";
       $("r-bearing").textContent = "—";
     }
-    $("r-rps").textContent = isFinite(s.recommended_rps)
+    $("r-rps").textContent = Number.isFinite(s.recommended_rps)
       ? s.recommended_rps.toFixed(1) : "—";
 
     const stateEl = $("r-target-state");
@@ -589,7 +589,7 @@ class StateView {
     // displaying the default-zero. Confidently rendering "0.0 ft" when
     // the rio is gone is what the operator (rightly) called "fake details".
     const dialEl = $("dial-big");
-    const dialFresh = isFinite(s.dial_ft) && !isStale(ages.dial_ft);
+    const dialFresh = Number.isFinite(s.dial_ft) && !isStale(ages.dial_ft);
     if (dialFresh) {
       dialEl.textContent = s.dial_ft.toFixed(1);
       dialEl.classList.remove("stale");
@@ -601,7 +601,7 @@ class StateView {
     // from rio. We display it in feet to match the dial's unit so the
     // operator can compare them side-by-side.
     const tagRangeEl = $("tag-range-big");
-    if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+    if (t.detected && Number.isFinite(t.range_m) && t.range_m > 0) {
       tagRangeEl.textContent = (t.range_m / 0.3048).toFixed(1);
       tagRangeEl.classList.remove("stale");
     } else {
@@ -732,8 +732,8 @@ class StateView {
 
   _refreshStats(s) {
     if (s.fps) {
-      $("s-cap-fps").textContent = isFinite(s.fps.capture) ? s.fps.capture.toFixed(1) : "—";
-      $("s-det-fps").textContent = isFinite(s.fps.detect)  ? s.fps.detect.toFixed(1)  : "—";
+      $("s-cap-fps").textContent = Number.isFinite(s.fps.capture) ? s.fps.capture.toFixed(1) : "—";
+      $("s-det-fps").textContent = Number.isFinite(s.fps.detect)  ? s.fps.detect.toFixed(1)  : "—";
     }
     if (s.image_size) $("s-imgsize").textContent = `${s.image_size.w}×${s.image_size.h}`;
     if (s.intrinsics_source) $("s-intrinsics").textContent = s.intrinsics_source;
@@ -810,7 +810,7 @@ class CalibrationView {
     $("cal-add-btn").addEventListener("click", () => {
       const d = parseFloat($("cal-add-dist").value);
       const r = parseFloat($("cal-add-rps").value);
-      if (!isFinite(d) || !isFinite(r) || d < 0 || r < 0) {
+      if (!Number.isFinite(d) || !Number.isFinite(r) || d < 0 || r < 0) {
         $("cal-add-dist").focus();
         return;
       }
@@ -822,13 +822,13 @@ class CalibrationView {
     $("cal-snapshot-btn").addEventListener("click", () => {
       // Prefer the live tag-PnP range; fall back to the dial (operator
       // measured the distance themselves and dialed it in).
-      const distFt = isFinite(this.lastTagRangeFt) && this.lastTagRangeFt > 0
+      const distFt = Number.isFinite(this.lastTagRangeFt) && this.lastTagRangeFt > 0
         ? this.lastTagRangeFt
         : this.lastDialFt;
       // 10 rps/ft is the rio's _SHOOTER_RPS_PER_FOOT default. Operator
       // can edit the row inline before saving — better than blank.
-      const rps = isFinite(this.lastDialFt) ? this.lastDialFt * 10.0 : 0;
-      if (!isFinite(distFt) || distFt <= 0) return;
+      const rps = Number.isFinite(this.lastDialFt) ? this.lastDialFt * 10.0 : 0;
+      if (!Number.isFinite(distFt) || distFt <= 0) return;
       this._add(distFt, rps);
     });
 
@@ -837,12 +837,12 @@ class CalibrationView {
 
   noteState(s) {
     const t = s.target || {};
-    if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+    if (t.detected && Number.isFinite(t.range_m) && t.range_m > 0) {
       this.lastTagRangeFt = t.range_m / 0.3048;
     } else {
       this.lastTagRangeFt = NaN;
     }
-    if (isFinite(s.dial_ft)) this.lastDialFt = s.dial_ft;
+    if (Number.isFinite(s.dial_ft)) this.lastDialFt = s.dial_ft;
   }
 
   async _load() {
