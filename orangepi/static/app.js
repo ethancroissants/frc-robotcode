@@ -417,26 +417,63 @@ class CameraPanel {
   }
 
   async _post(tagId) {
+    // Toast on every click so the operator can verify the chain
+    // (browser → POST → backend) end-to-end. Silent failures here
+    // are how we ended up debugging "click does nothing" for hours.
     try {
-      await fetch("/api/target", {
+      const r = await fetch("/api/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tag_id: tagId }),
       });
+      if (!r.ok) {
+        toast(`lock failed · HTTP ${r.status}`, "bad");
+        return;
+      }
+      if (tagId == null) toast("lock cleared", "info");
+      else               toast(`locked tag #${tagId}`, "good");
     } catch (e) {
       console.error("target post failed", e);
+      toast(`lock failed · ${e.message || e}`, "bad");
     }
   }
+}
+
+// ============================================================
+// Toasts (operator-visible feedback for actions whose result the
+// dashboard otherwise hides — POSTs, click-to-lock, etc.)
+// ============================================================
+
+function toast(message, kind /* "good" | "bad" | "info" */, ttlMs = 2200) {
+  const host = document.getElementById("toast-container");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = `toast toast-${kind || "info"}`;
+  el.textContent = message;
+  host.appendChild(el);
+  // Force reflow so the transition runs.
+  // eslint-disable-next-line no-unused-expressions
+  el.offsetHeight;
+  el.classList.add("show");
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 200);
+  }, ttlMs);
 }
 
 // ============================================================
 // State view (top bar pills + most readouts)
 // ============================================================
 
-const STALE_MS = 2000;  // values older than this dim out
+// Staleness is a connection-level property, not a per-topic one. NT4
+// only sends value updates on *change*, so a button that hasn't been
+// pressed since boot has age == uptime even though it's perfectly
+// current data. Gating on per-topic age made every static input look
+// dead. The right question is "are we still talking to the rio?".
+const STALE_MS = 2000;  // legacy — only used by the topics browser to flag jittered ages
 
-function isStale(ageMs) {
-  return ageMs == null || ageMs > STALE_MS;
+function isStale(connected) {
+  return !connected;
 }
 
 class StateView {
@@ -534,7 +571,10 @@ class StateView {
       try { fn(); } catch (e) { console.error(`apply.${label}`, e); }
     };
 
-    safe("rioStatus", () => this._setRioStatus(connected, ntHost));
+    // rioStatus is set once per SSE message by the standalone
+    // applyRioStatus(s) — it gets called BEFORE apply() runs and has
+    // access to the full snapshot (including nt_topic_count). Don't
+    // double-set here; the two implementations were already drifting.
 
     const enabled = s.robot_enabled !== false;
     safe("enabledPill", () => {
@@ -612,7 +652,7 @@ class StateView {
     safe("distance", () => {
       const dialEl = $("dial-big");
       if (dialEl) {
-        const dialFresh = Number.isFinite(s.dial_ft) && !isStale(ages.dial_ft);
+        const dialFresh = Number.isFinite(s.dial_ft) && !isStale(connected);
         if (dialFresh) {
           dialEl.textContent = s.dial_ft.toFixed(1);
           dialEl.classList.remove("stale");
@@ -671,7 +711,9 @@ class StateView {
     });
 
     safe("stats", () => this._refreshStats(s));
-    safe("topics", () => this._refreshTopics(s, ages));
+    // The topics tab is now powered by TopicsBrowser polling
+    // /api/nt-topics directly — it shows EVERY rio topic, not just the
+    // handful we derive into snap[]. Don't repaint it from SSE.
   }
 
   _setPill(el, text, kind) {
@@ -785,52 +827,115 @@ class StateView {
     setText("brand-version", s.version ? `v${s.version}` : "");
   }
 
-  _refreshTopics(s, ages) {
-    // Render a small fixed set of NT topics that matter for debugging.
-    // The full state object is too noisy to dump verbatim. Operator +
-    // driver buttons share rows so the table stays scannable; ages key
-    // is still flat (op_btn_a/dr_btn_a etc.) since we expose ages per
-    // raw NT topic, not per-stick.
-    const tbody = $("topic-body");
-    const op = s.operator || {};
-    const dr = s.driver || {};
-    const rows = [
-      ["connected", s.connected, null],
-      ["robot_enabled", s.robot_enabled, ages.robot_enabled],
-      ["driver_lockout", s.driver_lockout, ages.driver_lockout],
-      ["aim_status", s.aim_status, ages.aim_status],
-      ["dial_ft", s.dial_ft, ages.dial_ft],
-      ["operator.pov", op.pov, ages.op_pov],
-      ["operator.A/B/X/Y", `${+!!op.btn_a}${+!!op.btn_b}${+!!op.btn_x}${+!!op.btn_y}`, ages.op_btn_a],
-      ["operator.LB/RB", `${+!!op.btn_lb}${+!!op.btn_rb}`, ages.op_btn_lb],
-      ["driver.pov", dr.pov, ages.dr_pov],
-      ["driver.A/B/X/Y", `${+!!dr.btn_a}${+!!dr.btn_b}${+!!dr.btn_x}${+!!dr.btn_y}`, ages.dr_btn_a],
-      ["driver.LB/RB", `${+!!dr.btn_lb}${+!!dr.btn_rb}`, ages.dr_btn_lb],
-      ["selected_tag_id", s.selected_tag_id, null],
-      ["target.detected", s.target ? s.target.detected : false, null],
-      ["target.tag_id", s.target ? s.target.tag_id : null, null],
-      ["target.bearing_deg", s.target ? s.target.bearing_deg : null, null],
-      ["target.range_m", s.target ? s.target.range_m : null, null],
-      ["target.ready", s.target ? s.target.ready : false, null],
-      ["recommended_rps", s.recommended_rps, null],
-      ["recording.active", s.recording ? s.recording.active : false, null],
-    ];
-    const html = rows.map(([k, v, age]) => {
-      const stale = age != null && age > STALE_MS;
-      const ageStr = age == null ? "—"
-                   : age < 1000 ? `${age}ms`
-                   : `${(age/1000).toFixed(1)}s`;
-      const vStr = v == null ? "—"
-                 : typeof v === "number" ? Number(v).toFixed(3).replace(/\.?0+$/, "")
-                 : String(v);
-      return `<tr class="${stale ? "stale" : ""}">
-        <td class="k">${k}</td>
+}
+
+// ============================================================
+// NT topic browser — the actual "what is the rio publishing right
+// now?" view. Polls /api/nt-topics at 2 Hz and renders every topic the
+// rio has announced to us, with a live age column and a path filter.
+// This is the same observability AdvantageScope/OutlineViewer give —
+// without it, debugging a topic-mismatch ("the dashboard shows
+// disabled but I just enabled the robot") is shooting in the dark.
+// ============================================================
+
+class TopicsBrowser {
+  constructor() {
+    this.tbody = $("topic-body");
+    this.countEl = $("topics-count");
+    this.filterEl = $("topics-filter");
+    this.lastTopics = [];
+    this.lastConnected = false;
+    this.filter = "";
+    if (this.filterEl) {
+      this.filterEl.addEventListener("input", () => {
+        this.filter = this.filterEl.value.trim().toLowerCase();
+        this._render();
+      });
+    }
+    // 2 Hz is enough to feel live without hammering the Pi. The age
+    // column animates between polls because we recompute "now - last_us"
+    // each render against a server-provided timestamp.
+    this._poll();
+    setInterval(() => this._poll(), 500);
+  }
+
+  async _poll() {
+    try {
+      const r = await fetch("/api/nt-topics", { cache: "no-store" });
+      if (!r.ok) return;
+      const j = await r.json();
+      this.lastTopics = Array.isArray(j.topics) ? j.topics : [];
+      this.lastConnected = !!j.nt_connected;
+      this._render();
+    } catch (e) {
+      // Pi unreachable — leave the last good list and dim the count.
+      if (this.countEl) this.countEl.textContent = "(offline)";
+    }
+  }
+
+  _render() {
+    if (!this.tbody) return;
+    const f = this.filter;
+    const all = this.lastTopics;
+    const shown = f
+      ? all.filter(t => (t.path || "").toLowerCase().includes(f))
+      : all;
+
+    if (this.countEl) {
+      this.countEl.textContent = f
+        ? `${shown.length} / ${all.length} topics`
+        : `${all.length} topic${all.length === 1 ? "" : "s"}`;
+    }
+
+    if (shown.length === 0) {
+      const msg = !this.lastConnected
+        ? "rio offline — no topics"
+        : f
+          ? `no match for "${escapeHtml(f)}"`
+          : "rio connected but no topics announced yet";
+      this.tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-soft);padding:8px;text-align:center">${msg}</td></tr>`;
+      return;
+    }
+
+    this.tbody.innerHTML = shown.map(t => {
+      const path = t.path || "(unknown)";
+      const type = t.type || "?";
+      const age = t.age_ms;
+      const never = (age == null);
+      const stale = !never && age > 5000;
+      const ageStr = never
+        ? "never"
+        : age < 1000 ? `${age} ms`
+        : age < 60000 ? `${(age/1000).toFixed(1)} s`
+        : `${Math.floor(age/60000)} m ${Math.floor((age/1000)%60)} s`;
+      const vStr = formatTopicValue(t.last_value);
+      const cls = never ? "never" : (stale ? "stale" : "");
+      return `<tr class="${cls}">
+        <td class="path">${escapeHtml(path)}</td>
+        <td class="type">${escapeHtml(type)}</td>
         <td class="v">${escapeHtml(vStr)}</td>
         <td class="age ${stale ? "stale" : ""}">${ageStr}</td>
       </tr>`;
     }).join("");
-    tbody.innerHTML = html;
   }
+}
+
+function formatTopicValue(v) {
+  if (v == null) return "—";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return String(v);
+    if (Number.isInteger(v)) return String(v);
+    return Number(v).toFixed(3).replace(/\.?0+$/, "");
+  }
+  if (Array.isArray(v)) {
+    if (v.length > 8) return `[${v.length} items]`;
+    return `[${v.map(formatTopicValue).join(", ")}]`;
+  }
+  if (typeof v === "string") {
+    return v.length > 80 ? v.slice(0, 80) + "…" : v;
+  }
+  try { return JSON.stringify(v); } catch { return String(v); }
 }
 
 function escapeHtml(s) {
@@ -1031,12 +1136,17 @@ function applyRioStatus(s) {
   if (!rs) return;
   const connected = !!(s && (s.connected || s.nt_connected));
   const host = (s && (s.nt_host || null));
+  // Topic count is the operator's "is data flowing?" tell-tale. 0 with
+  // connected=true means "rio is reachable but its robot code hasn't
+  // published anything yet" — usually a code-not-running issue.
+  const topicCount = (s && Number.isFinite(s.nt_topic_count)) ? s.nt_topic_count : null;
   rs.classList.toggle("connected", connected);
   rs.classList.toggle("disconnected", !connected);
   const txt = rs.querySelector(".rio-text");
   if (!txt) return;
   if (connected) {
-    txt.textContent = host ? `rio link up · ${host}` : "rio link up";
+    const base = host ? `rio link up · ${host}` : "rio link up";
+    txt.textContent = topicCount != null ? `${base} · ${topicCount} topics` : base;
   } else {
     txt.textContent = host
       ? `rio disconnected · trying ${host}`
@@ -1103,6 +1213,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const stateView = new StateView(camera);
   const calView = new CalibrationView();
   new LogConsole();
+  new TopicsBrowser();
 
   new StateFeed([
     (s) => stateView.apply(s),

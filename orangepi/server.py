@@ -517,6 +517,14 @@ class NTBridge:
         snap.pop("robot_enabled_fms", None)
         ages.pop("robot_enabled_fms", None)
         snap["_ages_ms"] = ages
+        # Topic count is the operator's "is data flowing?" sanity check —
+        # if it's 0 we're connected but the rio published nothing yet, if
+        # it's small the rio code is barely up, if it's 50+ everything is
+        # broadcasting. Cheap to compute (it's just a dict len).
+        try:
+            snap["nt_topic_count"] = len(self.inst.known_topics())
+        except Exception:
+            snap["nt_topic_count"] = 0
         return snap
 
     def publish_spin_up_delay(self, seconds: float) -> None:

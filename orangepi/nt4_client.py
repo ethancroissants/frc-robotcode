@@ -201,12 +201,19 @@ class Client:
 
     def discover_all(self) -> None:
         """Subscribe to the empty prefix so the server announces every
-        topic on the network. We use topicsonly=True so we don't get
-        flooded with value updates for topics we don't actually consume.
+        topic on the network AND streams its values.
 
-        Announces always include the topic name + type, so this is enough
-        to power /api/nt-topics. Values still flow only for the explicit
-        Subscriber paths set up by the application.
+        topicsonly=False means values flow for every topic the rio
+        publishes — including ones the application code didn't explicitly
+        subscribe to. _dispatch_value records them into _known_topics, so
+        /api/nt-topics has live values for every rio topic. This is what
+        AdvantageScope/OutlineViewer do; the bandwidth cost on a local
+        LAN with ~50-100 topics is negligible (and the dashboard's per-
+        feature subscriptions still own the "this value drives UI"
+        semantics).
+
+        periodic=0.1 (100 ms) is the NT4 default; bumping it down doesn't
+        help us since the SSE tick rate is the gating factor.
         """
         with self._lock:
             subuid = self._next_subuid
@@ -215,7 +222,7 @@ class Client:
             "method": "subscribe",
             "params": {
                 "topics": [""], "subuid": subuid,
-                "options": {"all": False, "topicsonly": True, "prefix": True},
+                "options": {"all": False, "topicsonly": False, "prefix": True, "periodic": 0.1},
             },
         })
 
