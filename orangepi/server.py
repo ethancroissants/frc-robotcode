@@ -87,7 +87,13 @@ CAMERA_DEVICE = os.environ.get("CAMERA_DEVICE", "/dev/video0")
 # camera + Pi can hold it.
 CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "480"))
-CAMERA_FPS = int(os.environ.get("CAMERA_FPS", "30"))
+# 20 fps is the sweet spot over field wifi: at 30 fps the bitrate (and
+# the kernel send queue) outruns a marginal link as the robot rolls
+# away from the AP, and the operator sees a 1-2 s delayed feed because
+# frames pile up faster than they drain. 20 fps drops bandwidth by 1/3,
+# is plenty for an aiming overlay, and still gives AutoAim a 50 ms
+# detection cadence. Bump back up via env if you have a strong link.
+CAMERA_FPS = int(os.environ.get("CAMERA_FPS", "20"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
 
 # Camera geometry. Overridden by cam_intrinsics.json if present (preferred —
@@ -104,9 +110,11 @@ TAG_SIZE_M = float(os.environ.get("TAG_SIZE_M", "0.1651"))  # 6.5"
 # but the operator UI uses this looser one for the "armed" indicator.
 READY_BEARING_DEG = float(os.environ.get("READY_BEARING_DEG", "2.5"))
 
-# JPEG encode quality for the browser stream. 75 is a good speed/quality
-# tradeoff on the Pi 5; drop to 60 if CPU pegs.
-STREAM_QUALITY = int(os.environ.get("STREAM_QUALITY", "75"))
+# JPEG encode quality for the browser stream. q=55 is the floor where an
+# operator can still read tag IDs / range labels comfortably and roughly
+# halves the bytes-per-frame vs. q=75 — a big win over field wifi. Bump
+# to 75-85 if the link is strong and you want sharper aiming visuals.
+STREAM_QUALITY = int(os.environ.get("STREAM_QUALITY", "55"))
 # Run the detector on every Nth captured frame. 1 = every frame.
 DETECT_EVERY = int(os.environ.get("DETECT_EVERY", "1"))
 # Downscale factor used only for detection (stream stays full res). Smaller
@@ -703,13 +711,21 @@ class Detection:
 class CameraEngine:
     """Captures frames, runs detection, draws overlay, encodes for streaming.
 
-    One producer thread does everything in a tight loop:
-      capture → detect (every Nth) → overlay → encode → publish to subscribers
-    Stream consumers wait on a condition variable for the latest JPEG.
+    Two-thread design:
+      - capture thread: pulls frames from V4L2 as fast as the camera
+        produces them and stashes the latest into `_raw_frame`. Never
+        blocks on processing.
+      - process thread: waits for a new `_raw_token`, picks up whatever
+        the freshest frame is at that moment, runs detect → overlay →
+        encode → publish. If a process iteration takes longer than one
+        camera-frame interval, the *next* iteration starts from the
+        newest frame, NOT the one that was waiting in V4L2 behind it.
 
-    Separating capture from detection isn't worth the complexity at our
-    rate (30 fps × 480p): the V4L2 read is bounded by the camera, and
-    detection at full-res fits inside one frame interval on a Pi 5.
+    This keeps end-to-end latency bounded by one detect+encode cycle
+    regardless of camera vs. processing rate. The single-threaded
+    version we used before queued stale frames in V4L2 whenever
+    detect+encode lagged a frame, which the operator perceived as a
+    1-2 s feed delay over field wifi.
     """
 
     def __init__(self, nt: NTBridge, calibration: Calibration) -> None:
@@ -729,6 +745,14 @@ class CameraEngine:
         self._latest_all: list[tuple[int, np.ndarray]] = []
         self._cond = threading.Condition()
         self._frame_token = 0  # bumped each new JPEG; used to wake subscribers
+
+        # Capture↔process handoff. The capture thread overwrites _raw_frame
+        # on every read(); the process thread waits on _raw_cond and grabs
+        # whatever's there. Token-equality lets the process thread skip
+        # frames it's already worked on without checking ndarray identity.
+        self._raw_frame: np.ndarray | None = None
+        self._raw_token: int = 0
+        self._raw_cond = threading.Condition()
 
         # Operator's click-locked target (or None). When set, the tag with
         # this ID becomes the chosen target whenever it's visible. If it
@@ -962,13 +986,20 @@ class CameraEngine:
 
     def start(self) -> None:
         threading.Thread(
-            target=self._loop, name="camera-engine", daemon=True,
+            target=self._capture_loop, name="camera-capture", daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._process_loop, name="camera-process", daemon=True,
         ).start()
 
     def stop(self) -> None:
         self._stop.set()
+        # Wake every condvar so both threads exit promptly instead of
+        # waiting out their timeout. Cheap belt-and-suspenders.
         with self._cond:
             self._cond.notify_all()
+        with self._raw_cond:
+            self._raw_cond.notify_all()
 
     # ----- main loop -----
 
@@ -995,7 +1026,12 @@ class CameraEngine:
         )
         return True
 
-    def _loop(self) -> None:
+    def _capture_loop(self) -> None:
+        """V4L2 reader. Drains frames as fast as the camera produces and
+        stuffs the latest into `_raw_frame`. Never does CPU-heavy work,
+        so a slow detect/encode pass on the process thread can't cause
+        the kernel V4L2 queue to fill up — old frames are simply
+        overwritten before anyone reads them."""
         while not self._stop.is_set():
             if self._cap is None and not self._open_capture():
                 time.sleep(2.0)
@@ -1018,6 +1054,29 @@ class CameraEngine:
                     # EWMA — stable enough for a debug readout.
                     self._fps_capture = 0.85 * self._fps_capture + 0.15 * (1.0 / dt)
             self._last_capture_t = now
+
+            with self._raw_cond:
+                self._raw_frame = frame
+                self._raw_token += 1
+                self._raw_cond.notify_all()
+
+    def _process_loop(self) -> None:
+        """Detect / overlay / encode / publish. Picks up the freshest
+        frame the capture thread has produced — never one that's been
+        sitting in a queue. If this loop's iteration takes longer than
+        one camera-frame interval, the next iteration starts fresh
+        instead of catching up on a backlog."""
+        last_token = -1
+        while not self._stop.is_set():
+            with self._raw_cond:
+                while self._raw_token == last_token and not self._stop.is_set():
+                    self._raw_cond.wait(timeout=2.0)
+                if self._stop.is_set():
+                    break
+                frame = self._raw_frame
+                last_token = self._raw_token
+            if frame is None:
+                continue
 
             self._frame_idx += 1
             det = self._latest_det
@@ -1412,7 +1471,11 @@ async def api_state(request: Request) -> StreamingResponse:
                 if consecutive_errors >= 20:
                     log.error("too many SSE errors; closing this stream")
                     break
-            await asyncio.sleep(0.05)  # 20 Hz max
+            # 50 Hz max — the SSE only emits on payload change, so this is
+            # the *maximum* fan-out rate, not a fixed wakeup. Pairing with
+            # NT4 periodic=5 ms means a rio bool flip surfaces in the UI
+            # within ~25 ms worst-case (5 ms NT batch + 20 ms SSE tick).
+            await asyncio.sleep(0.02)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

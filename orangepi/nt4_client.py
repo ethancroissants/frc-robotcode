@@ -357,7 +357,14 @@ class Client:
             "method": "subscribe",
             "params": {
                 "topics": [path], "subuid": subuid,
-                "options": {"all": False, "topicsonly": False, "prefix": False},
+                # periodic=0.005 caps server→client batching at 5 ms (200 Hz).
+                # Default is 0.1 (100 ms) — that's the source of the
+                # "rio enabled/disabled lags by ~½ s" feel. With 5 ms
+                # the rio publishes a value and we see it within one
+                # robot iteration. Cheap on the rio (only the topics we
+                # explicitly subscribe to honor this — discover_all stays
+                # topicsonly).
+                "options": {"all": False, "topicsonly": False, "prefix": False, "periodic": 0.005},
             },
         })
         return Subscriber(self, state)
@@ -481,7 +488,11 @@ class Client:
                 "method": "subscribe",
                 "params": {
                     "topics": [s.path], "subuid": s.subuid,
-                    "options": {"all": False, "topicsonly": False, "prefix": False},
+                    # Same low-latency periodic as the live subscribe path.
+                    # Replayed on every reconnect — without re-asserting
+                    # `periodic` here, a reconnect would silently demote
+                    # us back to the server's 100 ms default.
+                    "options": {"all": False, "topicsonly": False, "prefix": False, "periodic": 0.005},
                 },
             })
         if msgs:
