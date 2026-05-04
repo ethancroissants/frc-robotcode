@@ -656,17 +656,19 @@ def main() -> int:
             pi_status_text.configure(text="Vision Pi: offline", fg=FG)
 
     def _refresh_pi_cards() -> None:
-        """Recompute Vision Pi card enabled-state + subtitles.
+        """Update the Vision Pi status indicator + setup-card subtitle.
 
-        pi_setup is always enabled — it's the entry point AND the updater
-        (idempotent re-runs push code, no separate update button anymore).
-        pi_open and pi_ssh need the Pi to be reachable on the network.
+        pi_open and pi_ssh stay enabled regardless of detected state — the
+        ping-based gating was rejecting clicks while the Pi was actually
+        up (mDNS was slow / poller hadn't fired / cfg was at the new XDG
+        path the gate didn't check). The buttons resolve a host on click
+        via _orangepi_target, which falls back to the conventional
+        10.TE.AM.11 even with no cfg, so clicking is always safe.
         """
         if not alive["v"]:
             return
         host = pi_host["v"]
         reachable = host is not None
-        # "Set up" is now a soft signal: cfg present OR Pi visible on net.
         is_set_up = _pi_is_set_up() or reachable
         _set_pi_status(reachable, host, configured=is_set_up)
 
@@ -679,24 +681,20 @@ def main() -> int:
             else:
                 setup_card.set_subtitle("Start here — installs the Pi-side service.")
 
-        for cid, online_subtitle in (
-            ("pi_open", lambda h: f"Open http://{h}:8080/ in your browser."),
-            ("pi_ssh", lambda h: f"Open a terminal connected to {h}."),
+        # Keep the open/ssh subtitles informative — show the live host when
+        # we have one, but don't change enabled-state based on it.
+        for cid, online_subtitle, offline_subtitle in (
+            ("pi_open",
+             lambda h: f"Open http://{h}:8080/ in your browser.",
+             "Open the Sight UI in your browser."),
+            ("pi_ssh",
+             lambda h: f"Open a terminal connected to {h}.",
+             "Open a terminal connected to the Vision Pi."),
         ):
             card = card_refs.get(cid)
             if card is None:
                 continue
-            if not is_set_up:
-                card.set_subtitle("Run \"Set up Vision Pi\" first.")
-                card.set_enabled(False)
-            elif not reachable:
-                card.set_subtitle(
-                    "Pi offline — power it and connect to the robot network."
-                )
-                card.set_enabled(False)
-            else:
-                card.set_enabled(True)
-                card.set_subtitle(online_subtitle(host))
+            card.set_subtitle(online_subtitle(host) if reachable else offline_subtitle)
 
     def _poll_status() -> None:
         if not alive["v"]:
@@ -827,46 +825,49 @@ def main() -> int:
         if not ok_:
             messagebox.showerror("SSH", msg, parent=root)
 
-    def _orangepi_target() -> tuple[str, str] | None:
-        """Resolve the saved Pi user/host from .orangepi_cfg."""
-        cfg_path = REPO / ".orangepi_cfg"
-        if not cfg_path.exists():
-            return None
+    def _orangepi_target() -> tuple[str, str]:
+        """Best-effort (user, host) for the Pi.
+
+        Order of preference: saved cfg → live-pinged host from the status
+        poller → conventional 10.TE.AM.11 → orangepi.local. We *always*
+        return something so the SSH / Open-UI buttons work even when the
+        cfg file is missing or the poller hasn't run yet — the install
+        script pins the Pi to 10.TE.AM.11 by convention, so that's a
+        sensible last-resort default.
+        """
+        # 1) Saved cfg (new XDG path or legacy in-repo path).
         try:
             import json
-            data = json.loads(cfg_path.read_text())
+            data = json.loads(_pi_cfg_path().read_text())
+            host = data.get("host")
+            user = data.get("user", "orangepi")
+            if host:
+                return user, host
         except Exception:
-            return None
-        host = data.get("host")
-        user = data.get("user", "orangepi")
-        if not host:
-            return None
-        return user, host
+            pass
+        # 2) Whatever the status poller most recently saw answer a ping.
+        live = pi_host["v"]
+        if live:
+            return "orangepi", live
+        # 3) Convention: install.sh pins the Pi to 10.TE.AM.11.
+        team = read_team_number() or DEFAULT_TEAM
+        if team.isdigit():
+            n = int(team)
+            return "orangepi", f"10.{n // 100}.{n % 100}.11"
+        return "orangepi", "orangepi.local"
 
     def _open_sight_ui_clicked() -> None:
-        target = _orangepi_target()
-        if target is None:
-            messagebox.showinfo(
-                "Sight UI",
-                "Vision Pi isn't set up yet. Click \"Set up Vision Pi\" first.",
-                parent=root,
-            )
-            return
-        _, host = target
+        # _orangepi_target always returns a host (cfg → live ping →
+        # 10.TE.AM.11 default). If it's wrong the browser shows an error;
+        # that's still better than blocking the click on a stale "not set
+        # up" guess.
+        _, host = _orangepi_target()
         url = f"http://{host}:8080/"
         import webbrowser
         webbrowser.open(url)
 
     def _ssh_pi_clicked() -> None:
-        target = _orangepi_target()
-        if target is None:
-            messagebox.showinfo(
-                "SSH",
-                "Vision Pi isn't set up yet. Click \"Set up Vision Pi\" first.",
-                parent=root,
-            )
-            return
-        user, host = target
+        user, host = _orangepi_target()
         # _open_ssh_terminal hardcodes admin@host for the rio; Pi uses orangepi.
         # Build the same per-platform spawning logic but with the right user.
         target_str = f"{user}@{host}"
@@ -1034,13 +1035,13 @@ def main() -> int:
             ),
             (
                 "3. Open Sight UI",
-                "Run \"Set up Vision Pi\" first.",
+                "Open the Sight UI in your browser.",
                 _open_sight_ui_clicked,
                 "pi_open",
             ),
             (
                 "SSH to Vision Pi",
-                "Run \"Set up Vision Pi\" first.",
+                "Open a terminal connected to the Vision Pi.",
                 _ssh_pi_clicked,
                 "pi_ssh",
             ),
@@ -1074,12 +1075,11 @@ def main() -> int:
             # tracks bot reachability.
             title, subtitle, cmd = item[0], item[1], item[2]
             card_id = item[3] if len(item) > 3 else None
-            # Cards that need a live SSH/HTTP connection start disabled; the
-            # status poller flips them on once the relevant host answers.
-            #   - ssh / wipe: rio ping required
-            #   - pi_open / pi_ssh: Pi must be set up + reachable
-            #   - pi_setup is always enabled (it's the entry point + updater)
-            disabled_ids = {"ssh", "wipe", "pi_open", "pi_ssh"}
+            # Cards that need a live SSH/HTTP connection to the rio start
+            # disabled; the status poller flips them on once the rio answers.
+            # Vision Pi cards stay enabled — their click handlers resolve
+            # a host on demand (cfg → live ping → conventional default).
+            disabled_ids = {"ssh", "wipe"}
             initial_enabled = card_id not in disabled_ids
             # On non-Windows, hard-disable Windows-only cards and rewrite
             # their subtitle so the user sees *why* they're greyed out.

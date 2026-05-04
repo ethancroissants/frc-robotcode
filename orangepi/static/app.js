@@ -521,10 +521,11 @@ class StateView {
 
   apply(s) {
     const connected = !!s.connected;
+    const ntHost = s.nt_host || null;
     const ages = s._ages_ms || {};
 
     // ----- big rio status indicator + topbar pills -----
-    this._setRioStatus(connected);
+    this._setRioStatus(connected, ntHost);
 
     const enabled = s.robot_enabled !== false;
     if (!connected) {
@@ -557,7 +558,10 @@ class StateView {
     const t = s.target || { detected: false };
     if (t.detected) {
       $("r-tag").textContent     = `#${t.tag_id}`;
-      $("r-range").textContent   = fmt(t.range_m, 2, " m");
+      // Display in feet to match the dial / calibration table units; the
+      // wire format from the Pi is meters (range_m) — convert here.
+      $("r-range").textContent   = fmt(
+        Number.isFinite(t.range_m) ? t.range_m / 0.3048 : null, 1, " ft");
       $("r-bearing").textContent = signFmt(t.bearing_deg, 1);
     } else {
       $("r-tag").textContent     = "—";
@@ -657,12 +661,22 @@ class StateView {
     el.className = "pill" + (kind ? ` pill-${kind}` : "");
   }
 
-  _setRioStatus(connected) {
+  _setRioStatus(connected, host) {
     if (!this.rioStatus) return;
     this.rioStatus.classList.toggle("connected", connected);
     this.rioStatus.classList.toggle("disconnected", !connected);
     const txt = this.rioStatus.querySelector(".rio-text");
-    if (txt) txt.textContent = connected ? "rio link up" : "rio disconnected";
+    if (!txt) return;
+    if (connected) {
+      txt.textContent = host ? `rio link up · ${host}` : "rio link up";
+    } else {
+      // When the link is down, surface the address we're dialing — turns
+      // a useless "rio disconnected" into something the operator can
+      // verify against their actual rio IP.
+      txt.textContent = host
+        ? `rio disconnected · trying ${host}`
+        : "rio disconnected";
+    }
   }
 
   _applyStick(rootSelector, data) {
@@ -724,9 +738,10 @@ class StateView {
     else if (!ready)            sub.textContent = `tag #${t.tag_id} · off-bearing`;
     else {
       const rps = s.recommended_rps;
+      const ft = (t.range_m / 0.3048).toFixed(1);
       sub.textContent = rps != null
-        ? `#${t.tag_id} · ${t.range_m.toFixed(2)}m · ${rps.toFixed(1)} rps`
-        : `#${t.tag_id} · ${t.range_m.toFixed(2)}m`;
+        ? `#${t.tag_id} · ${ft}ft · ${rps.toFixed(1)} rps`
+        : `#${t.tag_id} · ${ft}ft`;
     }
   }
 
@@ -737,6 +752,7 @@ class StateView {
     }
     if (s.image_size) $("s-imgsize").textContent = `${s.image_size.w}×${s.image_size.h}`;
     if (s.intrinsics_source) $("s-intrinsics").textContent = s.intrinsics_source;
+    $("s-nt-host").textContent = s.nt_host || "—";
     if (s.target_tag_ids) $("s-target-tags").textContent = s.target_tag_ids.join(", ") || "(any)";
     if (Array.isArray(s.seen_tags)) $("s-seen-tags").textContent = s.seen_tags.length ? s.seen_tags.join(", ") : "(none)";
     if (s.version) $("s-version").textContent = s.version;

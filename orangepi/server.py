@@ -197,8 +197,23 @@ class _RingHandler(logging.Handler):
 _ring_handler = _RingHandler()
 _ring_handler.setFormatter(logging.Formatter("%(message)s"))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logging.getLogger().addHandler(_ring_handler)
+# `force=True` resets root's existing handlers — needed because uvicorn sets
+# up logging *before* importing this module. Without force, basicConfig is a
+# silent no-op, root stays at whatever level uvicorn picked (typically WARNING
+# for non-uvicorn loggers), and every `NT4: connecting …` line gets dropped
+# before the ring handler ever sees it. Operators saw "no rio logs" and
+# couldn't tell whether the Pi was even attempting to dial the rio.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    force=True,
+)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(_ring_handler)
+# nt4_client uses its own named logger; make sure INFO from it propagates
+# even if some downstream code muted root-level INFO again.
+logging.getLogger("nt4").setLevel(logging.INFO)
 log = logging.getLogger("sight")
 
 
@@ -1307,6 +1322,11 @@ async def api_state(request: Request) -> StreamingResponse:
                 }
                 snap["version"] = VERSION
                 snap["intrinsics_source"] = camera.intrinsics_source
+                # Surface the rio NT host so the dashboard can show
+                # *which* address we're dialing — without this, "rio
+                # disconnected" gives the operator no information about
+                # whether it's a wrong-team / wrong-IP / unreachable issue.
+                snap["nt_host"] = nt.inst.server_host()
                 snap["target_tag_ids"] = sorted(TARGET_TAG_IDS)
                 snap["ready_bearing_deg"] = READY_BEARING_DEG
                 # Reshape the flat op_*/dr_* button keys into per-stick

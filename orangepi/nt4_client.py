@@ -157,6 +157,12 @@ class Client:
     def is_connected(self) -> bool:
         return self._connected
 
+    def server_host(self) -> str | None:
+        """Address the client is currently dialing (or None if unset). Used
+        by the dashboard to show *which* rio address it's trying so an
+        operator can tell "wrong host" from "rio offline" at a glance."""
+        return self._server_host
+
     # ---- lifecycle ----
 
     def start(self) -> None:
@@ -263,6 +269,14 @@ class Client:
 
     def _run_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
+        # On Python 3.9 (Bullseye Pis), `asyncio.Event()` looks up the
+        # thread's *current* event loop via `get_event_loop()`. `new_event_loop()`
+        # creates a loop but does NOT install it on the thread, so the
+        # lookup raises "There is no current event loop in thread …" and
+        # this whole thread dies before opening a websocket — which is
+        # exactly the failure mode operators saw as "rio never connects"
+        # despite a working ping. Bind the loop here.
+        asyncio.set_event_loop(self._loop)
         # Loop-side state, only touched on the asyncio thread.
         self._loop_control_q: list[str] = list(self._control_pending)
         self._control_pending.clear()
