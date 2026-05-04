@@ -29,18 +29,23 @@ except ImportError:
 REPO = Path(__file__).resolve().parent
 DOCS_DIR = REPO / "documentation"
 
-# Light theme palette — keep in sync with start.py / ui_mode.py.
-BG = "#f4f5f7"
-PANEL = "#ffffff"
-FG = "#1a1f2e"
-DIM = "#6b7280"
-ACCENT = "#0066cc"
-BORDER = "#e2e6ec"
-CARD_HOVER = "#f0f6ff"
-HOVER_BORDER = "#9cc4ee"
-CODE_BG = "#f0f1f4"
-CODE_FG = "#1a1f2e"
-QUOTE_BORDER = "#cdd3dc"
+# 2026-ish palette — kept in sync with start.py / ui_mode.py so all
+# panels feel like the same product. If you change one, change all three.
+BG           = "#f6f7fb"
+PANEL        = "#ffffff"
+FG           = "#0f172a"
+FG_STRONG    = "#020617"
+DIM          = "#6b7280"
+DIM_SOFT     = "#9aa3b2"
+ACCENT       = "#4f46e5"
+ACCENT_SOFT  = "#eef2ff"
+BORDER       = "#e5e7eb"
+BORDER_SOFT  = "#f1f3f7"
+HOVER_BORDER = "#c7d2fe"
+CARD_HOVER   = ACCENT_SOFT
+CODE_BG      = "#f1f3f7"
+CODE_FG      = "#0f172a"
+QUOTE_BORDER = "#c7d2fe"
 
 
 # Friendly labels for the known docs. Anything else falls back to the filename.

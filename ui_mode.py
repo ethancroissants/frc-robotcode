@@ -25,18 +25,24 @@ except ImportError:
     HAS_TK = False
 
 
-# Light theme palette.
-BG = "#f4f5f7"
-PANEL = "#ffffff"
-FG = "#1a1f2e"
-DIM = "#6b7280"
-ACCENT = "#0066cc"
-OK_COLOR = "#16a34a"
-FAIL_COLOR = "#dc2626"
-WARN_COLOR = "#d97706"
-BORDER = "#e2e6ec"
-TROUGH = "#e8ecf2"
-DETAILS_BG = "#fbfbfd"
+# 2026-ish palette — kept in sync with start.py so every panel feels like
+# the same product. Indigo accent, slate text hierarchy, gentle hairlines.
+BG          = "#f6f7fb"
+PANEL       = "#ffffff"
+FG          = "#0f172a"   # primary
+FG_STRONG   = "#020617"   # heading
+DIM         = "#6b7280"   # secondary
+DIM_SOFT    = "#9aa3b2"   # tertiary
+ACCENT      = "#4f46e5"   # indigo-600
+ACCENT_DARK = "#4338ca"   # indigo-700 — pressed/active button
+ACCENT_SOFT = "#eef2ff"   # indigo-50 — hover surfaces
+OK_COLOR    = "#10b981"
+FAIL_COLOR  = "#ef4444"
+WARN_COLOR  = "#f59e0b"
+BORDER      = "#e5e7eb"
+BORDER_SOFT = "#f1f3f7"
+TROUGH      = "#eef0f4"
+DETAILS_BG  = "#fbfbfd"
 
 
 _app: "App | None" = None
@@ -72,40 +78,117 @@ class _Reply:
         return self._q.get()
 
 
+class Spinner(tk.Canvas):
+    """A rotating-arc loading indicator drawn on a Canvas.
+
+    Looks more like the MacOS / iOS / web app loading spinner than Tk's
+    default linear Progressbar — which is the whole point of this rebuild.
+    Animates by rotating a 110° arc around the center via after()-loop;
+    the gap between start angle and 360 is what makes it read as
+    "spinning" rather than "filling".
+
+    Use Spinner.stop() to cancel the after-loop before the parent is
+    destroyed, otherwise Tk will complain about callbacks on dead widgets.
+    """
+
+    _EXTENT_DEG = 110   # how much of the ring is drawn (the rest is gap)
+    _STEP_DEG   = 14    # per-frame rotation
+    _FRAME_MS   = 32    # ~31 fps — buttery on any laptop
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        size: int = 56,
+        color: str = ACCENT,
+        track: str = BORDER_SOFT,
+        bg_color: str = BG,
+        thickness: int = 4,
+    ) -> None:
+        super().__init__(
+            parent,
+            width=size,
+            height=size,
+            bg=bg_color,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self._size = size
+        self._color = color
+        self._angle = 0
+        self._after: str | None = None
+        # Draw the static "track" first (full ring, soft color) so the
+        # spinner reads as motion-on-a-circle, not a flailing arc. The
+        # animated arc is drawn on top.
+        pad = thickness + 2  # leave a hair of antialias margin
+        self.create_oval(
+            pad, pad, size - pad, size - pad,
+            outline=track, width=thickness,
+        )
+        self._arc_id = self.create_arc(
+            pad, pad, size - pad, size - pad,
+            start=0, extent=self._EXTENT_DEG,
+            outline=color, width=thickness,
+            style="arc",
+        )
+        self._tick()
+
+    def _tick(self) -> None:
+        self._angle = (self._angle + self._STEP_DEG) % 360
+        try:
+            self.itemconfigure(self._arc_id, start=self._angle)
+        except tk.TclError:
+            return  # widget destroyed mid-frame
+        self._after = self.after(self._FRAME_MS, self._tick)
+
+    def stop(self) -> None:
+        if self._after is not None:
+            try:
+                self.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+
 class App:
     def __init__(self, title: str, subtitle: str = "") -> None:
         self.root = tk.Tk()
         self.root.title(f"Cold Fusion Robotics — {title}")
         self.root.configure(bg=BG)
-        self.root.geometry("640x440")
-        self.root.minsize(560, 400)
+        self.root.geometry("680x480")
+        self.root.minsize(580, 420)
 
-        # ----- header -----
+        # ----- header (matches start.py: accent-dot + brand + subtitle) -----
         header = tk.Frame(self.root, bg=PANEL)
         header.pack(fill="x", side="top")
-        hinner = tk.Frame(header, bg=PANEL, padx=24, pady=18)
+        hinner = tk.Frame(header, bg=PANEL, padx=26, pady=18)
         hinner.pack(fill="x")
+
+        brand_row = tk.Frame(hinner, bg=PANEL)
+        brand_row.pack(anchor="w")
         tk.Label(
-            hinner,
+            brand_row, text="●", bg=PANEL, fg=ACCENT, font=("Helvetica", 14),
+        ).pack(side="left", padx=(0, 8))
+        tk.Label(
+            brand_row,
             text="COLD FUSION ROBOTICS",
             bg=PANEL,
-            fg=ACCENT,
+            fg=FG_STRONG,
             font=("Helvetica", 14, "bold"),
-        ).pack(anchor="w")
+        ).pack(side="left")
         tk.Label(
             hinner,
             text=subtitle or title,
             bg=PANEL,
             fg=DIM,
             font=("Helvetica", 11),
-        ).pack(anchor="w", pady=(2, 0))
-        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", side="top")
+        ).pack(anchor="w", pady=(3, 0))
+        tk.Frame(self.root, bg=BORDER_SOFT, height=1).pack(fill="x", side="top")
 
         # ----- footer -----
         footer = tk.Frame(self.root, bg=PANEL)
         footer.pack(fill="x", side="bottom")
-        tk.Frame(footer, bg=BORDER, height=1).pack(fill="x", side="top")
-        finner = tk.Frame(footer, bg=PANEL, padx=14, pady=10)
+        tk.Frame(footer, bg=BORDER_SOFT, height=1).pack(fill="x", side="top")
+        finner = tk.Frame(footer, bg=PANEL, padx=18, pady=10)
         finner.pack(fill="x")
         self._status_var = tk.StringVar(value="Working…")
         tk.Label(
@@ -116,20 +199,23 @@ class App:
             font=("Helvetica", 10),
             anchor="w",
         ).pack(side="left")
-        self._details_btn = tk.Button(
+        # Ghost-style "Show details" — no underline, just hover-color shift
+        # to match the Quit button on the start panel. Less visually loud
+        # than the old <button> + underline style.
+        self._details_btn = tk.Label(
             finner,
             text="Show details",
             bg=PANEL,
             fg=DIM,
-            relief="flat",
-            borderwidth=0,
-            font=("Helvetica", 9, "underline"),
-            activebackground=PANEL,
-            activeforeground=ACCENT,
+            font=("Helvetica", 9),
             cursor="hand2",
-            command=self._toggle_details,
+            padx=10,
+            pady=4,
         )
         self._details_btn.pack(side="right")
+        self._details_btn.bind("<Button-1>", lambda _e: self._toggle_details())
+        self._details_btn.bind("<Enter>", lambda _e: self._details_btn.configure(fg=ACCENT))
+        self._details_btn.bind("<Leave>", lambda _e: self._details_btn.configure(fg=DIM))
 
         # ----- content (body + lazy details pane) -----
         content = tk.Frame(self.root, bg=BG)
@@ -143,24 +229,31 @@ class App:
         center = tk.Frame(body, bg=BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
+        # Spinner up top — leads the layout the same way the rotating
+        # arc leads a Mac OS app loading screen. Replaced on success/fail
+        # with the static ✓/✗ icon. The icon label takes the spinner's
+        # spot, so the eye doesn't have to refocus when state changes.
+        self.spinner = Spinner(center, size=56, color=ACCENT, bg_color=BG)
+        self.spinner.pack(pady=(0, 14))
+
         self._icon_var = tk.StringVar(value="")
         self._icon_label = tk.Label(
             center,
             textvariable=self._icon_var,
             bg=BG,
             fg=ACCENT,
-            font=("Helvetica", 28, "bold"),
+            font=("Helvetica", 32, "bold"),
         )
-        self._icon_label.pack(pady=(0, 6))
+        # Built but not packed — packs in place of the spinner on done.
 
         self._title_var = tk.StringVar(value="Getting ready…")
         tk.Label(
             center,
             textvariable=self._title_var,
             bg=BG,
-            fg=FG,
-            font=("Helvetica", 18, "bold"),
-            wraplength=520,
+            fg=FG_STRONG,
+            font=("Helvetica", 19, "bold"),
+            wraplength=560,
             justify="center",
         ).pack()
 
@@ -171,9 +264,9 @@ class App:
             bg=BG,
             fg=DIM,
             font=("Helvetica", 11),
-            wraplength=520,
+            wraplength=560,
             justify="center",
-        ).pack(pady=(6, 22))
+        ).pack(pady=(8, 22))
 
         style = ttk.Style(self.root)
         try:
@@ -181,49 +274,34 @@ class App:
         except tk.TclError:
             pass
         style.configure(
-            "Light.Horizontal.TProgressbar",
-            background=ACCENT,
-            troughcolor=TROUGH,
-            bordercolor=TROUGH,
-            lightcolor=ACCENT,
-            darkcolor=ACCENT,
-            thickness=10,
-        )
-        style.configure(
             "Accent.TButton",
             background=ACCENT,
             foreground="#ffffff",
             font=("Helvetica", 11, "bold"),
-            padding=(22, 9),
+            padding=(24, 10),
             borderwidth=0,
             focusthickness=0,
         )
         style.map(
             "Accent.TButton",
             background=[
-                ("active", "#0052a3"),
-                ("pressed", "#004a8f"),
+                ("active", ACCENT_DARK),
+                ("pressed", ACCENT_DARK),
                 ("disabled", BORDER),
             ],
             foreground=[("disabled", DIM)],
         )
-        self.progress = ttk.Progressbar(
-            center,
-            mode="indeterminate",
-            style="Light.Horizontal.TProgressbar",
-            length=440,
-        )
-        self.progress.pack()
-        self.progress.start(12)
 
         self._hint_var = tk.StringVar(value="")
         tk.Label(
             center,
             textvariable=self._hint_var,
             bg=BG,
-            fg=DIM,
-            font=("Helvetica", 10),
-        ).pack(pady=(12, 0))
+            fg=DIM_SOFT,
+            font=("Menlo", 9),
+            wraplength=560,
+            justify="center",
+        ).pack(pady=(4, 0))
 
         # Built up-front, only packed on success when a follow-up is set.
         self._action_button = ttk.Button(
@@ -248,7 +326,7 @@ class App:
     def _on_close(self) -> None:
         self._closed = True
         try:
-            self.progress.stop()
+            self.spinner.stop()
         except Exception:
             pass
         self.root.destroy()
@@ -278,16 +356,23 @@ class App:
         if self._closed:
             return
         self._done = True
+        # Stop the spinner and swap it for the static ✓ / ! icon in the
+        # same spot, so the layout doesn't reflow when work completes.
         try:
-            self.progress.stop()
-            self.progress.pack_forget()
+            self.spinner.stop()
+            self.spinner.pack_forget()
         except Exception:
             pass
+        # `before=` keeps the icon at the top, where the spinner used to be.
+        try:
+            self._icon_label.pack(pady=(0, 14), before=self._action_button)
+        except tk.TclError:
+            self._icon_label.pack(pady=(0, 14))
         rc = self._exit_code
         if rc == 0:
             self._icon_label.configure(fg=OK_COLOR)
             self._icon_var.set("✓")
-            self._title_var.set("All done!")
+            self._title_var.set("All done")
             if self._followup_label and self._followup_on_click:
                 self._subtitle_var.set(
                     self._followup_prompt or "Ready for the next step?"
