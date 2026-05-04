@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sight · Calibrate</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body class="page-calibrate">
   <header class="topbar">
@@ -143,7 +143,7 @@
     </section>
   </main>
 
-  <script src="/static/modals.js"></script>
+  <script src="/static/modals.js?v=7"></script>
   <script>
     "use strict";
     const $ = (id) => document.getElementById(id);
@@ -222,7 +222,7 @@
 
     $("c-rps-input").addEventListener("input", (e) => {
       const v = parseFloat(e.target.value);
-      if (isFinite(v) && v >= 0) postManualRps(v);
+      if (Number.isFinite(v) && v >= 0) postManualRps(v);
     });
     document.querySelectorAll("[data-rps]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -235,7 +235,7 @@
     });
     $("c-spin-input").addEventListener("input", (e) => {
       const v = parseFloat(e.target.value);
-      if (isFinite(v) && v >= 0 && v <= 5) postSpinUpDelay(v);
+      if (Number.isFinite(v) && v >= 0 && v <= 5) postSpinUpDelay(v);
     });
 
     // ======== Range calibration ========
@@ -249,7 +249,7 @@
     }
     $("c-range-cal-btn").addEventListener("click", async () => {
       const trueFt = parseFloat($("c-true-dist").value);
-      if (!isFinite(trueFt) || trueFt <= 0) {
+      if (!Number.isFinite(trueFt) || trueFt <= 0) {
         showRangeHint("type a positive distance in feet first", "err");
         $("c-true-dist").focus();
         return;
@@ -323,7 +323,7 @@
 
     // ======== Log point ========
     $("c-log-use-tag").addEventListener("click", () => {
-      if (isFinite(lastTagRangeFt) && lastTagRangeFt > 0) {
+      if (Number.isFinite(lastTagRangeFt) && lastTagRangeFt > 0) {
         $("c-log-dist").value = lastTagRangeFt.toFixed(2);
       }
     });
@@ -333,7 +333,7 @@
     $("c-log-btn").addEventListener("click", async () => {
       const d = parseFloat($("c-log-dist").value);
       const r = parseFloat($("c-log-rps").value);
-      if (!isFinite(d) || d < 0 || !isFinite(r) || r < 0) {
+      if (!Number.isFinite(d) || d < 0 || !Number.isFinite(r) || r < 0) {
         $("c-log-hint").textContent = "fill in both distance and rps";
         return;
       }
@@ -396,9 +396,9 @@
       const t = s.target || { detected: false };
       setTagPill(t.detected, t.tag_id);
       $("c-tag").textContent     = t.detected ? `#${t.tag_id}` : "—";
-      $("c-bearing").textContent = (t.detected && isFinite(t.bearing_deg))
+      $("c-bearing").textContent = (t.detected && Number.isFinite(t.bearing_deg))
           ? `${t.bearing_deg >= 0 ? "+" : ""}${t.bearing_deg.toFixed(1)}°` : "—";
-      if (t.detected && isFinite(t.range_m) && t.range_m > 0) {
+      if (t.detected && Number.isFinite(t.range_m) && t.range_m > 0) {
         const ft = t.range_m / 0.3048;
         lastTagRangeFt = ft;
         $("c-range-ft").textContent = ft.toFixed(2);
@@ -422,26 +422,26 @@
       setCalUI(!!c.active);
 
       const rpsEl = $("c-rps-input");
-      if (document.activeElement !== rpsEl && isFinite(c.manual_rps)) {
+      if (document.activeElement !== rpsEl && Number.isFinite(c.manual_rps)) {
         rpsEl.value = Number(c.manual_rps).toFixed(1);
         manualRps = c.manual_rps;
       }
       const spinEl = $("c-spin-input");
-      if (document.activeElement !== spinEl && isFinite(c.spin_up_delay_s)) {
+      if (document.activeElement !== spinEl && Number.isFinite(c.spin_up_delay_s)) {
         spinEl.value = Number(c.spin_up_delay_s).toFixed(2);
         spinUpDelay = c.spin_up_delay_s;
       }
 
       // Range-calibration readouts.
-      const rs = isFinite(c.range_scale) ? c.range_scale : 1.0;
+      const rs = Number.isFinite(c.range_scale) ? c.range_scale : 1.0;
       $("c-range-scale").textContent = rs.toFixed(4) + (Math.abs(rs - 1.0) < 1e-4 ? " (no correction)" : "");
-      if (isFinite(c.last_range_m) && c.last_range_m > 0) {
+      if (Number.isFinite(c.last_range_m) && c.last_range_m > 0) {
         const ft = c.last_range_m / 0.3048;
         $("c-range-current").textContent = `${ft.toFixed(2)} ft (${c.last_range_m.toFixed(2)} m)`;
       } else {
         $("c-range-current").textContent = "—";
       }
-      if (isFinite(c.last_unscaled_range_m) && c.last_unscaled_range_m > 0
+      if (Number.isFinite(c.last_unscaled_range_m) && c.last_unscaled_range_m > 0
           && Math.abs(rs - 1.0) > 1e-4) {
         const ft = c.last_unscaled_range_m / 0.3048;
         $("c-range-raw").textContent = `${ft.toFixed(2)} ft (raw PnP)`;

@@ -1232,7 +1232,10 @@ class CameraEngine:
             cv2.circle(frame, (cx, cy), 4, color, -1, cv2.LINE_AA)
             label = f"#{det.tag_id}  {det.bearing_deg:+.1f}°"
             if det.range_m > 0:
-                label += f"  {det.range_m:.2f}m"
+                # Match the dashboard / calibration table units (ft).
+                # The wire format stays meters (range_m) — only the
+                # human-facing overlay converts.
+                label += f"  {det.range_m / 0.3048:.1f}ft"
             cv2.putText(frame, label, (cx + 12, cy - 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
