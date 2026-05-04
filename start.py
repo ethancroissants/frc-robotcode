@@ -40,19 +40,29 @@ from deploy import ping, read_team_number
 
 REPO = Path(__file__).resolve().parent
 
-# Light theme palette (matches ui_mode.py).
-BG = "#f4f5f7"
-PANEL = "#ffffff"
-FG = "#1a1f2e"
-DIM = "#6b7280"
-ACCENT = "#0066cc"
-BORDER = "#e2e6ec"
-CARD_HOVER = "#f0f6ff"
-HOVER_BORDER = "#9cc4ee"
-OK_COLOR = "#16a34a"
-FAIL_COLOR = "#dc2626"
+# 2026-ish refined palette. Cooler neutrals + a saturated indigo accent
+# so action surfaces feel alive without screaming. Each pair (bg/fg) is
+# tuned for >= 7:1 contrast where it counts, ~4.5:1 for secondary text.
+BG          = "#f6f7fb"   # page background, faintly cool
+PANEL       = "#ffffff"   # cards, header, footer
+PANEL_SOFT  = "#f1f3f9"   # subtle elevated chips (not used yet, available)
+FG          = "#0f172a"   # slate-900 — primary text
+FG_STRONG   = "#020617"   # slate-950 — title text
+DIM         = "#6b7280"   # secondary text / inactive
+DIM_SOFT    = "#9aa3b2"   # tertiary text (build version, footer caption)
+ACCENT      = "#4f46e5"   # indigo-600 — modern, distinct from FRC blue
+ACCENT_SOFT = "#eef2ff"   # indigo-50 — hover surface
+BORDER      = "#e5e7eb"   # gray-200 — neutral hairlines
+BORDER_SOFT = "#f1f3f7"   # softer separators
+HOVER_BORDER = "#c7d2fe"  # indigo-200 — match ACCENT family
+OK_COLOR    = "#10b981"   # emerald-500
+WARN_COLOR  = "#f59e0b"   # amber-500
+FAIL_COLOR  = "#ef4444"   # red-500
 DISABLED_FG = "#9ca3af"
-DISABLED_BG = "#f1f3f6"
+DISABLED_BG = "#f3f4f7"
+
+# Backwards-compat alias — older code paths still reference this.
+CARD_HOVER  = ACCENT_SOFT
 
 DEFAULT_TEAM = "1279"
 ROBOT_SSID = "FRC-1279"
@@ -376,7 +386,12 @@ def _launch(args: list[str], *, restart_panel: bool = False) -> None:
 
 
 class Card(tk.Frame):
-    """A clickable rectangle with a title and a one-line subtitle."""
+    """A clickable surface with a title, one-line subtitle, and a left-edge
+    accent stripe that lights up on hover. The stripe is the design hook
+    that gives the menu its 2026 feel — it makes the active card feel
+    "tapped" without a heavy gradient or shadow."""
+
+    _STRIPE_W = 3  # px — slim accent bar on the left edge
 
     def __init__(
         self,
@@ -396,18 +411,27 @@ class Card(tk.Frame):
         )
         self._command = command
         self._normal_bg = PANEL
-        self._hover_bg = CARD_HOVER
+        self._hover_bg = ACCENT_SOFT
         self._enabled = enabled
 
-        inner = tk.Frame(self, bg=PANEL, padx=14, pady=9)
-        inner.pack(fill="x")
+        # Left-edge accent stripe. Sits inside the highlightthickness border
+        # at full card height. Color flips between BORDER (rest) and ACCENT
+        # (hover) so the eye gets a clean cue without redrawing the whole bg.
+        self._stripe = tk.Frame(self, bg=BORDER, width=self._STRIPE_W)
+        self._stripe.pack(side="left", fill="y")
+
+        # Slightly more breathing room than the old card. 2026 design taste
+        # is "let the title breathe"; the old 14/9 felt cramped on Windows
+        # display scaling above 100%.
+        inner = tk.Frame(self, bg=PANEL, padx=16, pady=12)
+        inner.pack(side="left", fill="both", expand=True)
         self._inner = inner
 
         self._title = tk.Label(
             inner,
             text=title,
             bg=PANEL,
-            fg=FG,
+            fg=FG_STRONG,
             font=("Helvetica", 11, "bold"),
             anchor="w",
         )
@@ -420,9 +444,9 @@ class Card(tk.Frame):
             font=("Helvetica", 9),
             anchor="w",
         )
-        self._subtitle.pack(anchor="w", pady=(1, 0))
+        self._subtitle.pack(anchor="w", pady=(2, 0))
 
-        for w in (self, inner, self._title, self._subtitle):
+        for w in (self, inner, self._title, self._subtitle, self._stripe):
             w.bind("<Button-1>", self._click)
             w.bind("<Enter>", self._enter)
             w.bind("<Leave>", self._leave)
@@ -438,14 +462,16 @@ class Card(tk.Frame):
     def _apply_enabled(self) -> None:
         if self._enabled:
             self._normal_bg = PANEL
-            self._title.configure(fg=FG)
+            self._title.configure(fg=FG_STRONG)
             self._subtitle.configure(fg=DIM)
             self.configure(cursor="hand2", highlightbackground=BORDER)
+            self._stripe.configure(bg=BORDER)
         else:
             self._normal_bg = DISABLED_BG
             self._title.configure(fg=DISABLED_FG)
             self._subtitle.configure(fg=DISABLED_FG)
             self.configure(cursor="arrow", highlightbackground=BORDER)
+            self._stripe.configure(bg=DISABLED_BG)
         self._set_bg(self._normal_bg)
 
     def set_enabled(self, value: bool) -> None:
@@ -468,6 +494,15 @@ class Card(tk.Frame):
     def _click(self, _event=None) -> None:
         if not self._enabled:
             return
+        # Brief click flash confirms the tap registered even if the
+        # subprocess takes a beat to spawn its window. 90ms is short
+        # enough to feel snappy, long enough to actually be visible.
+        self._stripe.configure(bg=ACCENT)
+        self._set_bg(self._hover_bg)
+        self.after(90, lambda: (
+            self._stripe.configure(bg=ACCENT if self._enabled else DISABLED_BG),
+            self._set_bg(self._hover_bg if self._enabled else self._normal_bg),
+        ))
         self._command()
 
     def _enter(self, _event=None) -> None:
@@ -475,11 +510,13 @@ class Card(tk.Frame):
             return
         self._set_bg(self._hover_bg)
         self.configure(highlightbackground=HOVER_BORDER)
+        self._stripe.configure(bg=ACCENT)
 
     def _leave(self, _event=None) -> None:
         self._set_bg(self._normal_bg)
         if self._enabled:
             self.configure(highlightbackground=BORDER)
+            self._stripe.configure(bg=BORDER)
 
 
 def main() -> int:
@@ -495,39 +532,55 @@ def main() -> int:
     root = tk.Tk()
     root.title("Cold Fusion Robotics — Control Panel")
     root.configure(bg=BG)
-    root.geometry("520x520")
-    root.minsize(440, 360)
+    root.geometry("560x600")
+    root.minsize(460, 400)
 
     # ----- header -----
     header = tk.Frame(root, bg=PANEL)
     header.pack(fill="x", side="top")
-    hinner = tk.Frame(header, bg=PANEL, padx=20, pady=12)
+    hinner = tk.Frame(header, bg=PANEL, padx=22, pady=14)
     hinner.pack(fill="x")
 
     htitles = tk.Frame(hinner, bg=PANEL)
     htitles.pack(side="left", fill="x", expand=True)
+
+    # Brand row: a small accent dot + the team name. The dot is Tk's
+    # cheapest way to add a splash of color where a logo would go.
+    brand_row = tk.Frame(htitles, bg=PANEL)
+    brand_row.pack(anchor="w")
     tk.Label(
-        htitles,
+        brand_row, text="●", bg=PANEL, fg=ACCENT, font=("Helvetica", 14),
+    ).pack(side="left", padx=(0, 8))
+    tk.Label(
+        brand_row,
         text="COLD FUSION ROBOTICS",
         bg=PANEL,
-        fg=ACCENT,
+        fg=FG_STRONG,
         font=("Helvetica", 14, "bold"),
-    ).pack(anchor="w")
+    ).pack(side="left")
+    tk.Label(
+        brand_row,
+        text=f"  {BUILD_VERSION}",
+        bg=PANEL,
+        fg=DIM_SOFT,
+        font=("Helvetica", 10),
+    ).pack(side="left", padx=(2, 0))
+
     tk.Label(
         htitles,
-        text=f"Team 1279 — Robot Code Control Panel · {BUILD_VERSION}",
+        text="Team 1279 · Robot Code Control Panel",
         bg=PANEL,
         fg=DIM,
         font=("Helvetica", 10),
-    ).pack(anchor="w", pady=(1, 0))
-    os_text = f"Detected OS: {OS_DISPLAY}"
+    ).pack(anchor="w", pady=(2, 0))
+    os_text = f"Running on {OS_DISPLAY}"
     if not IS_WINDOWS:
         os_text += " — some Windows-only actions disabled"
     tk.Label(
         htitles,
         text=os_text,
         bg=PANEL,
-        fg=DIM if IS_WINDOWS else FAIL_COLOR,
+        fg=DIM_SOFT if IS_WINDOWS else WARN_COLOR,
         font=("Helvetica", 9),
         anchor="w",
     ).pack(anchor="w", pady=(1, 0))
@@ -626,18 +679,59 @@ def main() -> int:
         seen: set[str] = set()
         return [h for h in candidates if not (h in seen or seen.add(h))]
 
+    # Animation state for the two status dots. Each entry holds (after_id,
+    # phase) so we can cancel the next tick when the dot transitions to a
+    # final (connected/disconnected) state. Without cancelling, multiple
+    # animation chains stack up and the dot flickers chaotically.
+    _pulse: dict[str, dict] = {
+        "rio": {"after": None},
+        "pi":  {"after": None},
+    }
+
+    def _stop_pulse(key: str) -> None:
+        h = _pulse[key].get("after")
+        if h is not None:
+            try:
+                root.after_cancel(h)
+            except Exception:
+                pass
+        _pulse[key]["after"] = None
+
+    def _start_pulse(key: str, dot: tk.Label, text_label: tk.Label, base_text: str) -> None:
+        """Cycle the dot color + a one-line "Checking·"→"Checking··"→"Checking···"
+        while the poller is in flight. Stops as soon as a final status arrives."""
+        _stop_pulse(key)
+        phase = {"i": 0}
+
+        # Three intermediate shades so the pulse feels smooth-ish without
+        # animating through actual interpolation (Tk has no color blend).
+        shades = (DIM, DIM_SOFT, ACCENT, DIM_SOFT)
+
+        def tick() -> None:
+            if not alive["v"]:
+                return
+            i = phase["i"]
+            dot.configure(fg=shades[i % len(shades)])
+            dots = "·" * (1 + (i % 3))  # ·, ··, ···
+            text_label.configure(text=f"{base_text} {dots}", fg=DIM)
+            phase["i"] = i + 1
+            _pulse[key]["after"] = root.after(360, tick)
+
+        tick()
+
     def _set_status(reachable: bool | None, host: str | None) -> None:
         if not alive["v"]:
             return
         if reachable is None:
-            status_dot.configure(fg=DIM)
-            status_text.configure(text="Checking…", fg=DIM)
+            _start_pulse("rio", status_dot, status_text, "Checking robot")
         elif reachable:
+            _stop_pulse("rio")
             status_dot.configure(fg=OK_COLOR)
-            status_text.configure(text=f"Connected ({host})", fg=FG)
+            status_text.configure(text=f"Connected · {host}", fg=FG)
         else:
+            _stop_pulse("rio")
             status_dot.configure(fg=FAIL_COLOR)
-            status_text.configure(text="No bot connection", fg=FG)
+            status_text.configure(text="No robot connection", fg=FG)
         # Track the host so SSH knows where to dial; only the True branch
         # has a real host. None reverts the SSH button to disabled.
         current_host["v"] = host if reachable else None
@@ -651,15 +745,16 @@ def main() -> int:
             return
         # If we can reach a Pi at any candidate address, treat it as set
         # up — the `.orangepi_cfg` file is convenient but not load-bearing.
+        _stop_pulse("pi")
         if reachable:
             pi_status_dot.configure(fg=OK_COLOR)
-            pi_status_text.configure(text=f"Vision Pi: connected ({host})", fg=FG)
+            pi_status_text.configure(text=f"Vision Pi · connected · {host}", fg=FG)
         elif not configured:
             pi_status_dot.configure(fg=DIM)
-            pi_status_text.configure(text="Vision Pi: not set up", fg=DIM)
+            pi_status_text.configure(text="Vision Pi · not set up", fg=DIM)
         else:
             pi_status_dot.configure(fg=FAIL_COLOR)
-            pi_status_text.configure(text="Vision Pi: offline", fg=FG)
+            pi_status_text.configure(text="Vision Pi · offline", fg=FG)
 
     def _refresh_pi_cards() -> None:
         """Update the Vision Pi status indicator + setup-card subtitle.
@@ -1089,14 +1184,23 @@ def main() -> int:
     # Two-column grid per section. Cards have uniform width via grid_columnconfigure
     # with weight=1 + uniform="cards", so they stay the same size as the window grows.
     for i, (section_title, section_cards) in enumerate(sections):
+        # Section header: tracking-loose all-caps label + a thin hairline
+        # underneath. The hairline is the visual equivalent of `border-bottom:
+        # 1px solid` on a CSS heading — gives the section weight without
+        # adding an actual <h2>-sized font.
+        header_block = tk.Frame(body, bg=BG)
+        header_block.pack(fill="x", pady=(0 if i == 0 else 18, 6))
         tk.Label(
-            body,
+            header_block,
             text=section_title.upper(),
             bg=BG,
             fg=DIM,
+            # Helvetica auto-falls-back to a system sans on every platform
+            # (San Francisco on mac, Segoe on Windows, DejaVu on Linux).
             font=("Helvetica", 9, "bold"),
             anchor="w",
-        ).pack(fill="x", pady=(0 if i == 0 else 12, 4))
+        ).pack(fill="x")
+        tk.Frame(header_block, bg=BORDER_SOFT, height=1).pack(fill="x", pady=(4, 0))
         grid = tk.Frame(body, bg=BG)
         grid.pack(fill="x")
         grid.grid_columnconfigure(0, weight=1, uniform="cards")
@@ -1132,16 +1236,16 @@ def main() -> int:
     # ----- footer -----
     footer = tk.Frame(root, bg=PANEL)
     footer.pack(fill="x", side="bottom")
-    tk.Frame(footer, bg=BORDER, height=1).pack(fill="x", side="top")
-    finner = tk.Frame(footer, bg=PANEL, padx=12, pady=6)
+    tk.Frame(footer, bg=BORDER_SOFT, height=1).pack(fill="x", side="top")
+    finner = tk.Frame(footer, bg=PANEL, padx=18, pady=10)
     finner.pack(fill="x")
     left = tk.Frame(finner, bg=PANEL)
     left.pack(side="left", fill="x", expand=True)
     tk.Label(
         left,
-        text=f"Working in: {REPO}",
+        text=f"~ {REPO}",
         bg=PANEL,
-        fg=DIM,
+        fg=DIM_SOFT,
         font=("Helvetica", 8),
         anchor="w",
     ).pack(anchor="w")
@@ -1149,23 +1253,27 @@ def main() -> int:
         left,
         text="Code & GUI by Ethan Canterbury",
         bg=PANEL,
-        fg=DIM,
+        fg=DIM_SOFT,
         font=("Helvetica", 8),
         anchor="w",
     ).pack(anchor="w", pady=(1, 0))
-    tk.Button(
+    # A "ghost"-style quit button: no fill, but a hover state that makes it
+    # feel reactive. Bind enter/leave to swap fg color so the user gets
+    # feedback as they cross over it.
+    quit_btn = tk.Label(
         finner,
         text="Quit",
         bg=PANEL,
-        fg=FG,
-        relief="flat",
-        borderwidth=0,
+        fg=DIM,
         font=("Helvetica", 9),
-        activebackground=PANEL,
-        activeforeground=ACCENT,
         cursor="hand2",
-        command=root.destroy,
-    ).pack(side="right")
+        padx=10,
+        pady=4,
+    )
+    quit_btn.pack(side="right")
+    quit_btn.bind("<Button-1>", lambda _e: root.destroy())
+    quit_btn.bind("<Enter>", lambda _e: quit_btn.configure(fg=ACCENT))
+    quit_btn.bind("<Leave>", lambda _e: quit_btn.configure(fg=DIM))
 
     root.mainloop()
     return 0
