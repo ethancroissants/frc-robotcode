@@ -1708,7 +1708,7 @@ async def api_calibration_remove(payload: dict) -> JSONResponse:
 
 
 @app.get("/api/nt-topics")
-async def api_nt_topics() -> dict:
+async def api_nt_topics() -> JSONResponse:
     """Diagnostic dump of every NT topic the rio has announced to us.
 
     Use this when you suspect a topic mismatch ("the dashboard shows the
@@ -1716,13 +1716,20 @@ async def api_nt_topics() -> dict:
     topic on the network, not just ones we subscribe to — so you can
     grep for, e.g., 'Enabled' to find exactly what path the rio is
     publishing.
+
+    Returns JSONResponse directly (skipping pydantic's response_model
+    coercion) because NT raw/struct topics carry msgpack bytes that
+    pydantic can't encode. nt4_client._jsonable already sanitizes those,
+    but going through JSONResponse means a stray bytes value can't 500
+    the whole endpoint.
     """
-    return {
+    payload = {
         "ok": True,
         "nt_connected": nt.inst.is_connected(),
         "nt_host": nt.inst.server_host(),
         "topics": nt.inst.known_topics(),
     }
+    return JSONResponse(payload)
 
 
 @app.get("/api/healthz")

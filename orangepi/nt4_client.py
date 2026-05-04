@@ -77,6 +77,33 @@ class _PubState:
     last_value: Any = None
 
 
+def _jsonable(v: Any) -> Any:
+    """Coerce an NT4 value into something the JSON encoder + pydantic can
+    handle. NT4 `raw` and WPILib struct topics arrive as msgpack `bytes`;
+    those have no canonical JSON form and would otherwise raise a
+    UnicodeDecodeError in pydantic and 500 the diagnostic endpoint.
+    """
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return f"<bytes len={len(bytes(v))}>"
+    if isinstance(v, (list, tuple)):
+        # Truncate huge arrays so the topics dump doesn't balloon — the
+        # operator only needs a sample to confirm "yes the rio is sending
+        # this." Common offenders: SwerveModuleStates, full pose arrays.
+        if len(v) > 32:
+            return f"<list len={len(v)}>"
+        return [_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _jsonable(val) for k, val in v.items()}
+    # Fallback: stringify weird types (e.g. numpy scalars) so the
+    # diagnostic endpoint never crashes the whole server.
+    try:
+        return repr(v)[:120]
+    except Exception:
+        return "<unrepresentable>"
+
+
 @dataclass
 class _SubState:
     path: str
@@ -183,6 +210,12 @@ class Client:
         for topics we've never received a value on (announce-only). This
         is the source of truth for "what does the rio publish?" — anything
         not in this list is *not* on the network.
+
+        last_value is sanitized to JSON-safe shapes — `raw` / WPILib struct
+        topics arrive as msgpack `bytes`, which pydantic refuses to encode
+        and turns into 500s on /api/nt-topics. We replace them with a
+        compact `<bytes len=N>` placeholder so the diagnostic endpoint
+        never blows up on a Pose2d/ChassisSpeeds publish.
         """
         now_us = int(time.time() * 1_000_000)
         out: list[dict] = []
@@ -193,7 +226,7 @@ class Client:
                 out.append({
                     "path": entry["path"],
                     "type": entry.get("type"),
-                    "last_value": entry.get("last_value"),
+                    "last_value": _jsonable(entry.get("last_value")),
                     "age_ms": age_ms,
                 })
         out.sort(key=lambda e: e["path"])
