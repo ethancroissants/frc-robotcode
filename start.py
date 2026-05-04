@@ -992,17 +992,30 @@ def main() -> int:
     # subtitle is one short sentence — anything longer means the title is
     # wrong. The button id (4th tuple element) is only set when the status
     # poller needs to flip the card's enabled state or label later.
+    def _deploy_all_clicked() -> None:
+        # Spawns the rio deploy and the Pi update as TWO independent
+        # subprocess windows so each can prompt for its own confirmations
+        # without blocking the other. Order doesn't matter — they target
+        # different machines and don't share state.
+        _launch(["deploy.py", "--ui"])
+        _launch(["setup_orangepi.py", "--ui"])
+
     sections = [
         ("Robot Code", [
+            (
+                "Deploy All",
+                "Deploy to the roboRIO AND push code to the Vision Pi at the same time.",
+                _deploy_all_clicked,
+            ),
+            (
+                "Deploy to Robot",
+                "Push robot code to the roboRIO only.",
+                lambda: _launch(["deploy.py", "--ui"]),
+            ),
             (
                 "Install Robot Code",
                 "Install RobotPy and project dependencies on this laptop.",
                 lambda: _launch(["setup.py", "--ui"]),
-            ),
-            (
-                "Deploy to Robot",
-                "Push robot code to the roboRIO.",
-                lambda: _launch(["deploy.py", "--ui"]),
             ),
             (
                 "Run Simulator",
