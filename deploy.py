@@ -528,29 +528,23 @@ def _main_logic(extra: list[str]) -> int:
 
 
 def deploy_to_orangepi() -> None:
-    """Note that the rio will push to the Pi itself on next robot startup.
+    """Reminder that Vision Pi code is updated separately from the laptop.
 
-    We used to rsync from the laptop here, but that meant Pi pushes only
-    happened when *the laptop* deployed. Now the rio is the gateway:
-      - laptop → rio (this is what `robotpy deploy` does)
-      - rio → Pi  (orangepi_pusher.py runs in robotInit on every boot)
-    So a Deploy press is enough to update both, even when the next boot
-    is a power-cycle in the pit with the laptop unplugged.
-
-    If the Pi was never configured we still nudge the user toward setup,
-    but we don't try to push directly anymore.
+    Robot deploy only ships rio code. Vision Pi is updated by clicking
+    `Update Vision Pi` in the start menu (which calls setup_orangepi.py).
+    We used to auto-push from the rio in robotInit, but that clobbered
+    laptop-side pushes whenever the rio rebooted with stale files — see
+    the comment in robot.py for the full story. Now the laptop is the
+    only updater and there is exactly one path to keep in your head.
     """
     repo = os.path.dirname(os.path.abspath(__file__))
     cfg_path = os.path.join(repo, "pi_target.json")
     if not os.path.exists(cfg_path):
         info("Vision Pi not configured yet.")
-        info("(Run Set up Vision Pi from the control panel to provision it.)")
+        info("Click `Set up Vision Pi` in the start menu to provision it.")
         return
-    step("Vision Pi will sync on next robot boot")
-    info("The rio's startup pusher will SSH the new orangepi/ files to the")
-    info("Pi and restart cold-fusion-sight. No further action needed here.")
-    info("Power-cycle the rio (or use `Update Vision Pi` to push from this")
-    info("laptop directly) if you want it pushed *right now*.")
+    info("Reminder: this only deploys rio code.")
+    info("To update the Vision Pi, click `Update Vision Pi` in the start menu.")
 
 
 def disable_firewall_for_ds() -> None:

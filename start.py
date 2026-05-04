@@ -459,6 +459,12 @@ class Card(tk.Frame):
         # transitions between not-set-up / offline / online.
         self._subtitle.configure(text=text)
 
+    def set_title(self, text: str) -> None:
+        # The Vision Pi card swaps title between "Set up" (first install) and
+        # "Update" (subsequent code pushes) so the operator sees the right
+        # verb without staring at the subtitle.
+        self._title.configure(text=text)
+
     def _click(self, _event=None) -> None:
         if not self._enabled:
             return
@@ -675,11 +681,15 @@ def main() -> int:
         setup_card = card_refs.get("pi_setup")
         if setup_card is not None:
             if is_set_up:
+                setup_card.set_title("Update Vision Pi")
                 setup_card.set_subtitle(
-                    "Re-run to push code updates (safe — idempotent)."
+                    "Push the latest orangepi/ code and restart the Sight service."
                 )
             else:
-                setup_card.set_subtitle("Start here — installs the Pi-side service.")
+                setup_card.set_title("Set up Vision Pi")
+                setup_card.set_subtitle(
+                    "First-time install — provisions the Pi and starts the Sight service."
+                )
 
         # Keep the open/ssh subtitles informative — show the live host when
         # we have one, but don't change enabled-state based on it.
@@ -977,71 +987,80 @@ def main() -> int:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # Card layout, top-to-bottom. Keep verbs first ("Deploy", "Connect",
+    # "Update") so the section reads as a list of actions, not nouns. Each
+    # subtitle is one short sentence — anything longer means the title is
+    # wrong. The button id (4th tuple element) is only set when the status
+    # poller needs to flip the card's enabled state or label later.
     sections = [
         ("Robot Code", [
             (
-                "Install / Setup",
-                "Install RobotPy and project dependencies.",
+                "Install Robot Code",
+                "Install RobotPy and project dependencies on this laptop.",
                 lambda: _launch(["setup.py", "--ui"]),
             ),
             (
                 "Deploy to Robot",
-                "Push the latest code onto the roboRIO.",
+                "Push robot code to the roboRIO.",
                 lambda: _launch(["deploy.py", "--ui"]),
             ),
             (
-                "Wipe RoboRIO",
-                "Fresh-install Python on the rio when a deploy left it broken.",
-                lambda: _launch(["wipe_rio.py", "--ui"]),
-                "wipe",
+                "Run Simulator",
+                "Run the robot code on this laptop instead of the rio.",
+                lambda: _launch(["-m", "robotpy", "sim"]),
             ),
             (
                 "Update from GitHub",
-                "Sync this folder with the latest team code.",
+                "Pull the team's latest code into this folder.",
                 _update_clicked,
             ),
             (
-                "Run Simulator",
-                "Test the robot code on your computer.",
-                lambda: _launch(["-m", "robotpy", "sim"]),
+                "Wipe RoboRIO",
+                "Reflash the rio's Python — use when a deploy left it broken.",
+                lambda: _launch(["wipe_rio.py", "--ui"]),
+                "wipe",
             ),
         ]),
         ("Connection", [
             (
-                "Connect",
-                "Disable firewall, join FRC-1279 WiFi, and ping the robot.",
+                "Connect to Robot",
+                "Drop the firewall, join FRC-1279 WiFi, and ping the rio.",
                 _prep_bot_clicked,
                 "connect",
             ),
             (
                 "Disconnect",
-                "Re-enable firewall and leave the robot WiFi.",
+                "Restore the firewall and leave the robot WiFi.",
                 _disconnect_clicked,
                 "disconnect",
             ),
             (
                 "SSH to Robot",
-                "Open a terminal connected to the rio over SSH.",
+                "Open a terminal on the rio.",
                 _ssh_clicked,
                 "ssh",
             ),
         ]),
+        # Vision Pi has exactly one update path — this card. The rio used to
+        # auto-push too, but that clobbered laptop pushes; that path is gone.
+        # Title + subtitle swap between "Set up Vision Pi" (first install)
+        # and "Update Vision Pi" (subsequent pushes) via _refresh_pi_cards.
         ("Vision Pi", [
             (
-                "1. Set up / Update Vision Pi",
-                "Initial install or push the latest code to the Pi.",
+                "Set up Vision Pi",
+                "First-time install — provisions the Pi and starts the Sight service.",
                 lambda: _launch(["setup_orangepi.py", "--ui"]),
                 "pi_setup",
             ),
             (
-                "3. Open Sight UI",
-                "Open the Sight UI in your browser.",
+                "Open Sight UI",
+                "Open the Sight dashboard in your browser.",
                 _open_sight_ui_clicked,
                 "pi_open",
             ),
             (
                 "SSH to Vision Pi",
-                "Open a terminal connected to the Vision Pi.",
+                "Open a terminal on the Pi.",
                 _ssh_pi_clicked,
                 "pi_ssh",
             ),
@@ -1049,7 +1068,7 @@ def main() -> int:
         ("Tools", [
             (
                 "Documentation",
-                "Read the team's guides and dashboard reference.",
+                "Open the team's guides and dashboard reference.",
                 lambda: _launch(["docs.py"]),
             ),
         ]),
