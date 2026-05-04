@@ -524,136 +524,154 @@ class StateView {
     const ntHost = s.nt_host || null;
     const ages = s._ages_ms || {};
 
-    // ----- big rio status indicator + topbar pills -----
-    this._setRioStatus(connected, ntHost);
+    // Wrap each independent section in safe(): if a downstream selector
+    // is missing or a value is malformed, that section logs and skips
+    // — but every other section (especially click-to-target via
+    // setTags) still runs. The previous structure had every section
+    // share one execution path, so a single null DOM ref could black
+    // out the whole UI.
+    const safe = (label, fn) => {
+      try { fn(); } catch (e) { console.error(`apply.${label}`, e); }
+    };
+
+    safe("rioStatus", () => this._setRioStatus(connected, ntHost));
 
     const enabled = s.robot_enabled !== false;
-    if (!connected) {
-      this._setPill(this.enabledPill, "rio offline", "");
-    } else if (enabled) {
-      this._setPill(this.enabledPill, "enabled", "good");
-    } else {
-      this._setPill(this.enabledPill, "disabled", "bad");
-    }
+    safe("enabledPill", () => {
+      if (!connected) {
+        this._setPill(this.enabledPill, "rio offline", "");
+      } else if (enabled) {
+        this._setPill(this.enabledPill, "enabled", "good");
+      } else {
+        this._setPill(this.enabledPill, "disabled", "bad");
+      }
+    });
 
-    if (s.selected_tag_id != null) {
-      this._setPill(this.lockPill, `lock #${s.selected_tag_id}`, "info");
-    } else {
-      this._setPill(this.lockPill, "no lock", "");
-    }
+    safe("lockPill", () => {
+      if (s.selected_tag_id != null) {
+        this._setPill(this.lockPill, `lock #${s.selected_tag_id}`, "info");
+      } else {
+        this._setPill(this.lockPill, "no lock", "");
+      }
+    });
 
     const ready = !!(s.target && s.target.ready);
-    this._setPill(this.readyPill, ready ? "ready" : "not ready",
-                  ready ? "good" : "bad");
+    safe("readyPill", () => {
+      this._setPill(this.readyPill, ready ? "ready" : "not ready",
+                    ready ? "good" : "bad");
+    });
 
-    if (s.driver_lockout) {
-      this.lockoutPill.style.display = "";
-    } else {
-      this.lockoutPill.style.display = "none";
-    }
+    safe("lockoutPill", () => {
+      if (this.lockoutPill) {
+        this.lockoutPill.style.display = s.driver_lockout ? "" : "none";
+      }
+    });
 
-    document.body.classList.toggle("controls-disabled", !connected || !enabled);
+    safe("controlsClass", () => {
+      document.body.classList.toggle("controls-disabled", !connected || !enabled);
+    });
 
     // ----- target panel -----
     const t = s.target || { detected: false };
-    if (t.detected) {
-      $("r-tag").textContent     = `#${t.tag_id}`;
-      // Display in feet to match the dial / calibration table units; the
-      // wire format from the Pi is meters (range_m) — convert here.
-      $("r-range").textContent   = fmt(
-        Number.isFinite(t.range_m) ? t.range_m / 0.3048 : null, 1, " ft");
-      $("r-bearing").textContent = signFmt(t.bearing_deg, 1);
-    } else {
-      $("r-tag").textContent     = "—";
-      $("r-range").textContent   = "—";
-      $("r-bearing").textContent = "—";
-    }
-    $("r-rps").textContent = Number.isFinite(s.recommended_rps)
-      ? s.recommended_rps.toFixed(1) : "—";
-
-    const stateEl = $("r-target-state");
-    if (t.detected) {
-      if (t.selected_locked) {
-        stateEl.textContent = `locked #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
-        stateEl.className = "target-state locked";
+    safe("targetPanel", () => {
+      if (t.detected) {
+        $("r-tag").textContent     = `#${t.tag_id}`;
+        // Display in feet to match the dial / calibration table units; the
+        // wire format from the Pi is meters (range_m) — convert here.
+        $("r-range").textContent   = fmt(
+          Number.isFinite(t.range_m) ? t.range_m / 0.3048 : null, 1, " ft");
+        $("r-bearing").textContent = signFmt(t.bearing_deg, 1);
       } else {
-        stateEl.textContent = `auto-pick #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
-        stateEl.className = "target-state locked";
+        $("r-tag").textContent     = "—";
+        $("r-range").textContent   = "—";
+        $("r-bearing").textContent = "—";
       }
-    } else if (s.selected_tag_id != null) {
-      stateEl.textContent = `searching for #${s.selected_tag_id}…`;
-      stateEl.className = "target-state searching";
-    } else {
-      stateEl.textContent = "no target";
-      stateEl.className = "target-state notarget";
-    }
+      $("r-rps").textContent = Number.isFinite(s.recommended_rps)
+        ? s.recommended_rps.toFixed(1) : "—";
+
+      const stateEl = $("r-target-state");
+      if (!stateEl) return;
+      if (t.detected) {
+        if (t.selected_locked) {
+          stateEl.textContent = `locked #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
+          stateEl.className = "target-state locked";
+        } else {
+          stateEl.textContent = `auto-pick #${t.tag_id}${ready ? " · on target" : " · off-bearing"}`;
+          stateEl.className = "target-state locked";
+        }
+      } else if (s.selected_tag_id != null) {
+        stateEl.textContent = `searching for #${s.selected_tag_id}…`;
+        stateEl.className = "target-state searching";
+      } else {
+        stateEl.textContent = "no target";
+        stateEl.className = "target-state notarget";
+      }
+    });
 
     // ----- distance panel (manual dial + live tag-PnP range) -----
-    // If the dial topic is stale or never received, show "—" instead of
-    // displaying the default-zero. Confidently rendering "0.0 ft" when
-    // the rio is gone is what the operator (rightly) called "fake details".
-    const dialEl = $("dial-big");
-    const dialFresh = Number.isFinite(s.dial_ft) && !isStale(ages.dial_ft);
-    if (dialFresh) {
-      dialEl.textContent = s.dial_ft.toFixed(1);
-      dialEl.classList.remove("stale");
-    } else {
-      dialEl.textContent = "—";
-      dialEl.classList.add("stale");
-    }
-    // Tag range comes from the Pi-side detector (target.range_m), not
-    // from rio. We display it in feet to match the dial's unit so the
-    // operator can compare them side-by-side.
-    const tagRangeEl = $("tag-range-big");
-    if (t.detected && Number.isFinite(t.range_m) && t.range_m > 0) {
-      tagRangeEl.textContent = (t.range_m / 0.3048).toFixed(1);
-      tagRangeEl.classList.remove("stale");
-    } else {
-      tagRangeEl.textContent = "—";
-      tagRangeEl.classList.add("stale");
-    }
+    safe("distance", () => {
+      const dialEl = $("dial-big");
+      if (dialEl) {
+        const dialFresh = Number.isFinite(s.dial_ft) && !isStale(ages.dial_ft);
+        if (dialFresh) {
+          dialEl.textContent = s.dial_ft.toFixed(1);
+          dialEl.classList.remove("stale");
+        } else {
+          dialEl.textContent = "—";
+          dialEl.classList.add("stale");
+        }
+      }
+      const tagRangeEl = $("tag-range-big");
+      if (tagRangeEl) {
+        if (t.detected && Number.isFinite(t.range_m) && t.range_m > 0) {
+          tagRangeEl.textContent = (t.range_m / 0.3048).toFixed(1);
+          tagRangeEl.classList.remove("stale");
+        } else {
+          tagRangeEl.textContent = "—";
+          tagRangeEl.classList.add("stale");
+        }
+      }
+    });
 
-    // ----- gamepad mirror — operator + driver -----
-    // Each panel has its own [data-stick=...] body, so we scope the
-    // active-class flips to that subtree. Avoids one click on the
-    // operator's A button lighting up both panels.
-    this._applyStick('[data-stick="operator"]', s.operator || {});
-    this._applyStick('[data-stick="driver"]',   s.driver   || {});
+    safe("gamepads", () => {
+      this._applyStick('[data-stick="operator"]', s.operator || {});
+      this._applyStick('[data-stick="driver"]',   s.driver   || {});
+    });
 
-    // ----- aim status line -----
-    const raw = String(s.aim_status || "idle").toLowerCase();
-    let klass = "";
-    if (["rotating", "spinning_up", "firing"].includes(raw)) klass = "active";
-    else if (raw === "done") klass = "done";
-    else if (raw === "error") klass = "fail";
-    const display = raw.replace(/_/g, " ");
-    const aimEl = $("aim-status");
-    aimEl.textContent = display;
-    aimEl.className = `aim-status-line ${klass}`;
+    safe("aimStatus", () => {
+      const raw = String(s.aim_status || "idle").toLowerCase();
+      let klass = "";
+      if (["rotating", "spinning_up", "firing"].includes(raw)) klass = "active";
+      else if (raw === "done") klass = "done";
+      else if (raw === "error") klass = "fail";
+      const aimEl = $("aim-status");
+      if (!aimEl) return;
+      aimEl.textContent = raw.replace(/_/g, " ");
+      aimEl.className = `aim-status-line ${klass}`;
+    });
 
-    // ----- shoot button -----
-    this._refreshShoot(s, t, ready, connected, enabled);
+    safe("shoot", () => this._refreshShoot(s, t, ready, connected, enabled));
+    safe("recording", () => this._refreshRecording(s.recording || { active: false }));
 
-    // ----- recording state (panel button + topbar pill + brand timer) ---
-    this._refreshRecording(s.recording || { active: false });
+    safe("calPill", () => {
+      if (this.calPill) {
+        const calActive = !!(s.calibrate && s.calibrate.active);
+        this.calPill.style.display = calActive ? "" : "none";
+      }
+    });
 
-    // ----- calibrate-mode pill (visibility toggle) -----
-    if (this.calPill) {
-      const calActive = !!(s.calibrate && s.calibrate.active);
-      this.calPill.style.display = calActive ? "" : "none";
-    }
+    // Camera overlay update is the load-bearing path for click-to-lock —
+    // give it its own try block so absolutely nothing earlier in this
+    // method can knock it out.
+    safe("camera", () => {
+      if (s.image_size) {
+        this.camera.setImageSize(s.image_size.w, s.image_size.h);
+      }
+      this.camera.setTags(s.all_tags || [], s.selected_tag_id);
+    });
 
-    // ----- camera overlays + image-size sync -----
-    if (s.image_size) {
-      this.camera.setImageSize(s.image_size.w, s.image_size.h);
-    }
-    this.camera.setTags(s.all_tags || [], s.selected_tag_id);
-
-    // ----- debug stats panel -----
-    this._refreshStats(s);
-
-    // ----- debug topics table -----
-    this._refreshTopics(s, ages);
+    safe("stats", () => this._refreshStats(s));
+    safe("topics", () => this._refreshTopics(s, ages));
   }
 
   _setPill(el, text, kind) {
@@ -746,17 +764,25 @@ class StateView {
   }
 
   _refreshStats(s) {
+    // Every line guards on the element existing — _refreshStats runs on
+    // every SSE tick, so a single null .textContent= here used to take
+    // out the rest of apply() (and silently broke click-to-lock for any
+    // operator on a stale index.html). Defensive lookup costs nothing.
+    const setText = (id, text) => {
+      const el = $(id);
+      if (el) el.textContent = text;
+    };
     if (s.fps) {
-      $("s-cap-fps").textContent = Number.isFinite(s.fps.capture) ? s.fps.capture.toFixed(1) : "—";
-      $("s-det-fps").textContent = Number.isFinite(s.fps.detect)  ? s.fps.detect.toFixed(1)  : "—";
+      setText("s-cap-fps", Number.isFinite(s.fps.capture) ? s.fps.capture.toFixed(1) : "—");
+      setText("s-det-fps", Number.isFinite(s.fps.detect)  ? s.fps.detect.toFixed(1)  : "—");
     }
-    if (s.image_size) $("s-imgsize").textContent = `${s.image_size.w}×${s.image_size.h}`;
-    if (s.intrinsics_source) $("s-intrinsics").textContent = s.intrinsics_source;
-    $("s-nt-host").textContent = s.nt_host || "—";
-    if (s.target_tag_ids) $("s-target-tags").textContent = s.target_tag_ids.join(", ") || "(any)";
-    if (Array.isArray(s.seen_tags)) $("s-seen-tags").textContent = s.seen_tags.length ? s.seen_tags.join(", ") : "(none)";
-    if (s.version) $("s-version").textContent = s.version;
-    $("brand-version").textContent = s.version ? `v${s.version}` : "";
+    if (s.image_size) setText("s-imgsize", `${s.image_size.w}×${s.image_size.h}`);
+    if (s.intrinsics_source) setText("s-intrinsics", s.intrinsics_source);
+    setText("s-nt-host", s.nt_host || "—");
+    if (s.target_tag_ids) setText("s-target-tags", s.target_tag_ids.join(", ") || "(any)");
+    if (Array.isArray(s.seen_tags)) setText("s-seen-tags", s.seen_tags.length ? s.seen_tags.join(", ") : "(none)");
+    if (s.version) setText("s-version", s.version);
+    setText("brand-version", s.version ? `v${s.version}` : "");
   }
 
   _refreshTopics(s, ages) {

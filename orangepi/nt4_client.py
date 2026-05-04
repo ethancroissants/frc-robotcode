@@ -84,7 +84,13 @@ class _SubState:
     subuid: int
     default: Any
     value: Any = None
+    # last_update_us: local epoch microseconds at receive time. Used for
+    # "how stale is this value?" computations in the dashboard.
     last_update_us: int = 0
+    # last_server_ts_us: NT4 server-time microseconds from the last frame
+    # we accepted. Drives the out-of-order guard only — never compared to
+    # local time, since the two clocks are not in the same frame.
+    last_server_ts_us: int = 0
 
 
 class Publisher:
@@ -130,6 +136,13 @@ class Client:
         self._subs: dict[int, _SubState] = {}            # subuid -> state
         self._topic_id_to_subs: dict[int, list[_SubState]] = {}
         self._topic_id_to_pub: dict[int, _PubState] = {}
+        # Diagnostic registry of every topic the *server* has announced to
+        # us. Maps topic_id -> {"path", "type", "last_value", "last_update_us"}.
+        # Used by /api/nt-topics so operators can see exactly what the rio
+        # publishes — no more guessing whether a missing reading means
+        # "rio doesn't publish that path" or "we're subscribed to the
+        # wrong path."
+        self._known_topics: dict[int, dict] = {}
         # Outgoing send queue for binary value frames. The asyncio loop
         # drains it; main-thread setters append to it. Stored as raw msgpack
         # bytes ready to send (avoids re-serializing on the loop side).
@@ -162,6 +175,49 @@ class Client:
         by the dashboard to show *which* rio address it's trying so an
         operator can tell "wrong host" from "rio offline" at a glance."""
         return self._server_host
+
+    def known_topics(self) -> list[dict]:
+        """Snapshot of every topic the server has announced to us.
+
+        Returns a list of {path, type, last_value, age_ms}. age_ms is None
+        for topics we've never received a value on (announce-only). This
+        is the source of truth for "what does the rio publish?" — anything
+        not in this list is *not* on the network.
+        """
+        now_us = int(time.time() * 1_000_000)
+        out: list[dict] = []
+        with self._lock:
+            for entry in self._known_topics.values():
+                last = entry.get("last_update_us") or 0
+                age_ms = ((now_us - last) // 1000) if last else None
+                out.append({
+                    "path": entry["path"],
+                    "type": entry.get("type"),
+                    "last_value": entry.get("last_value"),
+                    "age_ms": age_ms,
+                })
+        out.sort(key=lambda e: e["path"])
+        return out
+
+    def discover_all(self) -> None:
+        """Subscribe to the empty prefix so the server announces every
+        topic on the network. We use topicsonly=True so we don't get
+        flooded with value updates for topics we don't actually consume.
+
+        Announces always include the topic name + type, so this is enough
+        to power /api/nt-topics. Values still flow only for the explicit
+        Subscriber paths set up by the application.
+        """
+        with self._lock:
+            subuid = self._next_subuid
+            self._next_subuid += 1
+        self._post_control({
+            "method": "subscribe",
+            "params": {
+                "topics": [""], "subuid": subuid,
+                "options": {"all": False, "topicsonly": True, "prefix": True},
+            },
+        })
 
     # ---- lifecycle ----
 
@@ -408,9 +464,19 @@ class Client:
         path = params.get("name")
         topic_id = params.get("id")
         pubuid = params.get("pubuid")
+        type_str = params.get("type")
         if topic_id is None or path is None:
             return
         with self._lock:
+            # Record every announced topic for the diagnostic endpoint.
+            # We may not have a Subscriber for this path — that's fine,
+            # we just want a list of "what's on the network".
+            self._known_topics[topic_id] = {
+                "path": path,
+                "type": type_str,
+                "last_value": None,
+                "last_update_us": 0,
+            }
             # Match this announce to a publisher we own (pubuid will match)
             # OR to subscribers watching this path.
             if pubuid is not None and pubuid in self._pubs:
@@ -442,6 +508,7 @@ class Client:
         with self._lock:
             self._topic_id_to_pub.pop(topic_id, None)
             self._topic_id_to_subs.pop(topic_id, None)
+            self._known_topics.pop(topic_id, None)
             for p in self._pubs.values():
                 if p.topic_id == topic_id:
                     p.topic_id = None
@@ -458,12 +525,27 @@ class Client:
         if not isinstance(arr, list) or len(arr) < 4:
             return
         topic_id, ts_us, type_id, value = arr[0], arr[1], arr[2], arr[3]
+        # Stamp arrivals with our *local* clock. NT4's ts_us is in
+        # server-time microseconds — translating that to local time
+        # would require running the NT time-sync handshake, which we
+        # don't. For UI freshness ("how stale is this value?") receive
+        # time on our end is what matters anyway. The server ts_us is
+        # still kept for an out-of-order guard; the dashboard age uses
+        # last_update_us.
+        recv_us = int(time.time() * 1_000_000)
         with self._lock:
             subs = self._topic_id_to_subs.get(topic_id, [])
             for s in subs:
-                if s.last_update_us <= ts_us:
+                if s.last_server_ts_us <= ts_us:
                     s.value = value
-                    s.last_update_us = ts_us
+                    s.last_server_ts_us = ts_us
+                    s.last_update_us = recv_us
+            # Also record into the diagnostic registry so /api/nt-topics
+            # can show the live value, not just the type.
+            entry = self._known_topics.get(topic_id)
+            if entry is not None:
+                entry["last_value"] = value
+                entry["last_update_us"] = recv_us
 
 
 # Convenience alias for callers that prefer `nt4_client.connect(...)`.

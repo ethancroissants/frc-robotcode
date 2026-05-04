@@ -363,11 +363,16 @@ class NTBridge:
     }
     READ_BOOL = {
         "driver_lockout": "/SmartDashboard/Sight/DriverLockout",
-        # Robot enabled state — rio publishes this from the matching robot
-        # code; UI grays out controls when False so we can't fire while the
-        # bot is disabled. Defaults True at the subscription so a fresh
-        # setup doesn't soft-brick the UI before the rio publishes.
+        # Robot enabled state — preferred source is rio robot code
+        # publishing /SmartDashboard/Sight/RobotEnabled. As a fallback for
+        # robots that don't publish that custom topic, snapshot() also
+        # reads /FMSInfo/IsEnabled (auto-published by WPILib when the FMS
+        # is connected — works at competition; not always at the bench).
+        # See snapshot() for the OR.
         "robot_enabled": "/SmartDashboard/Sight/RobotEnabled",
+        # WPILib FMS-published enabled topic — subscribed but only used
+        # as a fallback when the custom topic above is missing.
+        "robot_enabled_fms": "/FMSInfo/IsEnabled",
         # Operator stick (kept at the original /Sight/Buttons/* path for
         # back-compat with older Pi/rio code).
         "op_btn_a": "/SmartDashboard/Sight/Buttons/A",
@@ -455,6 +460,9 @@ class NTBridge:
             # else is False until proven otherwise.
             default = True if key == "robot_enabled" else False
             self._b_subs[key] = self.inst.subscribe(path, "boolean", default)
+        # Discover every topic the server has — powers /api/nt-topics so
+        # operators can see what the rio actually publishes.
+        self.inst.discover_all()
         for key, path in self.READ_INT.items():
             self._i_subs[key] = self.inst.subscribe(path, "int", 0)
         for key, path in self.READ_STR.items():
@@ -496,6 +504,18 @@ class NTBridge:
         for key, sub in self._s_subs.items():
             snap[key] = sub.get()
             ages[key] = self._sub_age_ms(sub)
+        # Robot-enabled fallback: if the custom Sight/RobotEnabled topic
+        # was never received (age is None ⇒ rio code doesn't publish it)
+        # and the FMS topic *was* received, trust the FMS topic. This
+        # rescues operators whose robot code hasn't been updated to
+        # publish the Sight topic.
+        if ages.get("robot_enabled") is None and ages.get("robot_enabled_fms") is not None:
+            snap["robot_enabled"] = bool(snap.get("robot_enabled_fms"))
+            ages["robot_enabled"] = ages["robot_enabled_fms"]
+        # Don't expose the fallback key to the UI — it's an internal
+        # source. Same for its age.
+        snap.pop("robot_enabled_fms", None)
+        ages.pop("robot_enabled_fms", None)
         snap["_ages_ms"] = ages
         return snap
 
@@ -1677,6 +1697,24 @@ async def api_calibration_remove(payload: dict) -> JSONResponse:
         raise HTTPException(status_code=400, detail="distance_ft required")
     new = calibration.remove_at(d)
     return JSONResponse({"ok": True, "points": new})
+
+
+@app.get("/api/nt-topics")
+async def api_nt_topics() -> dict:
+    """Diagnostic dump of every NT topic the rio has announced to us.
+
+    Use this when you suspect a topic mismatch ("the dashboard shows the
+    robot disabled but I just enabled it"). The result includes every
+    topic on the network, not just ones we subscribe to — so you can
+    grep for, e.g., 'Enabled' to find exactly what path the rio is
+    publishing.
+    """
+    return {
+        "ok": True,
+        "nt_connected": nt.inst.is_connected(),
+        "nt_host": nt.inst.server_host(),
+        "topics": nt.inst.known_topics(),
+    }
 
 
 @app.get("/api/healthz")
