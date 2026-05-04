@@ -234,19 +234,17 @@ class Client:
 
     def discover_all(self) -> None:
         """Subscribe to the empty prefix so the server announces every
-        topic on the network AND streams its values.
+        topic on the network. We use topicsonly=True so we don't pull
+        values for things the dashboard doesn't actually consume.
 
-        topicsonly=False means values flow for every topic the rio
-        publishes — including ones the application code didn't explicitly
-        subscribe to. _dispatch_value records them into _known_topics, so
-        /api/nt-topics has live values for every rio topic. This is what
-        AdvantageScope/OutlineViewer do; the bandwidth cost on a local
-        LAN with ~50-100 topics is negligible (and the dashboard's per-
-        feature subscriptions still own the "this value drives UI"
-        semantics).
-
-        periodic=0.1 (100 ms) is the NT4 default; bumping it down doesn't
-        help us since the SSE tick rate is the gating factor.
+        Earlier we tried topicsonly=False to get live values for every
+        topic in the diagnostic browser — but Phoenix6 odometry +
+        SwerveDriveTelemetry publishes ~250 Hz of msgpack `bytes` (struct
+        types like Pose2d, ChassisSpeeds), which (a) can't be JSON-
+        encoded by pydantic and (b) hammered the Pi's WebSocket handler.
+        For "is the rio publishing this topic?" the announce is enough.
+        Live values for the topics we actually use still flow through
+        the explicit Subscriber paths in server.py.
         """
         with self._lock:
             subuid = self._next_subuid
@@ -255,7 +253,7 @@ class Client:
             "method": "subscribe",
             "params": {
                 "topics": [""], "subuid": subuid,
-                "options": {"all": False, "topicsonly": False, "prefix": True, "periodic": 0.1},
+                "options": {"all": False, "topicsonly": True, "prefix": True},
             },
         })
 
