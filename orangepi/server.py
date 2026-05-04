@@ -1685,6 +1685,7 @@ async def healthz() -> dict:
         "ok": True,
         "version": VERSION,
         "nt_connected": nt.inst.is_connected(),
+        "nt_host": nt.inst.server_host(),
         "target_tag_ids": sorted(TARGET_TAG_IDS),
         "calibration_points": len(calibration.points()),
         "intrinsics_source": camera.intrinsics_source,

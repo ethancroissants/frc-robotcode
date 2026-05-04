@@ -977,23 +977,44 @@ class StateFeed {
     this._es.onmessage = (ev) => {
       let s;
       try { s = JSON.parse(ev.data); } catch (e) { return; }
+      // Update the rio pill *before* handing state to consumers. If a
+      // downstream consumer throws (stale DOM, missing element, bad
+      // value), the rio pill still reflects truth. This is the single
+      // most-asked question on the dashboard — protect it accordingly.
+      try { applyRioStatus(s); } catch (e) { console.error("rio pill", e); }
       for (const c of this.consumers) {
         try { c(s); } catch (e) { console.error(e); }
       }
     };
     this._es.onerror = () => {
       try { this._es.close(); } catch (_) {}
-      // Mark the rio status as disconnected immediately so the operator
-      // sees "rio disconnected" while we reconnect (1s backoff).
-      const rs = $("rio-status");
-      if (rs) {
-        rs.classList.remove("connected");
-        rs.classList.add("disconnected");
-        const txt = rs.querySelector(".rio-text");
-        if (txt) txt.textContent = "rio disconnected";
-      }
+      // Don't touch the rio pill on SSE drop — we don't actually know
+      // the rio state, and showing "rio disconnected" when the rio is
+      // actually fine misleads the operator. The next reconnect's first
+      // SSE event will refresh it within ~1s.
       setTimeout(() => this.start(), 1000);
     };
+  }
+}
+
+// Standalone rio-pill updater — used by the SSE handler and the one-shot
+// healthz fetch on page load, so the pill reflects truth even before
+// EventSource has opened.
+function applyRioStatus(s) {
+  const rs = document.getElementById("rio-status");
+  if (!rs) return;
+  const connected = !!(s && (s.connected || s.nt_connected));
+  const host = (s && (s.nt_host || null));
+  rs.classList.toggle("connected", connected);
+  rs.classList.toggle("disconnected", !connected);
+  const txt = rs.querySelector(".rio-text");
+  if (!txt) return;
+  if (connected) {
+    txt.textContent = host ? `rio link up · ${host}` : "rio link up";
+  } else {
+    txt.textContent = host
+      ? `rio disconnected · trying ${host}`
+      : "rio disconnected";
   }
 }
 
@@ -1042,6 +1063,15 @@ window.addEventListener("DOMContentLoaded", () => {
   new WindowManager($("workspace"));
   wireDebugTabs();
   wireStreamFps();
+
+  // One-shot rio status fetch — populates the pill before the SSE has
+  // even opened. If the SSE-driven UI bootstrap throws somewhere, the
+  // rio pill at least starts at the *truth* instead of the static
+  // "connecting…" baked into the HTML.
+  fetch("/api/healthz")
+    .then(r => r.json())
+    .then(applyRioStatus)
+    .catch((e) => console.error("healthz fetch", e));
 
   const camera = new CameraPanel();
   const stateView = new StateView(camera);
