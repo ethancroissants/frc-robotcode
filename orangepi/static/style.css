@@ -759,7 +759,10 @@ button.ghost.square {
 .topic-table td.v { color: var(--text); word-break: break-all; }
 .topic-table td.age { color: var(--text-soft); text-align: right; }
 .topic-table td.age.stale { color: var(--bad); }
-.topic-table tr.stale td.v { color: var(--text-soft); font-style: italic; }
+/* "stale" here means "value hasn't *changed* recently" — which for a
+   button input is normal and not at all broken. Keep the value column
+   readable; only dim the age column to hint at the time gap. The italic
+   styling that used to apply to the value made it look like wrong data. */
 .topic-table td.path { color: var(--text); word-break: break-all; }
 .topic-table td.type { color: var(--text-soft); font-size: 10px; }
 .topic-table tr.never td.age { color: var(--text-soft); font-style: italic; }

@@ -203,6 +203,32 @@ class Client:
         operator can tell "wrong host" from "rio offline" at a glance."""
         return self._server_host
 
+    def value_for_path(self, path: str) -> tuple[Any, int | None]:
+        """Look up a topic's current value + age by path, bypassing the
+        Subscriber linkage entirely.
+
+        This is the source-of-truth read for "what is the rio currently
+        publishing for X?". The Subscriber path can fail to link if the
+        announce for that path arrives via a different subscription (e.g.
+        discover_all's wildcard) before our typed subscribe — at which
+        point _topic_id_to_subs misses the entry and the Subscriber gets
+        stuck on its default. _known_topics, by contrast, is populated on
+        every announce + every value, regardless of which subscription
+        triggered them.
+
+        Returns (value, age_ms) or (None, None) if the topic isn't on
+        the network or no value has been received.
+        """
+        now_us = int(time.time() * 1_000_000)
+        with self._lock:
+            for entry in self._known_topics.values():
+                if entry.get("path") == path:
+                    last = entry.get("last_update_us") or 0
+                    if not last:
+                        return entry.get("last_value"), None
+                    return entry.get("last_value"), max(0, (now_us - last) // 1000)
+        return None, None
+
     def known_topics(self) -> list[dict]:
         """Snapshot of every topic the server has announced to us.
 
@@ -310,6 +336,23 @@ class Client:
                 path=path, type_str=type_str, subuid=subuid, default=default,
             )
             self._subs[subuid] = state
+            # Retroactive linkage: if the topic was already announced
+            # (e.g. via discover_all's prefix subscription firing first),
+            # link this sub to its topic_id NOW so future _dispatch_value
+            # calls update its state. Without this, an announce-before-
+            # subscribe race left typed Subscribers stuck on their
+            # defaults forever — which is what made the dashboard
+            # confidently show "disabled" while NT actually carried True.
+            for topic_id, entry in self._known_topics.items():
+                if entry.get("path") == path:
+                    self._topic_id_to_subs.setdefault(topic_id, []).append(state)
+                    # Pull the last known value so .get() doesn't lie
+                    # until the next change-driven update.
+                    lv = entry.get("last_value")
+                    if lv is not None:
+                        state.value = lv
+                        state.last_update_us = entry.get("last_update_us") or 0
+                    break
         self._post_control({
             "method": "subscribe",
             "params": {

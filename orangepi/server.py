@@ -489,31 +489,44 @@ class NTBridge:
         now_us = int(time.time() * 1_000_000)
         return max(0, (now_us - last_us) // 1000)
 
+    def _read(self, key: str, sub: nt4_client.Subscriber, paths: dict[str, str]) -> tuple[Any, int | None]:
+        """Read a subscribed value with topic-registry fallback.
+
+        Reading via Subscriber alone is racy: if the announce arrived via
+        discover_all's prefix subscription before the typed subscribe was
+        registered, the Subscriber stays stuck on its default. Reading
+        via value_for_path looks at what _dispatch_value actually
+        recorded — that's the truth on the wire. Prefer the Subscriber
+        when it has a value (it's slightly fresher), fall back to the
+        registry when the linkage missed.
+        """
+        sub_age = self._sub_age_ms(sub)
+        path = paths.get(key)
+        if sub_age is not None:
+            return sub.get(), sub_age
+        if path:
+            v, age = self.inst.value_for_path(path)
+            if v is not None:
+                return v, age
+        return sub.get(), None
+
     def snapshot(self) -> dict:
         snap: dict[str, object] = {"connected": self.inst.is_connected()}
         ages: dict[str, int | None] = {}
         for key, sub in self._d_subs.items():
-            snap[key] = sub.get()
-            ages[key] = self._sub_age_ms(sub)
+            snap[key], ages[key] = self._read(key, sub, self.READ_DOUBLE)
         for key, sub in self._b_subs.items():
-            snap[key] = sub.get()
-            ages[key] = self._sub_age_ms(sub)
+            snap[key], ages[key] = self._read(key, sub, self.READ_BOOL)
         for key, sub in self._i_subs.items():
-            snap[key] = sub.get()
-            ages[key] = self._sub_age_ms(sub)
+            snap[key], ages[key] = self._read(key, sub, self.READ_INT)
         for key, sub in self._s_subs.items():
-            snap[key] = sub.get()
-            ages[key] = self._sub_age_ms(sub)
-        # Robot-enabled fallback: if the custom Sight/RobotEnabled topic
-        # was never received (age is None ⇒ rio code doesn't publish it)
-        # and the FMS topic *was* received, trust the FMS topic. This
-        # rescues operators whose robot code hasn't been updated to
-        # publish the Sight topic.
-        if ages.get("robot_enabled") is None and ages.get("robot_enabled_fms") is not None:
-            snap["robot_enabled"] = bool(snap.get("robot_enabled_fms"))
-            ages["robot_enabled"] = ages["robot_enabled_fms"]
-        # Don't expose the fallback key to the UI — it's an internal
-        # source. Same for its age.
+            snap[key], ages[key] = self._read(key, sub, self.READ_STR)
+        # _read() already falls back to value_for_path for every key, so
+        # robot_enabled, buttons, and friends all reflect the truth on
+        # the wire — no per-key override needed. Drop the FMS fallback
+        # entirely: in non-FMS practice mode WPILib hard-codes
+        # FMSInfo/IsEnabled = false, which used to override correct
+        # rio-side enables and pin the dashboard to "disabled".
         snap.pop("robot_enabled_fms", None)
         ages.pop("robot_enabled_fms", None)
         snap["_ages_ms"] = ages

@@ -909,7 +909,12 @@ class TopicsBrowser {
         : age < 60000 ? `${(age/1000).toFixed(1)} s`
         : `${Math.floor(age/60000)} m ${Math.floor((age/1000)%60)} s`;
       const vStr = formatTopicValue(t.last_value);
-      const cls = never ? "never" : (stale ? "stale" : "");
+      // "stale" age (>5s since last change) gets a dim age cell, but
+      // the value cell stays readable — the value IS current, the topic
+      // just hasn't *changed* in a while (totally normal for an idle
+      // button). The "never" class flags topics announced but with no
+      // value ever received; those legitimately deserve a dim value.
+      const cls = never ? "never" : "";
       return `<tr class="${cls}">
         <td class="path">${escapeHtml(path)}</td>
         <td class="type">${escapeHtml(type)}</td>

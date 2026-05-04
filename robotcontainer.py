@@ -263,6 +263,21 @@ class RobotContainer:
         # duration. Initialise the lockout flag to false so the Pi UI
         # doesn't show "DRIVER LOCKED" before any aim has happened.
         SmartDashboard.putBoolean("Sight/DriverLockout", False)
+        # Publish defaults for the rest of the rio-side Sight contract so
+        # every topic the dashboard expects exists from boot. WPILib only
+        # creates a topic on the first `put` call — without these, the Pi
+        # shows "(no data)" for Aim status / Ready / RequestId until the
+        # first AutoAim runs, which makes the operator wonder if the
+        # connection is broken. Cheap to publish; AutoAim overwrites these
+        # the moment it starts.
+        SmartDashboard.putString("Sight/Aim/Status",       "idle")
+        SmartDashboard.putBoolean("Sight/Aim/Ready",       False)
+        SmartDashboard.putNumber("Sight/Aim/SpinUpDelayS", 0.4)
+        SmartDashboard.putNumber("Sight/Aim/TargetRps",    0.0)
+        SmartDashboard.putNumber("Sight/Shoot/RequestId",  0)
+        # RobotEnabled is also re-published every robotPeriodic, but seed
+        # it now so the Pi has the topic before the first periodic tick.
+        SmartDashboard.putBoolean("Sight/RobotEnabled",    False)
         self._last_shoot_request_id = 0
 
         def _new_shoot_request() -> bool:
