@@ -1211,12 +1211,15 @@ const CAMERA_SETTINGS_KEY = "cfsight.camera.settings.v1";
 
 const CAMERA_PRESETS = [
   // name → [fps, quality]. Tuned so each step roughly halves bandwidth
-  // vs. the next-up preset; "potato" is the "wifi is dying" floor.
-  { id: "potato", label: "Potato", fps: 10, quality: 25 },
-  { id: "low",    label: "Low",    fps: 15, quality: 40 },
-  { id: "med",    label: "Medium", fps: 20, quality: 55 },
-  { id: "high",   label: "High",   fps: 25, quality: 75 },
-  { id: "ultra",  label: "Ultra",  fps: 30, quality: 90 },
+  // vs. the next-up preset. "Survival" is the absolute floor — a
+  // postage-stamp at 1 fps, but the dashboard pills + ready light
+  // stay live and the operator can see *that* a tag is in frame.
+  { id: "survive", label: "Survival", fps: 1,  quality: 5  },
+  { id: "potato",  label: "Potato",   fps: 5,  quality: 15 },
+  { id: "low",     label: "Low",      fps: 12, quality: 35 },
+  { id: "med",     label: "Medium",   fps: 20, quality: 55 },
+  { id: "high",    label: "High",     fps: 25, quality: 75 },
+  { id: "ultra",   label: "Ultra",    fps: 30, quality: 90 },
 ];
 
 function loadCameraSettings() {
@@ -1303,7 +1306,7 @@ class CameraSettings {
     fpsRow.className = "cf-settings-row";
     fpsRow.innerHTML = `
       <span class="lbl">FPS</span>
-      <input type="range" min="5" max="30" step="1" />
+      <input type="range" min="1" max="30" step="1" />
       <span class="val"></span>
     `;
     const fpsInput = fpsRow.querySelector("input");
@@ -1315,7 +1318,7 @@ class CameraSettings {
     qRow.className = "cf-settings-row";
     qRow.innerHTML = `
       <span class="lbl">Quality</span>
-      <input type="range" min="20" max="95" step="1" />
+      <input type="range" min="5" max="95" step="1" />
       <span class="val"></span>
     `;
     const qInput = qRow.querySelector("input");

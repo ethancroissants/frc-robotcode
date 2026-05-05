@@ -787,11 +787,18 @@ class CameraEngine:
         # calibrate page) updates it via solve scale = true / measured.
         self._range_scale: float = self._load_range_scale()
 
-        # Rolling FPS estimates for the debug panel.
+        # Rolling FPS estimates. Computed over a window of recent frame
+        # timestamps so the readout doesn't ping-pong between
+        # neighboring values on every frame — EWMA was mathematically
+        # smoothing but visually still jittered ±3 fps because alpha
+        # had to be high enough to be responsive. A 30-sample window
+        # at 20 fps spans ~1.5 s, which feels rock-solid in the
+        # corner overlay without lagging real changes by more than
+        # one breath.
         self._fps_capture = 0.0
         self._fps_detect = 0.0
-        self._last_capture_t = 0.0
-        self._last_detect_t = 0.0
+        self._cap_t_window: collections.deque[float] = collections.deque(maxlen=30)
+        self._det_t_window: collections.deque[float] = collections.deque(maxlen=30)
 
         # Runtime-mutable stream settings. The dashboard's settings cog
         # writes through to these via /api/camera/settings; the cookie
@@ -994,16 +1001,14 @@ class CameraEngine:
 
     # ----- runtime settings (dashboard's cog → here) -----
 
-    # Sane envelope: the FPS slider in the UI lets the operator pick
-    # anything in this range; the API clamps to it. Lower = less wifi
-    # bandwidth + less CPU, at the cost of choppier feed. Upper bound
-    # is the camera/Pi limit; pushing past 30 generally just queues
-    # frames instead of going faster.
-    _FPS_MIN, _FPS_MAX = 5, 30
-    # JPEG quality envelope. q=20 looks like a smear but the crosshair
-    # + tag ID labels are still legible — useful as a "wifi is dying,
-    # just give me anything" floor. q=95 is wasted bytes for a webcam.
-    _Q_MIN, _Q_MAX = 20, 95
+    # Sane envelope. We let fps drop to 1 and quality to 5 because the
+    # operator may genuinely need "give me literally anything that
+    # makes it across this wifi link" mode — at the bottom end the
+    # feed is a postage stamp at 1 fps, but the dashboard's NT pills
+    # and ready/aim indicators stay live, and the operator can still
+    # see *that* a tag is in frame.
+    _FPS_MIN, _FPS_MAX = 1, 30
+    _Q_MIN, _Q_MAX = 5, 95
 
     def get_settings(self) -> dict:
         with self._settings_lock:
@@ -1114,12 +1119,11 @@ class CameraEngine:
                 continue
 
             now = time.monotonic()
-            if self._last_capture_t > 0:
-                dt = now - self._last_capture_t
-                if dt > 1e-3:
-                    # EWMA — stable enough for a debug readout.
-                    self._fps_capture = 0.85 * self._fps_capture + 0.15 * (1.0 / dt)
-            self._last_capture_t = now
+            self._cap_t_window.append(now)
+            if len(self._cap_t_window) >= 2:
+                span = self._cap_t_window[-1] - self._cap_t_window[0]
+                if span > 0:
+                    self._fps_capture = (len(self._cap_t_window) - 1) / span
 
             with self._raw_cond:
                 self._raw_frame = frame
@@ -1131,8 +1135,16 @@ class CameraEngine:
         frame the capture thread has produced — never one that's been
         sitting in a queue. If this loop's iteration takes longer than
         one camera-frame interval, the next iteration starts fresh
-        instead of catching up on a backlog."""
+        instead of catching up on a backlog.
+
+        Software-paces emit-rate to the user's chosen fps so picking
+        '5 fps' in the UI actually means 5 fps on the wire — many USB
+        webcams ignore CAP_PROP_FPS mid-stream and produce 30 fps no
+        matter what we ask for, and without this pacing the slider
+        was a no-op for them on the bandwidth axis.
+        """
         last_token = -1
+        last_emit_t = 0.0
         while not self._stop.is_set():
             with self._raw_cond:
                 while self._raw_token == last_token and not self._stop.is_set():
@@ -1150,11 +1162,11 @@ class CameraEngine:
                 t0 = time.monotonic()
                 det = self._detect(frame)
                 self._latest_det = det
-                if self._last_detect_t > 0:
-                    dt = t0 - self._last_detect_t
-                    if dt > 1e-3:
-                        self._fps_detect = 0.85 * self._fps_detect + 0.15 * (1.0 / dt)
-                self._last_detect_t = t0
+                self._det_t_window.append(t0)
+                if len(self._det_t_window) >= 2:
+                    span = self._det_t_window[-1] - self._det_t_window[0]
+                    if span > 0:
+                        self._fps_detect = (len(self._det_t_window) - 1) / span
                 # Publish target + recommended RPS to NT every detection
                 # tick — the rio sees the freshest values without any
                 # request/response.
@@ -1181,6 +1193,21 @@ class CameraEngine:
                 self._latest_jpeg = jpeg
                 self._frame_token += 1
                 self._cond.notify_all()
+
+            # Software fps cap. Read target every iteration so a slider
+            # change applies on the very next frame. Sleep only if we'd
+            # be ahead of schedule; never block the capture thread.
+            with self._settings_lock:
+                target_fps = self._camera_fps
+            target_interval = 1.0 / max(1, target_fps)
+            now = time.monotonic()
+            if last_emit_t > 0:
+                slack = target_interval - (now - last_emit_t)
+                # Don't bother sleeping for sub-ms slivers; the syscall
+                # round-trip would dominate.
+                if slack > 0.001:
+                    time.sleep(slack)
+            last_emit_t = time.monotonic()
 
     def _compute_ready(self, det: "Detection | None") -> bool:
         if det is None:

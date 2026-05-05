@@ -1443,7 +1443,7 @@ body.page-calibrate { user-select: text; overflow: auto; }
 
 .cf-presets {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
   margin-top: 4px;
   margin-bottom: 8px;
