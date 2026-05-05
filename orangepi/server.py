@@ -81,12 +81,15 @@ VERSION = "2.3.0"
 TEAM = int(os.environ.get("TEAM", "1279"))
 NT_SERVER = os.environ.get("NT_SERVER", "")
 CAMERA_DEVICE = os.environ.get("CAMERA_DEVICE", "/dev/video0")
-# 640x480 is the universal hardware-MJPEG mode on USB cameras and gives the
-# detector 2-3x more headroom than 720p — at 480p we comfortably hit 30 fps
-# end-to-end on the Pi 5 with cycles to spare. Bump if you're sure your
-# camera + Pi can hold it.
-CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "640"))
-CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "480"))
+# 1280x720 doubles the linear pixel count vs. 480p, which roughly
+# doubles the *distance* at which a 6.5" tag is large enough for the
+# AprilTag detector to lock onto it. Pi 5 + USB MJPEG handles 720p
+# capture at 30 fps comfortably; detection at full-res 720p costs more
+# CPU per frame but stays under one frame interval at 20 fps target.
+# If you're on a slower SBC or want max FPS over range, drop to
+# 640x480 via env (`CAMERA_WIDTH=640 CAMERA_HEIGHT=480` in sight.env).
+CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "1280"))
+CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "720"))
 # 20 fps is the sweet spot over field wifi: at 30 fps the bitrate (and
 # the kernel send queue) outruns a marginal link as the robot rolls
 # away from the AP, and the operator sees a 1-2 s delayed feed because
@@ -231,8 +234,15 @@ def _load_intrinsics() -> tuple[np.ndarray, np.ndarray, str]:
     """Returns (K, dist_coeffs, source_label).
 
     cam_intrinsics.json (preferred):
-      {"K": [[fx,0,cx],[0,fy,cy],[0,0,1]], "dist": [k1,k2,p1,p2,k3]}
+      {"K": [[fx,0,cx],[0,fy,cy],[0,0,1]], "dist": [k1,k2,p1,p2,k3],
+       "width": 640, "height": 480}    # optional, used to rescale
       OR flat: {"fx": ..., "fy": ..., "cx": ..., "cy": ..., "dist": [...]}
+
+    If the calibration was captured at a resolution different from the
+    current CAMERA_WIDTH/HEIGHT, K is linearly rescaled. This lets us
+    bump the capture resolution without invalidating an existing
+    chessboard calibration; without it, switching from 640x480 to
+    1280x720 would read tag bearings 2× wider than reality.
 
     Synthesizes from CAMERA_HFOV_DEG if no file. Returns float64 arrays so
     cv2.solvePnP doesn't have to upcast every frame.
@@ -251,7 +261,24 @@ def _load_intrinsics() -> tuple[np.ndarray, np.ndarray, str]:
             dist = np.array(data.get("dist", [0, 0, 0, 0, 0]), dtype=np.float64).flatten()
             if dist.size < 5:
                 dist = np.concatenate([dist, np.zeros(5 - dist.size)])
-            return K, dist, f"calibrated ({INTRINSICS_PATH.name})"
+
+            # Rescale K if the calibration was at a different resolution
+            # than what we're currently capturing. Linear scaling is
+            # exact for fx/fy/cx/cy under uniform resize; distortion
+            # coefficients are dimensionless w.r.t. normalized image
+            # coordinates so they don't need scaling.
+            cal_w = data.get("width") or data.get("image_width")
+            cal_h = data.get("height") or data.get("image_height")
+            label_extra = ""
+            if cal_w and cal_h and (int(cal_w) != CAMERA_WIDTH or int(cal_h) != CAMERA_HEIGHT):
+                sx = CAMERA_WIDTH / float(cal_w)
+                sy = CAMERA_HEIGHT / float(cal_h)
+                K[0, 0] *= sx; K[0, 2] *= sx
+                K[1, 1] *= sy; K[1, 2] *= sy
+                label_extra = f", scaled {int(cal_w)}x{int(cal_h)}→{CAMERA_WIDTH}x{CAMERA_HEIGHT}"
+                log.info("intrinsics rescaled %dx%d → %dx%d (sx=%.3f sy=%.3f)",
+                         int(cal_w), int(cal_h), CAMERA_WIDTH, CAMERA_HEIGHT, sx, sy)
+            return K, dist, f"calibrated ({INTRINSICS_PATH.name}{label_extra})"
         except Exception as e:
             log.warning("intrinsics load failed (%s); using FOV synthesis", e)
     focal_x = (CAMERA_WIDTH / 2.0) / math.tan(math.radians(CAMERA_HFOV_DEG) / 2.0)
@@ -812,11 +839,43 @@ class CameraEngine:
 
         # Detector setup. The 36h11 family is what FRC standardized on in
         # 2023; opencv ships the dictionary built-in, no extra deps.
+        # The default DetectorParameters are tuned for ArUco markers of
+        # comfortable size in frame; we override the knobs that gate
+        # *small* / distant tags so we can detect a 6.5" tag from
+        # roughly 2× farther than the defaults.
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
         params = cv2.aruco.DetectorParameters()
-        # Refining marker corners with the contour fit helps PnP a lot
-        # without much CPU cost.
-        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+
+        # Accept tags whose perimeter is as little as 1% of the longer
+        # image dimension (default is 3%). At 1280x720 that's a tag
+        # roughly 12 px on a side — about as small as the 6x6 data grid
+        # in 36h11 stays reliably decodable. Drop further at the cost
+        # of false positives.
+        params.minMarkerPerimeterRate = 0.01
+
+        # How close two corners can be (relative to perimeter) before
+        # the candidate is rejected as degenerate. Tight tags at range
+        # have visually-close corners; the default 0.05 was kicking
+        # them out before the decoder got a chance.
+        params.minCornerDistanceRate = 0.02
+
+        # Adaptive-threshold sweep: try more window sizes between min
+        # and max. Step=4 (vs default 10) means we re-threshold at
+        # 3,7,11,15,19,23 instead of just 3,13,23 — small/distant tags
+        # often only quad-detect at one specific window size.
+        params.adaptiveThreshWinSizeStep = 4
+
+        # CORNER_REFINE_APRILTAG is purpose-built for the AprilTag
+        # gradient pattern (vs. CORNER_REFINE_SUBPIX which is generic
+        # contour-fit). On distant tags the AprilTag refiner gives
+        # sub-pixel corners with much less drift, which directly
+        # tightens bearing accuracy at range. Falls back to SUBPIX on
+        # OpenCV builds that don't expose the AprilTag refiner.
+        try:
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        except AttributeError:
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+
         self._detector = cv2.aruco.ArucoDetector(dictionary, params)
 
         # Real intrinsics if available; otherwise FOV synthesis. Logged at
