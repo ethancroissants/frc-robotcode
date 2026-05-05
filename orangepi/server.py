@@ -1199,15 +1199,20 @@ class CameraEngine:
             if fps is not None:
                 f = max(self._FPS_MIN, min(self._FPS_MAX, int(fps)))
                 if f != self._camera_fps:
-                    log.info("camera fps: %d → %d", self._camera_fps, f)
+                    log.info("camera fps: %d → %d (software-paced)", self._camera_fps, f)
                 self._camera_fps = f
                 applied["fps"] = f
-                cap = self._cap
-                if cap is not None:
-                    try:
-                        cap.set(cv2.CAP_PROP_FPS, f)
-                    except Exception as e:
-                        log.warning("CAP_PROP_FPS set failed (%s) — will pick up on next reopen", e)
+                # NOTE: deliberately NOT calling cap.set(CAP_PROP_FPS)
+                # on the live capture. We did before, but several V4L2
+                # drivers (Logitech UVC, generic webcams) get wedged
+                # when CAP_PROP_FPS changes mid-stream — the symptom
+                # is `tryIoctl` warnings every N seconds and full
+                # reopen loops. We rely entirely on the software fps
+                # cap in `_process_loop` (which reads `_camera_fps`
+                # every iteration) to throttle emit rate. The hardware
+                # cap rate stays at whatever was set on open; if you
+                # need the camera to actually slow down at the V4L2
+                # level, restart the service after editing sight.env.
         return {**self.get_settings(), "applied": applied}
 
     # ----- lifecycle -----
@@ -1247,10 +1252,16 @@ class CameraEngine:
         with self._settings_lock:
             fps_now = self._camera_fps
         cap.set(cv2.CAP_PROP_FPS, fps_now)
-        # 1-frame buffer keeps latency low — without this, OpenCV defaults
-        # to a few frames of internal queue and we'd aim at where the
-        # target was 100 ms ago.
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # BUFFERSIZE=1 was nice for latency but caused recurring
+        # `tryIoctl VIDEOIO(V4L2:/dev/video0)` warnings + full reopens
+        # every ~10 s on some webcams (USB UVC drivers underflow when
+        # the consumer is fast enough that the kernel queue stays
+        # empty). 2 is the sweet spot: still tiny latency penalty
+        # (~50 ms at 20 fps), MUCH more stable. Our capture/process
+        # split already discards stale frames so the operator-visible
+        # latency is bounded by one detect+encode cycle, not buffer
+        # depth.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
 
         # Manual exposure (env-driven, opt-in). Auto-exposure produces
         # motion-blurred frames mid-swing as the camera firmware adjusts
@@ -1288,21 +1299,45 @@ class CameraEngine:
         stuffs the latest into `_raw_frame`. Never does CPU-heavy work,
         so a slow detect/encode pass on the process thread can't cause
         the kernel V4L2 queue to fill up — old frames are simply
-        overwritten before anyone reads them."""
+        overwritten before anyone reads them.
+
+        Failure handling: cap.read() returning False on USB webcams is
+        often transient (a single VIDIOC_DQBUF that returned EAGAIN /
+        EIO). The original code did a full close+reopen on the very
+        first failure, which on quirky cameras turned a 1-frame
+        hiccup into a multi-second stall and reopen storm. We now
+        retry up to MAX_TRANSIENT_FAILS times with a tiny delay, and
+        only reopen if the camera's truly stuck.
+        """
+        MAX_TRANSIENT_FAILS = 5
+        transient_fails = 0
+        last_log_t = 0.0
+        frames_since_log = 0
         while not self._stop.is_set():
             if self._cap is None and not self._open_capture():
                 time.sleep(2.0)
                 continue
             ok, frame = self._cap.read()
             if not ok or frame is None:
-                log.error("frame read failed; reopening")
+                transient_fails += 1
+                if transient_fails < MAX_TRANSIENT_FAILS:
+                    # Tiny pause and retry — most V4L2 hiccups clear
+                    # on the next dequeue without needing a reopen.
+                    time.sleep(0.01)
+                    continue
+                log.error(
+                    "frame read failed %d times in a row; reopening",
+                    transient_fails,
+                )
                 try:
                     self._cap.release()
                 except Exception:
                     pass
                 self._cap = None
+                transient_fails = 0
                 time.sleep(0.5)
                 continue
+            transient_fails = 0
 
             now = time.monotonic()
             self._cap_t_window.append(now)
@@ -1315,6 +1350,28 @@ class CameraEngine:
                 self._raw_frame = frame
                 self._raw_token += 1
                 self._raw_cond.notify_all()
+
+            # Capture telemetry every 10 s — proves the V4L2 chain
+            # is alive and how much frame data is actually flowing.
+            # Mean brightness lets you spot "the camera is producing
+            # black frames" without needing the dashboard.
+            frames_since_log += 1
+            if now - last_log_t >= 10.0:
+                try:
+                    h, w = frame.shape[:2]
+                    mean_brightness = float(frame.mean())
+                except Exception:
+                    h = w = 0
+                    mean_brightness = -1.0
+                log.info(
+                    "capture stats: %d frames in last %.1fs (%.1f fps measured) %dx%d mean=%.1f",
+                    frames_since_log,
+                    now - last_log_t if last_log_t else 0.0,
+                    self._fps_capture,
+                    w, h, mean_brightness,
+                )
+                last_log_t = now
+                frames_since_log = 0
 
     def _process_loop(self) -> None:
         """Detect / overlay / encode / publish. Picks up the freshest
