@@ -1197,6 +1197,234 @@ function wireStreamFps() {
 }
 
 // ============================================================
+// Camera settings (gear button → modal with sliders + presets)
+//
+// Per-laptop preferences stored in localStorage. On page load we POST
+// the saved values to the server so the *encoded* MJPEG stream uses
+// them — saving the bandwidth on the Pi side, not just hiding it from
+// the browser. Multiple operators with different settings: last write
+// wins on the server (there's only one MJPEG stream out the Pi), but
+// each laptop keeps its own preferred profile in localStorage.
+// ============================================================
+
+const CAMERA_SETTINGS_KEY = "cfsight.camera.settings.v1";
+
+const CAMERA_PRESETS = [
+  // name → [fps, quality]. Tuned so each step roughly halves bandwidth
+  // vs. the next-up preset; "potato" is the "wifi is dying" floor.
+  { id: "potato", label: "Potato", fps: 10, quality: 25 },
+  { id: "low",    label: "Low",    fps: 15, quality: 40 },
+  { id: "med",    label: "Medium", fps: 20, quality: 55 },
+  { id: "high",   label: "High",   fps: 25, quality: 75 },
+  { id: "ultra",  label: "Ultra",  fps: 30, quality: 90 },
+];
+
+function loadCameraSettings() {
+  try {
+    const raw = localStorage.getItem(CAMERA_SETTINGS_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (typeof v.fps !== "number" || typeof v.quality !== "number") return null;
+    return v;
+  } catch (_) { return null; }
+}
+
+function saveCameraSettings(v) {
+  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify(v)); } catch (_) {}
+}
+
+async function pushCameraSettings(v) {
+  // Best-effort. If the server's down or returns an error the cookie
+  // still has the desired values for the next reload.
+  try {
+    const r = await fetch("/api/camera/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(v),
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (_) { return null; }
+}
+
+function matchingPreset(fps, quality) {
+  return CAMERA_PRESETS.find(p => p.fps === fps && p.quality === quality)?.id || null;
+}
+
+function bandwidthEstimate(fps, quality, w = 640, h = 480) {
+  // Empirical-ish: a 640×480 MJPEG frame at q=75 is ~25 KB. Bytes
+  // scale roughly linearly with quality below ~85, sub-linearly above.
+  // This is purely for the "≈ X KB/s" hint under the sliders — the
+  // exact number is unimportant; what matters is the shape (slider
+  // moved → number moved in the right direction).
+  const refKB = 25;
+  const qScale = Math.max(0.15, quality / 75);
+  const kbPerFrame = refKB * qScale * (w * h) / (640 * 480);
+  return Math.round(kbPerFrame * fps);
+}
+
+class CameraSettings {
+  constructor() {
+    this.btn = $("settings-btn");
+    if (!this.btn) return;
+    this.current = loadCameraSettings() || { fps: 20, quality: 55 };
+    // On page load: replay our saved settings to the server so the
+    // stream encoding matches what the operator asked for. Without
+    // this, a service restart on the Pi would silently revert to
+    // env defaults until the user opens the cog.
+    pushCameraSettings(this.current);
+    this.btn.addEventListener("click", () => this._open());
+  }
+
+  _open() {
+    const overlay = document.createElement("div");
+    overlay.className = "cf-modal-overlay";
+    const box = document.createElement("div");
+    box.className = "cf-modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("div");
+    title.className = "cf-modal-title";
+    title.textContent = "Camera settings";
+    box.appendChild(title);
+
+    // Presets row.
+    const presetsLbl = document.createElement("div");
+    presetsLbl.className = "cf-settings-est";
+    presetsLbl.textContent = "Presets";
+    box.appendChild(presetsLbl);
+    const presets = document.createElement("div");
+    presets.className = "cf-presets";
+    box.appendChild(presets);
+
+    // FPS row.
+    const fpsRow = document.createElement("div");
+    fpsRow.className = "cf-settings-row";
+    fpsRow.innerHTML = `
+      <span class="lbl">FPS</span>
+      <input type="range" min="5" max="30" step="1" />
+      <span class="val"></span>
+    `;
+    const fpsInput = fpsRow.querySelector("input");
+    const fpsVal   = fpsRow.querySelector(".val");
+    box.appendChild(fpsRow);
+
+    // Quality row.
+    const qRow = document.createElement("div");
+    qRow.className = "cf-settings-row";
+    qRow.innerHTML = `
+      <span class="lbl">Quality</span>
+      <input type="range" min="20" max="95" step="1" />
+      <span class="val"></span>
+    `;
+    const qInput = qRow.querySelector("input");
+    const qVal   = qRow.querySelector(".val");
+    box.appendChild(qRow);
+
+    // Bandwidth estimate.
+    const est = document.createElement("div");
+    est.className = "cf-settings-est";
+    box.appendChild(est);
+
+    const draftRef = { fps: this.current.fps, quality: this.current.quality };
+
+    const renderPresets = () => {
+      presets.replaceChildren();
+      const activeId = matchingPreset(draftRef.fps, draftRef.quality);
+      for (const p of CAMERA_PRESETS) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ghost" + (p.id === activeId ? " active" : "");
+        b.textContent = p.label;
+        b.title = `${p.fps} fps · q${p.quality}`;
+        b.addEventListener("click", () => {
+          draftRef.fps = p.fps;
+          draftRef.quality = p.quality;
+          syncControls();
+        });
+        presets.appendChild(b);
+      }
+    };
+
+    const syncControls = () => {
+      fpsInput.value = String(draftRef.fps);
+      qInput.value   = String(draftRef.quality);
+      fpsVal.textContent = `${draftRef.fps}`;
+      qVal.textContent   = `q${draftRef.quality}`;
+      est.textContent = `≈ ${bandwidthEstimate(draftRef.fps, draftRef.quality)} KB/s`;
+      renderPresets();
+    };
+
+    const onFpsInput = () => {
+      draftRef.fps = Number(fpsInput.value);
+      syncControls();
+      this._applyDebounced(draftRef);
+    };
+    const onQInput = () => {
+      draftRef.quality = Number(qInput.value);
+      syncControls();
+      this._applyDebounced(draftRef);
+    };
+    fpsInput.addEventListener("input", onFpsInput);
+    qInput.addEventListener("input", onQInput);
+
+    syncControls();
+
+    // Buttons row — Close (saves & exits), no separate cancel since
+    // changes apply live as the slider moves.
+    const row = document.createElement("div");
+    row.className = "cf-modal-buttons";
+    const close = document.createElement("button");
+    close.textContent = "Close";
+    close.className = "primary";
+    close.addEventListener("click", () => {
+      this._commit(draftRef);
+      overlay.classList.add("cf-modal-leaving");
+      setTimeout(() => overlay.remove(), 100);
+      document.removeEventListener("keydown", onKey);
+    });
+    row.appendChild(close);
+    box.appendChild(row);
+
+    overlay.appendChild(box);
+    (document.getElementById("cf-modal-mount") || document.body).appendChild(overlay);
+
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay) close.click();
+    });
+    const onKey = (ev) => {
+      if (ev.key === "Escape" || ev.key === "Enter") {
+        ev.preventDefault();
+        close.click();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    requestAnimationFrame(() => close.focus());
+  }
+
+  _applyDebounced(draft) {
+    // Coalesce rapid slider moves into one POST per ~120ms so we don't
+    // hammer the server while the operator drags. Final value lands
+    // either on idle or via the explicit commit on Close.
+    clearTimeout(this._t);
+    this._t = setTimeout(() => this._commit(draft), 120);
+  }
+
+  _commit(draft) {
+    const v = { fps: Number(draft.fps), quality: Number(draft.quality) };
+    if (v.fps === this.current.fps && v.quality === this.current.quality) return;
+    this.current = v;
+    saveCameraSettings(v);
+    pushCameraSettings(v).then((resp) => {
+      if (resp && resp.ok) {
+        toast(`stream → ${v.fps} fps · q${v.quality}`, "info");
+      }
+    });
+  }
+}
+
+// ============================================================
 // Bootstrap
 // ============================================================
 
@@ -1219,6 +1447,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const calView = new CalibrationView();
   new LogConsole();
   new TopicsBrowser();
+  new CameraSettings();
 
   new StateFeed([
     (s) => stateView.apply(s),

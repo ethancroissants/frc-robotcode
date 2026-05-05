@@ -793,6 +793,16 @@ class CameraEngine:
         self._last_capture_t = 0.0
         self._last_detect_t = 0.0
 
+        # Runtime-mutable stream settings. The dashboard's settings cog
+        # writes through to these via /api/camera/settings; the cookie
+        # holds the laptop's preferred values so they're re-applied on
+        # every page load. Env vars only seed the *initial* values.
+        # Lock-protected so the API thread can't tear a partial update
+        # while the process loop is reading.
+        self._settings_lock = threading.Lock()
+        self._stream_quality = int(STREAM_QUALITY)
+        self._camera_fps = int(CAMERA_FPS)
+
         # Detector setup. The 36h11 family is what FRC standardized on in
         # 2023; opencv ships the dictionary built-in, no extra deps.
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
@@ -982,6 +992,57 @@ class CameraEngine:
         with self._rec_lock:
             return self._recording.status() if self._recording else {"active": False}
 
+    # ----- runtime settings (dashboard's cog → here) -----
+
+    # Sane envelope: the FPS slider in the UI lets the operator pick
+    # anything in this range; the API clamps to it. Lower = less wifi
+    # bandwidth + less CPU, at the cost of choppier feed. Upper bound
+    # is the camera/Pi limit; pushing past 30 generally just queues
+    # frames instead of going faster.
+    _FPS_MIN, _FPS_MAX = 5, 30
+    # JPEG quality envelope. q=20 looks like a smear but the crosshair
+    # + tag ID labels are still legible — useful as a "wifi is dying,
+    # just give me anything" floor. q=95 is wasted bytes for a webcam.
+    _Q_MIN, _Q_MAX = 20, 95
+
+    def get_settings(self) -> dict:
+        with self._settings_lock:
+            return {
+                "fps": int(self._camera_fps),
+                "quality": int(self._stream_quality),
+                "fps_range": [self._FPS_MIN, self._FPS_MAX],
+                "quality_range": [self._Q_MIN, self._Q_MAX],
+            }
+
+    def update_settings(self, fps: int | None = None, quality: int | None = None) -> dict:
+        """Apply new fps/quality. Quality takes effect on the next encoded
+        frame (no capture restart). FPS calls cap.set(CAP_PROP_FPS) on
+        the live capture — most USB MJPEG cameras honor this without a
+        reopen; if your camera doesn't, you'll see no change in
+        capture-fps and a manual service restart will pick up the new
+        value via _open_capture()."""
+        applied: dict = {}
+        with self._settings_lock:
+            if quality is not None:
+                q = max(self._Q_MIN, min(self._Q_MAX, int(quality)))
+                if q != self._stream_quality:
+                    log.info("stream quality: %d → %d", self._stream_quality, q)
+                self._stream_quality = q
+                applied["quality"] = q
+            if fps is not None:
+                f = max(self._FPS_MIN, min(self._FPS_MAX, int(fps)))
+                if f != self._camera_fps:
+                    log.info("camera fps: %d → %d", self._camera_fps, f)
+                self._camera_fps = f
+                applied["fps"] = f
+                cap = self._cap
+                if cap is not None:
+                    try:
+                        cap.set(cv2.CAP_PROP_FPS, f)
+                    except Exception as e:
+                        log.warning("CAP_PROP_FPS set failed (%s) — will pick up on next reopen", e)
+        return {**self.get_settings(), "applied": applied}
+
     # ----- lifecycle -----
 
     def start(self) -> None:
@@ -1013,7 +1074,12 @@ class CameraEngine:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+        # Use the runtime-mutable fps so a reopen (after a USB hiccup)
+        # picks up whatever the dashboard last set, not the boot-time
+        # env default.
+        with self._settings_lock:
+            fps_now = self._camera_fps
+        cap.set(cv2.CAP_PROP_FPS, fps_now)
         # 1-frame buffer keeps latency low — without this, OpenCV defaults
         # to a few frames of internal queue and we'd aim at where the
         # target was 100 ms ago.
@@ -1021,7 +1087,7 @@ class CameraEngine:
         self._cap = cap
         log.info(
             "camera open: %dx%d @ %d fps target_tags=%s intrinsics=%s",
-            CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS, sorted(TARGET_TAG_IDS),
+            CAMERA_WIDTH, CAMERA_HEIGHT, fps_now, sorted(TARGET_TAG_IDS),
             self.intrinsics_source,
         )
         return True
@@ -1298,7 +1364,26 @@ class CameraEngine:
             cv2.putText(frame, label, (cx + 12, cy - 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_QUALITY])
+        # FPS overlay in the top-left corner. Two lines: capture (camera
+        # produces) and detect (effective AprilTag rate). Drawn last so
+        # nothing else can paint over it. Black drop-shadow under white
+        # text keeps it legible on bright field carpet *and* dark bumpers.
+        cap_fps = self._fps_capture
+        det_fps = self._fps_detect
+        with self._settings_lock:
+            qnow = self._stream_quality
+        line1 = f"{cap_fps:4.1f} fps"
+        line2 = f"q{qnow}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        thick = 1
+        x, y1 = 8, 18
+        y2 = y1 + 16
+        for (text, y) in ((line1, y1), (line2, y2)):
+            cv2.putText(frame, text, (x + 1, y + 1), font, scale, (0, 0, 0), thick + 1, cv2.LINE_AA)
+            cv2.putText(frame, text, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), qnow])
         return buf.tobytes() if ok else b""
 
     # ----- streaming to clients -----
@@ -1561,6 +1646,28 @@ async def api_record_stop() -> JSONResponse:
 @app.get("/api/record/status")
 async def api_record_status() -> JSONResponse:
     return JSONResponse(camera.recording_status())
+
+
+@app.get("/api/camera/settings")
+async def api_camera_settings_get() -> JSONResponse:
+    return JSONResponse(camera.get_settings())
+
+
+@app.post("/api/camera/settings")
+async def api_camera_settings_set(payload: dict) -> JSONResponse:
+    """Update runtime camera fps / quality. Both fields are optional —
+    the dashboard sends the full {fps, quality} object every change for
+    simplicity, but partial updates work too. Server clamps to the
+    engine's envelope and returns the post-clamp values so the UI can
+    snap its sliders if it asked for something out of range."""
+    try:
+        fps = payload.get("fps")
+        quality = payload.get("quality")
+        result = camera.update_settings(fps=fps, quality=quality)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        log.exception("camera settings update failed")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/recordings")

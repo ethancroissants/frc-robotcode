@@ -1401,3 +1401,70 @@ body.page-calibrate { user-select: text; overflow: auto; }
   border-color: rgba(220, 38, 38, 0.3);
   background: var(--bad-soft);
 }
+
+/* ================= Settings cog + camera-settings modal ================= */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+.icon-btn:hover { color: var(--text); }
+.icon-btn svg { display: block; }
+
+.cf-settings-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 56px;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+}
+.cf-settings-row .lbl {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+.cf-settings-row .val {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text);
+  text-align: right;
+}
+.cf-settings-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent, #4f46e5);
+}
+
+.cf-presets {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+.cf-presets button {
+  padding: 6px 4px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+  border-radius: 6px;
+}
+.cf-presets button.active {
+  color: var(--accent-strong, #ffffff);
+  background: var(--accent, #4f46e5);
+  border-color: var(--accent, #4f46e5);
+}
+
+.cf-settings-est {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
