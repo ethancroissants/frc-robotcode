@@ -6,8 +6,18 @@ uvicorn[standard]>=0.27
 # in nt4_client.py using websockets (transport) + msgpack (binary frames).
 websockets>=12
 msgpack>=1.0
-# OpenCV with contrib modules — gives us cv2.aruco.ArucoDetector for
-# AprilTag detection (DICT_APRILTAG_36h11). The headless wheel is smaller
-# and avoids GTK deps we don't need on a coprocessor.
+# OpenCV with contrib modules — used for camera capture, frame
+# preprocessing, and the JPEG/MJPEG render path. We previously also
+# used cv2.aruco for AprilTag detection, but cv2.aruco is a *port* of
+# the upstream AprilTag algorithm and is meaningfully worse at
+# distance: it loses tags 5-10 ft sooner than WPILib's wrapper around
+# the C++ AprilTag library does. We now prefer robotpy-apriltag
+# (same lib PhotonVision uses) and fall back to cv2.aruco only if it
+# can't be imported.
 opencv-contrib-python-headless>=4.8
 numpy>=1.24
+# WPILib's wrapper around the upstream C++ AprilTag detector. Same
+# library PhotonVision and the rio's vision pipelines use, so detection
+# behavior here matches what teams are used to. linux_aarch64 wheels
+# are on PyPI; install will pull them via pip on a connected Pi.
+robotpy-apriltag>=2024.0

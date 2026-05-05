@@ -61,6 +61,17 @@ from typing import AsyncIterator
 import cv2
 import nt4_client
 import numpy as np
+
+# robotpy-apriltag: WPILib's wrapper around the upstream C++ AprilTag
+# library. Same algorithm PhotonVision uses, much better long-range
+# detection than cv2.aruco's port. We import optionally so a fresh
+# clone without the package still runs (falls back to cv2.aruco).
+try:
+    import robotpy_apriltag as _rpa
+    _HAVE_RPA = True
+except Exception as _e:  # ImportError, plus any wheel-mismatch surprises
+    _rpa = None
+    _HAVE_RPA = False
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
@@ -126,25 +137,30 @@ DETECT_EVERY = int(os.environ.get("DETECT_EVERY", "1"))
 # pressure and corner refinement is more accurate without the resize.
 DETECT_DOWNSCALE = float(os.environ.get("DETECT_DOWNSCALE", "1.0"))
 
-# === Detection-only image preprocessing ===
-# These knobs sharpen the *gray frame fed to detectMarkers* without
-# touching the BGR frame the operator sees. The viewer stream stays
-# whatever quality the cog is set to; the AprilTag detector gets the
-# crispest possible input. This is what pushes reliable detection
-# from ~15 ft to ~25+ ft on a 6.5" tag.
+# === AprilTag detector tuning (PhotonVision-aligned) ===
+# These map 1:1 onto the upstream AprilTag detector's config. Defaults
+# match PhotonVision's "max range" preset.
 #
-# CLAHE = Contrast-Limited Adaptive Histogram Equalization. Boosts
-# local contrast tile-by-tile, which makes tag edges pop on uneven
-# lighting (one half of the field sunlit, the other in shadow). Set
-# DETECT_CLAHE_CLIP=0 to disable.
-DETECT_CLAHE_CLIP = float(os.environ.get("DETECT_CLAHE_CLIP", "3.0"))
-DETECT_CLAHE_TILES = int(os.environ.get("DETECT_CLAHE_TILES", "8"))
-# Unsharp mask: subtract a blurred copy from the original to crispen
-# edges. Compensates for soft focus / cheap-webcam optics. Strength
-# in [0..2]; 0 disables. >1 starts amplifying noise on faint tags so
-# tune carefully.
-DETECT_UNSHARP_AMOUNT = float(os.environ.get("DETECT_UNSHARP_AMOUNT", "0.6"))
-DETECT_UNSHARP_SIGMA = float(os.environ.get("DETECT_UNSHARP_SIGMA", "1.0"))
+# quad_decimate: downsample factor before the quad detector runs.
+# 1.0 = full resolution (max range, slowest). 2.0 = half-res (faster,
+# loses ~½ the detection range). PhotonVision's default is 2.0; we
+# pick 1.0 because the user's bottleneck is *range*, not CPU.
+APRILTAG_QUAD_DECIMATE = float(os.environ.get("APRILTAG_QUAD_DECIMATE", "1.0"))
+# quad_sigma: Gaussian blur applied to the gray image before quad
+# detection. PhotonVision keeps this at 0.0 — the AprilTag detector
+# already handles its own gradient/threshold work and additional blur
+# softens the very edges the quad detector wants. We mirror that.
+APRILTAG_QUAD_SIGMA = float(os.environ.get("APRILTAG_QUAD_SIGMA", "0.0"))
+# decode_sharpening: AprilTag's *internal* post-decode sharpening
+# applied to the candidate bit pattern (NOT image-wide sharpening).
+# PhotonVision default 0.25.
+APRILTAG_DECODE_SHARPENING = float(os.environ.get("APRILTAG_DECODE_SHARPENING", "0.25"))
+APRILTAG_NUM_THREADS = int(os.environ.get("APRILTAG_NUM_THREADS", "2"))
+# decision_margin_min: tags whose decode confidence is below this are
+# rejected as false positives. Lower = accept dimmer / partial /
+# distant tags but more false positives. PhotonVision default 35;
+# we drop to 25 to widen the acceptance window for distant tags.
+APRILTAG_DECISION_MARGIN_MIN = float(os.environ.get("APRILTAG_DECISION_MARGIN_MIN", "25"))
 
 # === Camera exposure (V4L2) ===
 # Auto-exposure on USB webcams "hunts" — it adjusts every frame and
@@ -869,59 +885,68 @@ class CameraEngine:
         self._stream_quality = int(STREAM_QUALITY)
         self._camera_fps = int(CAMERA_FPS)
 
-        # Detector setup. The 36h11 family is what FRC standardized on in
-        # 2023; opencv ships the dictionary built-in, no extra deps.
-        # The default DetectorParameters are tuned for ArUco markers of
-        # comfortable size in frame; we override the knobs that gate
-        # *small* / distant tags so we can detect a 6.5" tag from
-        # roughly 2× farther than the defaults.
-        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
-        params = cv2.aruco.DetectorParameters()
+        # Detector setup. We build BOTH a robotpy-apriltag detector
+        # (preferred — same library PhotonVision uses, the upstream
+        # AprilTag C++ implementation) AND an OpenCV ArUco detector
+        # (fallback, when robotpy-apriltag isn't installed). The 36h11
+        # family is what FRC standardized on in 2023.
+        #
+        # Why prefer robotpy-apriltag: cv2.aruco's "AprilTag" support
+        # is a *port*, not a wrapper around the real lib. It uses
+        # ArUco's quad detection by default and only routes some logic
+        # through the AprilTag-specific path; in practice this loses
+        # tags ~5-10 ft sooner than the upstream lib. Adding the
+        # upstream lib via robotpy-apriltag matches what teams running
+        # PhotonVision are already getting.
+        self._rpa_detector: "_rpa.AprilTagDetector | None" = None
+        self._cv_detector: "cv2.aruco.ArucoDetector | None" = None
+        self._detector_kind: str = "none"
 
-        # Accept tags whose perimeter is as little as 1% of the longer
-        # image dimension (default is 3%). At 1280x720 that's a tag
-        # roughly 12 px on a side — about as small as the 6x6 data grid
-        # in 36h11 stays reliably decodable. Drop further at the cost
-        # of false positives.
-        params.minMarkerPerimeterRate = 0.01
+        if _HAVE_RPA:
+            try:
+                d = _rpa.AprilTagDetector()
+                d.addFamily("tag36h11")
+                cfg = d.getConfig()
+                cfg.numThreads = APRILTAG_NUM_THREADS
+                cfg.quadDecimate = APRILTAG_QUAD_DECIMATE
+                cfg.quadSigma = APRILTAG_QUAD_SIGMA
+                cfg.refineEdges = True
+                cfg.decodeSharpening = APRILTAG_DECODE_SHARPENING
+                cfg.debug = False
+                d.setConfig(cfg)
+                self._rpa_detector = d
+                self._detector_kind = "robotpy-apriltag"
+                log.info(
+                    "AprilTag detector: robotpy-apriltag (decimate=%.2f sigma=%.2f sharpen=%.2f threads=%d margin_min=%.0f)",
+                    APRILTAG_QUAD_DECIMATE, APRILTAG_QUAD_SIGMA,
+                    APRILTAG_DECODE_SHARPENING, APRILTAG_NUM_THREADS,
+                    APRILTAG_DECISION_MARGIN_MIN,
+                )
+            except Exception as e:
+                log.warning("robotpy-apriltag setup failed (%s) — falling back to cv2.aruco", e)
 
-        # How close two corners can be (relative to perimeter) before
-        # the candidate is rejected as degenerate. Tight tags at range
-        # have visually-close corners; the default 0.05 was kicking
-        # them out before the decoder got a chance.
-        params.minCornerDistanceRate = 0.02
-
-        # Adaptive-threshold sweep: try more window sizes between min
-        # and max. Step=4 (vs default 10) means we re-threshold at
-        # 3,7,11,15,19,23 instead of just 3,13,23 — small/distant tags
-        # often only quad-detect at one specific window size.
-        params.adaptiveThreshWinSizeStep = 4
-
-        # CORNER_REFINE_APRILTAG is purpose-built for the AprilTag
-        # gradient pattern (vs. CORNER_REFINE_SUBPIX which is generic
-        # contour-fit). On distant tags the AprilTag refiner gives
-        # sub-pixel corners with much less drift, which directly
-        # tightens bearing accuracy at range. Falls back to SUBPIX on
-        # OpenCV builds that don't expose the AprilTag refiner.
-        try:
-            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
-        except AttributeError:
-            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-
-        self._detector = cv2.aruco.ArucoDetector(dictionary, params)
-
-        # CLAHE object — built once, .apply() per detect. clipLimit
-        # higher than ~4 starts amplifying noise into false-positive
-        # blobs the detector chases at long range; 3.0 is the sweet
-        # spot on the FRC field's mixed-lighting reality.
-        self._clahe = (
-            cv2.createCLAHE(
-                clipLimit=DETECT_CLAHE_CLIP,
-                tileGridSize=(DETECT_CLAHE_TILES, DETECT_CLAHE_TILES),
-            )
-            if DETECT_CLAHE_CLIP > 0
-            else None
-        )
+        if self._rpa_detector is None:
+            # cv2.aruco fallback. Stock parameters — earlier attempts
+            # to lower minMarkerPerimeterRate / shrink corner spacing /
+            # widen the threshold sweep flooded the detector with
+            # false-candidate quads and made things *worse*. The
+            # AprilTag-specific cv2.aruco params (aprilTagQuadDecimate
+            # etc.) are exposed below in case a future cv2 version
+            # actually uses them in the AprilTag dictionary path.
+            dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+            params = cv2.aruco.DetectorParameters()
+            try:
+                params.aprilTagQuadDecimate = APRILTAG_QUAD_DECIMATE
+                params.aprilTagQuadSigma = APRILTAG_QUAD_SIGMA
+            except AttributeError:
+                pass
+            try:
+                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+            except AttributeError:
+                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            self._cv_detector = cv2.aruco.ArucoDetector(dictionary, params)
+            self._detector_kind = "cv2.aruco (fallback)"
+            log.info("AprilTag detector: cv2.aruco fallback — install robotpy-apriltag for ~2× more detection range")
 
         # Real intrinsics if available; otherwise FOV synthesis. Logged at
         # startup so the debug panel can show which path is in use.
@@ -1367,6 +1392,56 @@ class CameraEngine:
 
     # ----- detection -----
 
+    def _run_detector(self, gray: np.ndarray) -> tuple[list[int], list[np.ndarray]]:
+        """Run whichever detector is loaded. Always returns corners in
+        cv2.aruco's TL, TR, BR, BL order so the rest of the pipeline
+        (PnP object points, hit-testing, rendering) is detector-
+        agnostic. robotpy-apriltag returns BL, BR, TR, TL — we reverse
+        on the way out.
+
+        Returns (ids: list[int], corners: list of (4, 2) float32).
+        Empty list when nothing detected.
+        """
+        if self._rpa_detector is not None:
+            ids: list[int] = []
+            corners: list[np.ndarray] = []
+            try:
+                results = self._rpa_detector.detect(gray)
+            except Exception as e:
+                # robotpy-apriltag's detect() can raise on malformed
+                # buffers; fall back to cv2.aruco for this frame so a
+                # transient hiccup doesn't blank detection entirely.
+                log.warning("robotpy-apriltag detect raised (%s)", e)
+                return [], []
+            for r in results:
+                # PhotonVision-style decision-margin filter: lower =
+                # more accepting (catches faint distant tags) at the
+                # cost of more false positives. The 36h11 family has
+                # huge Hamming distance, so even at margin=20 false
+                # positives are vanishingly rare.
+                if r.getDecisionMargin() < APRILTAG_DECISION_MARGIN_MIN:
+                    continue
+                pts = np.empty((4, 2), dtype=np.float32)
+                # robotpy-apriltag corner order: BL, BR, TR, TL.
+                # cv2.aruco order: TL, TR, BR, BL = reverse.
+                for i in range(4):
+                    c = r.getCorner(i)
+                    pts[3 - i] = (c.x, c.y)
+                ids.append(int(r.getId()))
+                corners.append(pts)
+            return ids, corners
+
+        if self._cv_detector is not None:
+            cv_corners, cv_ids, _ = self._cv_detector.detectMarkers(gray)
+            if cv_ids is None or len(cv_ids) == 0:
+                return [], []
+            return (
+                [int(t) for t in cv_ids.flatten().tolist()],
+                [c.reshape(4, 2).astype(np.float32) for c in cv_corners],
+            )
+
+        return [], []
+
     def _detect(self, bgr: np.ndarray) -> Detection | None:
         # Detection runs on a downscaled grey copy when DETECT_DOWNSCALE<1.
         # At 720p we run full-res by default — corner refinement is more
@@ -1378,32 +1453,14 @@ class CameraEngine:
             small = bgr
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-        # === Detection-only sharpening ===
-        # Everything below acts on the gray buffer fed to detectMarkers.
-        # The viewer's BGR frame is *untouched*, so the JPEG stream
-        # bandwidth is unaffected. The goal is purely: give the
-        # AprilTag quad detector the crispest possible input so it
-        # locks distant tags it'd otherwise drop.
-        if self._clahe is not None:
-            # CLAHE: per-tile contrast stretch. Tag patterns become
-            # *much* more discriminable on uneven lighting / faint
-            # frames. ~2-4 ms at 720p on Pi 5.
-            gray = self._clahe.apply(gray)
-        if DETECT_UNSHARP_AMOUNT > 0.0:
-            # Unsharp mask: gray + amount * (gray - blur). Reformulated
-            # via addWeighted so we don't materialize the difference.
-            # Compensates for soft focus and lens MTF rolloff at the
-            # corners. Strong values amplify sensor noise into ghost
-            # quads, so we keep amount conservative by default.
-            blur = cv2.GaussianBlur(gray, (0, 0), DETECT_UNSHARP_SIGMA)
-            gray = cv2.addWeighted(
-                gray, 1.0 + DETECT_UNSHARP_AMOUNT,
-                blur, -DETECT_UNSHARP_AMOUNT,
-                0,
-            )
-
-        corners_list, ids, _ = self._detector.detectMarkers(gray)
-        if ids is None or len(ids) == 0:
+        # No CLAHE, no unsharp mask, no contrast tricks: the AprilTag
+        # detector is *designed* to work directly off raw grayscale.
+        # Pre-processing the input typically hurts long-range detection
+        # (it smooths the very edges the quad detector wants, or
+        # amplifies sensor noise into ghost candidates that bury the
+        # real tag). PhotonVision feeds raw gray and so do we.
+        ids_list, corners_list = self._run_detector(gray)
+        if not ids_list:
             self._latest_all = []
             return None
 
@@ -1411,6 +1468,12 @@ class CameraEngine:
         # bearing math use the camera matrix we built for full-res.
         scale = 1.0 / DETECT_DOWNSCALE if DETECT_DOWNSCALE != 0 else 1.0
         scaled_corners = [c * scale for c in corners_list]
+        # Re-pack so the rest of the function sees the cv2.aruco-shaped
+        # output it always did: ids as np.array of shape (N,1) and
+        # corners as a list of (1,4,2) float32 arrays.
+        ids = np.array(ids_list, dtype=np.int32).reshape(-1, 1)
+        corners_list = [c.reshape(1, 4, 2).astype(np.float32) for c in scaled_corners]
+        scaled_corners = corners_list
 
         # Cache every detected tag so the renderer + UI can show non-target
         # detections in a different color and so the click-to-target hit
@@ -1690,6 +1753,7 @@ async def api_state(request: Request) -> StreamingResponse:
                 }
                 snap["version"] = VERSION
                 snap["intrinsics_source"] = camera.intrinsics_source
+                snap["detector_kind"] = camera._detector_kind
                 # Surface the rio NT host so the dashboard can show
                 # *which* address we're dialing — without this, "rio
                 # disconnected" gives the operator no information about
