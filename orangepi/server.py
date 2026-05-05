@@ -857,6 +857,11 @@ class CameraEngine:
         self._detect_count: int = 0
         self._last_detect_log_t: float = time.monotonic()
 
+        # Cached path to the device that last successfully produced
+        # frames. Starts at the env-configured CAMERA_DEVICE; auto-
+        # discovery in _open_capture updates it on first success.
+        self._working_device: str = CAMERA_DEVICE
+
         # Active recording (or None). Owned by the camera thread; the API
         # endpoints flip this on/off via start_recording/stop_recording
         # which serialize through the engine lock.
@@ -1236,44 +1241,63 @@ class CameraEngine:
 
     # ----- main loop -----
 
-    def _open_capture(self) -> bool:
-        cap = cv2.VideoCapture(CAMERA_DEVICE, cv2.CAP_V4L2)
+    # /dev/video* nodes whose `name` (from sysfs) matches any of these
+    # patterns are NOT USB UVC cameras and should be skipped during
+    # auto-discovery. On Pi 5 / RPi-2712 kernels, /dev/video0 is the
+    # CSI camera node — it opens cleanly and accepts every cap.set(),
+    # but cap.read() times out forever because there's no CSI sensor
+    # attached. The user's symptom: black stream + `select() timeout`
+    # warnings every 10 s. Filtering these by name lets us skip them
+    # without paying the 10-second V4L2 timeout per device.
+    _NON_USB_VIDEO_NAME_HINTS = (
+        "bcm2835", "rpivid", "hevc", "unicam", "pispbe",
+        "rpi-cfe",  # Pi 5 camera frontend
+        "rkisp", "rkcif",  # Rockchip ISP / capture (Orange Pi 5 default)
+        "h264", "vpu", "codec",
+    )
+
+    def _enumerate_usb_cameras(self) -> list[tuple[str, str]]:
+        """Walk /dev/video* and return [(path, friendly_name), ...] for
+        nodes that look like USB UVC cameras (i.e., not CSI/codec/ISP
+        on the same SoC). Reads /sys/class/video4linux/<dev>/name to
+        avoid actually opening the device — opening + read-timing-out
+        on a CSI node takes ~10 s, which we'd rather skip."""
+        out: list[tuple[str, str]] = []
+        try:
+            paths = sorted(Path("/dev").glob("video*"))
+        except Exception as e:
+            log.warning("could not enumerate /dev/video*: %s", e)
+            return out
+        for p in paths:
+            try:
+                name = Path(f"/sys/class/video4linux/{p.name}/name").read_text().strip()
+            except Exception:
+                name = "(unknown)"
+            lname = name.lower()
+            if any(hint in lname for hint in self._NON_USB_VIDEO_NAME_HINTS):
+                continue
+            out.append((str(p), name))
+        return out
+
+    def _try_configure(self, device_path: str) -> bool:
+        """Open + configure + verify the given device path. Verification
+        is critical: on Pi 5 (and similar boards), a CSI node opens
+        cleanly and accepts every set() call but never produces
+        frames. We confirm by reading at least one frame within 3 s."""
+        cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
         if not cap.isOpened():
-            log.error("could not open %s", CAMERA_DEVICE)
+            log.info("auto-discover: %s did not open", device_path)
             return False
-        # Force MJPEG so the V4L2 driver hands us hardware-decoded frames
-        # instead of negotiating a slower YUYV path.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        # Use the runtime-mutable fps so a reopen (after a USB hiccup)
-        # picks up whatever the dashboard last set, not the boot-time
-        # env default.
         with self._settings_lock:
             fps_now = self._camera_fps
         cap.set(cv2.CAP_PROP_FPS, fps_now)
-        # BUFFERSIZE=1 was nice for latency but caused recurring
-        # `tryIoctl VIDEOIO(V4L2:/dev/video0)` warnings + full reopens
-        # every ~10 s on some webcams (USB UVC drivers underflow when
-        # the consumer is fast enough that the kernel queue stays
-        # empty). 2 is the sweet spot: still tiny latency penalty
-        # (~50 ms at 20 fps), MUCH more stable. Our capture/process
-        # split already discards stale frames so the operator-visible
-        # latency is bounded by one detect+encode cycle, not buffer
-        # depth.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
 
-        # Manual exposure (env-driven, opt-in). Auto-exposure produces
-        # motion-blurred frames mid-swing as the camera firmware adjusts
-        # — fatal for distant tag detection where a 12-pixel tag with a
-        # 1-pixel motion blur becomes undecodable. With a fixed short
-        # shutter the field needs to be reasonably lit, but tags stay
-        # razor-sharp through any robot motion.
         if MANUAL_EXPOSURE > 0:
             try:
-                # 1 = manual on most UVC cameras (Logitech, ELP, etc.).
-                # Some Linux UVC builds want 0.25 instead — we try the
-                # common one and the camera either honors it or not.
                 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
                 cap.set(cv2.CAP_PROP_EXPOSURE, MANUAL_EXPOSURE)
                 if MANUAL_GAIN >= 0:
@@ -1286,13 +1310,67 @@ class CameraEngine:
             except Exception as e:
                 log.warning("manual exposure setup failed (%s) — using auto", e)
 
+        # Verify by actually reading a frame. cap.read() on a non-
+        # producing device blocks for V4L2's full select() timeout
+        # (~10 s on this kernel) before returning False — that's our
+        # one-shot "is this really a camera?" gate.
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            log.warning("auto-discover: %s opens but produces no frames", device_path)
+            try: cap.release()
+            except Exception: pass
+            return False
+
         self._cap = cap
         log.info(
-            "camera open: %dx%d @ %d fps target_tags=%s intrinsics=%s",
-            CAMERA_WIDTH, CAMERA_HEIGHT, fps_now, sorted(TARGET_TAG_IDS),
-            self.intrinsics_source,
+            "camera open: %s @ %dx%d %d fps target_tags=%s intrinsics=%s",
+            device_path, CAMERA_WIDTH, CAMERA_HEIGHT, fps_now,
+            sorted(TARGET_TAG_IDS), self.intrinsics_source,
         )
         return True
+
+    def _open_capture(self) -> bool:
+        # Try the device we last had success with (or the env-configured
+        # one on first run). If it produces frames, great. If not, walk
+        # /dev/video* USB candidates in order. This is the single biggest
+        # workaround for "the dashboard shows a black stream" on Pi 5
+        # where /dev/video0 is reserved for CSI and the USB camera is
+        # actually on /dev/video1+.
+        primary = self._working_device
+        if self._try_configure(primary):
+            return True
+
+        log.warning(
+            "%s opened but produced no frames within the V4L2 timeout — "
+            "scanning other /dev/video* candidates (likely CSI vs USB issue)",
+            primary,
+        )
+
+        candidates = self._enumerate_usb_cameras()
+        # Log what we see so the user can paste it back if scan still
+        # finds nothing — they'd know what `v4l2-ctl --list-devices`
+        # would have told them.
+        log.info("candidate USB cameras: %s", candidates or "(none)")
+
+        for path, name in candidates:
+            if path == primary:
+                continue
+            log.info("auto-discover: trying %s (%s)", path, name)
+            if self._try_configure(path):
+                self._working_device = path  # cache for future reopens
+                log.info(
+                    "✓ auto-discovered working camera at %s (%s). "
+                    "Add `CAMERA_DEVICE=%s` to sight.env to skip the scan next boot.",
+                    path, name, path,
+                )
+                return True
+
+        log.error(
+            "no working camera found. Run on the Pi: "
+            "`v4l2-ctl --list-devices` (apt install v4l-utils) and "
+            "set `CAMERA_DEVICE=/dev/videoN` in sight.env to the matching node."
+        )
+        return False
 
     def _capture_loop(self) -> None:
         """V4L2 reader. Drains frames as fast as the camera produces and
@@ -1310,7 +1388,12 @@ class CameraEngine:
         only reopen if the camera's truly stuck.
         """
         log.info("camera-capture thread started")
-        MAX_TRANSIENT_FAILS = 5
+        # V4L2's select() timeout is ~10 s on this kernel, so each
+        # failed read costs 10 s. 2 fails = 20 s before we try to
+        # reopen — long enough for a transient USB hiccup to clear
+        # without us slamming the device, short enough that a wedged
+        # camera gets retried instead of soaking forever.
+        MAX_TRANSIENT_FAILS = 2
         transient_fails = 0
         last_log_t = time.monotonic()
         frames_since_log = 0
