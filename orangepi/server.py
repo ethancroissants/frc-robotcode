@@ -855,7 +855,7 @@ class CameraEngine:
         # needing the dashboard. Clear via service restart.
         self._logged_tag_ids: set[int] = set()
         self._detect_count: int = 0
-        self._last_detect_log_t: float = 0.0
+        self._last_detect_log_t: float = time.monotonic()
 
         # Active recording (or None). Owned by the camera thread; the API
         # endpoints flip this on/off via start_recording/stop_recording
@@ -1309,9 +1309,10 @@ class CameraEngine:
         retry up to MAX_TRANSIENT_FAILS times with a tiny delay, and
         only reopen if the camera's truly stuck.
         """
+        log.info("camera-capture thread started")
         MAX_TRANSIENT_FAILS = 5
         transient_fails = 0
-        last_log_t = 0.0
+        last_log_t = time.monotonic()
         frames_since_log = 0
         while not self._stop.is_set():
             if self._cap is None and not self._open_capture():
@@ -1386,6 +1387,10 @@ class CameraEngine:
         matter what we ask for, and without this pacing the slider
         was a no-op for them on the bandwidth axis.
         """
+        log.info(
+            "camera-process thread started (detector=%s)",
+            self._detector_kind,
+        )
         last_token = -1
         last_emit_t = 0.0
         while not self._stop.is_set():
@@ -1403,7 +1408,17 @@ class CameraEngine:
             det = self._latest_det
             if self._frame_idx % max(1, DETECT_EVERY) == 0:
                 t0 = time.monotonic()
-                det = self._detect(frame)
+                # Wrap detect in try/except so a single bad frame /
+                # detector exception can't kill the entire process
+                # loop and leave the dashboard frozen with no logs.
+                # An unhandled exception in a thread silently exits
+                # it, which is exactly the failure mode that hid the
+                # earlier "no detector stats" symptom.
+                try:
+                    det = self._detect(frame)
+                except Exception as e:
+                    log.exception("detect raised: %s", e)
+                    det = None
                 self._latest_det = det
                 self._det_t_window.append(t0)
                 if len(self._det_t_window) >= 2:
