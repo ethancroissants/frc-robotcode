@@ -92,15 +92,18 @@ VERSION = "2.3.0"
 TEAM = int(os.environ.get("TEAM", "1279"))
 NT_SERVER = os.environ.get("NT_SERVER", "")
 CAMERA_DEVICE = os.environ.get("CAMERA_DEVICE", "/dev/video0")
-# 1280x720 doubles the linear pixel count vs. 480p, which roughly
-# doubles the *distance* at which a 6.5" tag is large enough for the
-# AprilTag detector to lock onto it. Pi 5 + USB MJPEG handles 720p
-# capture at 30 fps comfortably; detection at full-res 720p costs more
-# CPU per frame but stays under one frame interval at 20 fps target.
-# If you're on a slower SBC or want max FPS over range, drop to
-# 640x480 via env (`CAMERA_WIDTH=640 CAMERA_HEIGHT=480` in sight.env).
-CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "1280"))
-CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "720"))
+# 640x480 is the universal hardware-MJPEG mode on USB webcams — every
+# camera supports it, the V4L2 driver hands us hardware-decoded frames
+# at 30 fps, and the AprilTag detector has plenty of headroom. Bumping
+# to 1280x720 sounded like free range (more pixels per tag) but on
+# many webcams 720p isn't a native MJPEG mode — the driver silently
+# falls back to YUYV, which is uncompressed and slow over USB, dropping
+# us to ~5-10 fps with stuttery frames. The robotpy-apriltag detector
+# below is what actually gives us range, not the resolution bump. If
+# you have a known-good 720p MJPEG webcam (e.g. Logitech C270/C920),
+# override via env: `CAMERA_WIDTH=1280 CAMERA_HEIGHT=720` in sight.env.
+CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "640"))
+CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "480"))
 # 20 fps is the sweet spot over field wifi: at 30 fps the bitrate (and
 # the kernel send queue) outruns a marginal link as the robot rolls
 # away from the AP, and the operator sees a 1-2 s delayed feed because
@@ -158,9 +161,19 @@ APRILTAG_DECODE_SHARPENING = float(os.environ.get("APRILTAG_DECODE_SHARPENING", 
 APRILTAG_NUM_THREADS = int(os.environ.get("APRILTAG_NUM_THREADS", "2"))
 # decision_margin_min: tags whose decode confidence is below this are
 # rejected as false positives. Lower = accept dimmer / partial /
-# distant tags but more false positives. PhotonVision default 35;
-# we drop to 25 to widen the acceptance window for distant tags.
-APRILTAG_DECISION_MARGIN_MIN = float(os.environ.get("APRILTAG_DECISION_MARGIN_MIN", "25"))
+# distant tags. The 36h11 family has a Hamming distance of 11 — false
+# positives at the dictionary level are vanishingly rare, so we leave
+# this at 0 (no filter) by default and let the user tune up if they
+# see ghost detections. PhotonVision default is 35 but their use case
+# (multi-camera, fused PnP) is more sensitive to false reads than ours.
+APRILTAG_DECISION_MARGIN_MIN = float(os.environ.get("APRILTAG_DECISION_MARGIN_MIN", "0"))
+# Quad-threshold knobs. These are the AprilTag library's pre-decode
+# filters — i.e., what counts as "looks like a quadrilateral that
+# might be a tag". Defaults are tuned for "comfortable size" tags;
+# we lower minClusterPixels so very small (distant) candidate quads
+# aren't tossed before the decoder gets a chance.
+APRILTAG_MIN_CLUSTER_PIXELS = int(os.environ.get("APRILTAG_MIN_CLUSTER_PIXELS", "3"))
+APRILTAG_MIN_WHITE_BLACK_DIFF = int(os.environ.get("APRILTAG_MIN_WHITE_BLACK_DIFF", "5"))
 
 # === Camera exposure (V4L2) ===
 # Auto-exposure on USB webcams "hunts" — it adjusts every frame and
@@ -837,6 +850,13 @@ class CameraEngine:
         # different tag than what the operator clicked.
         self._selected_tag_id: int | None = None
 
+        # Diagnostic state: first time each tag ID is seen since startup,
+        # we log it so the journal proves the chain is alive without
+        # needing the dashboard. Clear via service restart.
+        self._logged_tag_ids: set[int] = set()
+        self._detect_count: int = 0
+        self._last_detect_log_t: float = 0.0
+
         # Active recording (or None). Owned by the camera thread; the API
         # endpoints flip this on/off via start_recording/stop_recording
         # which serialize through the engine lock.
@@ -914,39 +934,52 @@ class CameraEngine:
                 cfg.decodeSharpening = APRILTAG_DECODE_SHARPENING
                 cfg.debug = False
                 d.setConfig(cfg)
+                # Quad-threshold knobs — these gate which candidate
+                # blobs get sent to the bit-pattern decoder. Lowering
+                # minClusterPixels is the single biggest win for
+                # detecting small/distant tags. Wrapped in try/except
+                # because the QuadThresholdParameters API exists in
+                # newer robotpy-apriltag versions; older wheels just
+                # use the defaults silently.
+                try:
+                    qtp = d.getQuadThresholdParameters()
+                    qtp.minClusterPixels = APRILTAG_MIN_CLUSTER_PIXELS
+                    qtp.minWhiteBlackDiff = APRILTAG_MIN_WHITE_BLACK_DIFF
+                    d.setQuadThresholdParameters(qtp)
+                except Exception as e:
+                    log.warning("QuadThresholdParameters not available (%s) — using defaults", e)
                 self._rpa_detector = d
                 self._detector_kind = "robotpy-apriltag"
                 log.info(
-                    "AprilTag detector: robotpy-apriltag (decimate=%.2f sigma=%.2f sharpen=%.2f threads=%d margin_min=%.0f)",
+                    "AprilTag detector: robotpy-apriltag (decimate=%.2f sigma=%.2f sharpen=%.2f "
+                    "threads=%d margin_min=%.0f min_cluster_px=%d min_wb_diff=%d)",
                     APRILTAG_QUAD_DECIMATE, APRILTAG_QUAD_SIGMA,
                     APRILTAG_DECODE_SHARPENING, APRILTAG_NUM_THREADS,
-                    APRILTAG_DECISION_MARGIN_MIN,
+                    APRILTAG_DECISION_MARGIN_MIN, APRILTAG_MIN_CLUSTER_PIXELS,
+                    APRILTAG_MIN_WHITE_BLACK_DIFF,
                 )
             except Exception as e:
                 log.warning("robotpy-apriltag setup failed (%s) — falling back to cv2.aruco", e)
 
         if self._rpa_detector is None:
-            # cv2.aruco fallback. Stock parameters — earlier attempts
-            # to lower minMarkerPerimeterRate / shrink corner spacing /
-            # widen the threshold sweep flooded the detector with
-            # false-candidate quads and made things *worse*. The
-            # AprilTag-specific cv2.aruco params (aprilTagQuadDecimate
-            # etc.) are exposed below in case a future cv2 version
-            # actually uses them in the AprilTag dictionary path.
+            # cv2.aruco fallback — *exact* original config. Don't add
+            # tuning here: every "improvement" we tried (lowering
+            # minMarkerPerimeterRate, switching to CORNER_REFINE_APRILTAG,
+            # widening the adaptive-threshold sweep) made detection
+            # *worse* in cv2.aruco's port. The original SUBPIX corner
+            # refinement is the known-good baseline that hit ~15 ft
+            # range on a 6.5" tag. To go past that, install
+            # robotpy-apriltag (the upstream lib) instead.
             dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
             params = cv2.aruco.DetectorParameters()
-            try:
-                params.aprilTagQuadDecimate = APRILTAG_QUAD_DECIMATE
-                params.aprilTagQuadSigma = APRILTAG_QUAD_SIGMA
-            except AttributeError:
-                pass
-            try:
-                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
-            except AttributeError:
-                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
             self._cv_detector = cv2.aruco.ArucoDetector(dictionary, params)
             self._detector_kind = "cv2.aruco (fallback)"
-            log.info("AprilTag detector: cv2.aruco fallback — install robotpy-apriltag for ~2× more detection range")
+            log.warning(
+                "AprilTag detector: cv2.aruco FALLBACK — robotpy-apriltag isn't "
+                "installed. Detection range is capped at ~15 ft. Install with: "
+                "  .venv/bin/pip install robotpy-apriltag  (needs Python 3.11+ wheel)"
+            )
 
         # Real intrinsics if available; otherwise FOV synthesis. Logged at
         # startup so the debug panel can show which path is in use.
@@ -1460,6 +1493,29 @@ class CameraEngine:
         # amplifies sensor noise into ghost candidates that bury the
         # real tag). PhotonVision feeds raw gray and so do we.
         ids_list, corners_list = self._run_detector(gray)
+
+        # Diagnostic logging — proves end-to-end detection works without
+        # needing the dashboard. First time each tag ID is seen since
+        # startup we log it; periodic stats every 10 s confirm the
+        # detector keeps firing.
+        if ids_list:
+            self._detect_count += len(ids_list)
+            for tid in ids_list:
+                if tid not in self._logged_tag_ids:
+                    self._logged_tag_ids.add(tid)
+                    log.info("first detection of tag #%d (total tags seen so far: %s)",
+                             tid, sorted(self._logged_tag_ids))
+        now_t = time.monotonic()
+        if now_t - self._last_detect_log_t >= 10.0:
+            log.info(
+                "detector stats: %d detections in last %.0fs · seen IDs: %s",
+                self._detect_count,
+                now_t - self._last_detect_log_t if self._last_detect_log_t else 0.0,
+                sorted(self._logged_tag_ids) or "(none)",
+            )
+            self._last_detect_log_t = now_t
+            self._detect_count = 0
+
         if not ids_list:
             self._latest_all = []
             return None
