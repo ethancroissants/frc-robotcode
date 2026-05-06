@@ -497,7 +497,7 @@ def detect_pi_env(cfg: dict) -> dict | None:
     probe = r"""
 echo PY:$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')
 echo ARCH:$(python3 -c 'import sysconfig;print(sysconfig.get_platform().rsplit("-",1)[-1])')
-for spec in 'python3-venv' 'python3-pip' 'libgl1' 'libglib2.0-0t64|libglib2.0-0'; do
+for spec in 'python3-venv' 'python3-pip' 'libgl1' 'libglib2.0-0t64|libglib2.0-0' 'build-essential' 'cmake' 'curl' 'ca-certificates'; do
   ok=0
   IFS='|'
   for pkg in $spec; do
@@ -724,8 +724,13 @@ def bridge_internet_for_setup(
             # crash with "'charmap' codec can't decode" — non-tty SSH
             # sessions default to a minimal locale and pip writes non-ASCII
             # progress glyphs.
+            #
+            # No `--only-binary=:all:`: when a package doesn't ship a wheel
+            # for our (python, glibc, arch) combo, pip falls back to fetching
+            # the sdist and install.sh builds from source on the Pi (we
+            # already added build-essential + cmake to apt deps for this).
             f"LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
-            f"\"$BRIDGE_PY\" -m pip download --only-binary=:all: "
+            f"\"$BRIDGE_PY\" -m pip download "
             f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
             f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
             # Strip CR before hashing so this stamp matches what the

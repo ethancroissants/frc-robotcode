@@ -62,15 +62,16 @@ import cv2
 import nt4_client
 import numpy as np
 
-# pupil-apriltags: Python wrapper around the *same* upstream C++
-# AprilTag library that PhotonVision / WPILib's robotpy-apriltag use
-# — identical detection algorithm, ~2× the cv2.aruco port's range.
-# Picked over robotpy-apriltag because pupil-apriltags ships
-# manylinux2014 wheels that install on Bullseye (glibc 2.31) where
-# robotpy's manylinux_2_35 wheels won't. Imported optionally so a
+# pyapriltags: Python wrapper around the *same* upstream C++ AprilTag
+# library that PhotonVision / WPILib's robotpy-apriltag use —
+# identical detection algorithm, ~2× the cv2.aruco port's range.
+# Picked over robotpy-apriltag (manylinux_2_35 wheels, Bookworm-only)
+# and pupil-apriltags (no aarch64 wheels at all) because pyapriltags
+# is the only Python wrapper around the upstream AprilTag lib that
+# publishes aarch64 wheels for cp310+. Imported optionally so a
 # fresh clone without the package still runs (falls back to cv2.aruco).
 try:
-    import pupil_apriltags as _pa
+    import pyapriltags as _pa
     _HAVE_PA = True
 except Exception as _e:  # ImportError + any wheel-mismatch surprises
     _pa = None
@@ -913,16 +914,16 @@ class CameraEngine:
         self._stream_quality = int(STREAM_QUALITY)
         self._camera_fps = int(CAMERA_FPS)
 
-        # Detector setup. We build BOTH a pupil-apriltags detector
-        # (preferred — the upstream AprilTag C++ implementation, same
-        # algorithm PhotonVision uses) AND an OpenCV ArUco detector
-        # (fallback, when pupil-apriltags isn't installed). The 36h11
-        # family is what FRC standardized on in 2023.
+        # Detector setup. We build BOTH a pyapriltags detector (preferred
+        # — the upstream AprilTag C++ implementation, same algorithm
+        # PhotonVision uses) AND an OpenCV ArUco detector (fallback,
+        # when pyapriltags isn't installed). The 36h11 family is what
+        # FRC standardized on in 2023.
         #
-        # Why prefer pupil-apriltags: cv2.aruco's "AprilTag" support
-        # is a *port*, not a wrapper around the real lib. It uses
-        # ArUco's quad detection by default; in practice this loses
-        # tags ~5-10 ft sooner than the upstream lib.
+        # Why prefer pyapriltags: cv2.aruco's "AprilTag" support is a
+        # *port*, not a wrapper around the real lib. It uses ArUco's
+        # quad detection by default; in practice this loses tags
+        # ~5-10 ft sooner than the upstream lib.
         self._pa_detector: "_pa.Detector | None" = None
         self._cv_detector: "cv2.aruco.ArucoDetector | None" = None
         self._detector_kind: str = "none"
@@ -938,16 +939,16 @@ class CameraEngine:
                     decode_sharpening=APRILTAG_DECODE_SHARPENING,
                     debug=0,
                 )
-                self._detector_kind = "pupil-apriltags"
+                self._detector_kind = "pyapriltags"
                 log.info(
-                    "AprilTag detector: pupil-apriltags (decimate=%.2f sigma=%.2f sharpen=%.2f "
+                    "AprilTag detector: pyapriltags (decimate=%.2f sigma=%.2f sharpen=%.2f "
                     "threads=%d margin_min=%.0f)",
                     APRILTAG_QUAD_DECIMATE, APRILTAG_QUAD_SIGMA,
                     APRILTAG_DECODE_SHARPENING, APRILTAG_NUM_THREADS,
                     APRILTAG_DECISION_MARGIN_MIN,
                 )
             except Exception as e:
-                log.warning("pupil-apriltags setup failed (%s) — falling back to cv2.aruco", e)
+                log.warning("pyapriltags setup failed (%s) — falling back to cv2.aruco", e)
 
         if self._pa_detector is None:
             # cv2.aruco fallback — *exact* original config. Don't add
@@ -957,16 +958,16 @@ class CameraEngine:
             # *worse* in cv2.aruco's port. The original SUBPIX corner
             # refinement is the known-good baseline that hit ~15 ft
             # range on a 6.5" tag. To go past that, install
-            # pupil-apriltags (the upstream lib) instead.
+            # pyapriltags (the upstream lib) instead.
             dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
             params = cv2.aruco.DetectorParameters()
             params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
             self._cv_detector = cv2.aruco.ArucoDetector(dictionary, params)
             self._detector_kind = "cv2.aruco (fallback)"
             log.warning(
-                "AprilTag detector: cv2.aruco FALLBACK — pupil-apriltags isn't "
+                "AprilTag detector: cv2.aruco FALLBACK — pyapriltags isn't "
                 "installed. Detection range is capped at ~15 ft. Install with: "
-                "  .venv/bin/pip install pupil-apriltags"
+                "  .venv/bin/pip install pyapriltags"
             )
 
         # Real intrinsics if available; otherwise FOV synthesis. Logged at
@@ -1567,7 +1568,7 @@ class CameraEngine:
         """Run whichever detector is loaded. Always returns corners in
         cv2.aruco's TL, TR, BR, BL order so the rest of the pipeline
         (PnP object points, hit-testing, rendering) is detector-
-        agnostic. pupil-apriltags returns BL, BR, TR, TL — we reverse
+        agnostic. pyapriltags returns BL, BR, TR, TL — we reverse
         on the way out.
 
         Returns (ids: list[int], corners: list of (4, 2) float32).
@@ -1579,10 +1580,10 @@ class CameraEngine:
             try:
                 results = self._pa_detector.detect(gray, estimate_tag_pose=False)
             except Exception as e:
-                # pupil-apriltags' detect() can raise on malformed
-                # buffers; swallow so a transient hiccup doesn't blank
-                # detection entirely.
-                log.warning("pupil-apriltags detect raised (%s)", e)
+                # pyapriltags' detect() can raise on malformed buffers;
+                # swallow so a transient hiccup doesn't blank detection
+                # entirely.
+                log.warning("pyapriltags detect raised (%s)", e)
                 return [], []
             for r in results:
                 # PhotonVision-style decision-margin filter: lower =

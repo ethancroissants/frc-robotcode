@@ -178,10 +178,16 @@ fi
 log "apt-get update"
 sudo apt-get update
 
-log "installing apt deps: python3-venv python3-pip libgl1 libglib2.0-0(t64) v4l-utils ca-certificates curl"
-if ! sudo apt-get install -y python3-venv python3-pip libgl1 libglib2.0-0t64 v4l-utils ca-certificates curl 2>/dev/null; then
+# build-essential + cmake are kept in the apt deps even though the happy
+# path uses prebuilt wheels — they cost ~30 MB once and let us pip-install
+# packages that *don't* publish wheels for our exact (Python, glibc, arch)
+# combo. We've already been bitten by robotpy-apriltag (no Bullseye wheels)
+# and pupil-apriltags (no aarch64 wheels at all) and don't want a fresh
+# Pi to be wedged again the next time a vendor stops shipping wheels.
+log "installing apt deps: python3-venv python3-pip libgl1 libglib2.0-0(t64) v4l-utils ca-certificates curl build-essential cmake"
+if ! sudo apt-get install -y python3-venv python3-pip libgl1 libglib2.0-0t64 v4l-utils ca-certificates curl build-essential cmake 2>/dev/null; then
   warn "libglib2.0-0t64 not available — falling back to libglib2.0-0 (older Debian/Ubuntu)"
-  sudo apt-get install -y python3-venv python3-pip libgl1 libglib2.0-0 v4l-utils ca-certificates curl
+  sudo apt-get install -y python3-venv python3-pip libgl1 libglib2.0-0 v4l-utils ca-certificates curl build-essential cmake
 fi
 
 PYBIN="$(bootstrap_python)" \
@@ -205,9 +211,16 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 \
 
 # pip download into the vendor cache. UTF-8 locale forced so pip's
 # progress glyphs don't crash on non-tty SSH sessions.
-log "downloading Pi wheels into $INSTALL_DIR/vendor/wheels"
+#
+# We deliberately do NOT pass `--only-binary=:all:`: when a package
+# doesn't ship a wheel for our (python, glibc, arch) combo, pip falls
+# back to fetching its sdist (.tar.gz) and we let install.sh build
+# from source on the Pi (build-essential + cmake are now in apt deps).
+# Slow on first install (~5-10 min for AprilTag bindings) but unblocks
+# the user the moment a vendor stops shipping wheels.
+log "downloading Pi wheels (and sdists where wheels aren't available) into $INSTALL_DIR/vendor/wheels"
 LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 \
-  "$PYBIN" -m pip download --only-binary=:all: \
+  "$PYBIN" -m pip download \
     -r "$INSTALL_DIR/requirements.txt" \
     -d "$INSTALL_DIR/vendor/wheels"
 

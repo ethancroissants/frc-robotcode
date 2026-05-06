@@ -16,14 +16,16 @@ msgpack>=1.0
 # can't be imported.
 opencv-contrib-python-headless>=4.8
 numpy>=1.24
-# Pupil Labs' wrapper around the same upstream C++ AprilTag library
-# that PhotonVision / robotpy-apriltag use — identical detection
-# algorithm. We use this instead of robotpy-apriltag because:
-#   - robotpy-apriltag's aarch64 wheels target manylinux_2_35 (glibc
-#     2.35, Bookworm-era), so on Debian Bullseye + Orange Pi 5 stock
-#     image (glibc 2.31) pip reports "no matching distribution".
-#   - pupil-apriltags ships manylinux2014 wheels (glibc 2.17+) that
-#     install cleanly on every supported Pi/Orange Pi image we've
-#     tried — Bullseye, Bookworm, Trixie.
-# Same algorithm, same long-range performance.
-pupil-apriltags>=1.0.4
+# pyapriltags: a maintained fork of pupil-apriltags / dt-apriltags
+# that publishes aarch64 wheels for cp310/cp311/cp312. Same upstream
+# C++ AprilTag library that PhotonVision and WPILib use, so detection
+# behavior matches what FRC teams running PhotonVision are getting.
+#
+# Why this dance: we tried robotpy-apriltag first (manylinux_2_35
+# wheels, Bookworm+ only), then pupil-apriltags (no aarch64 wheels at
+# all). pyapriltags is the only Python wrapper around the upstream
+# AprilTag lib that publishes aarch64 wheels for current Python
+# versions. If pyapriltags ever stops shipping wheels too, the
+# manual-install + bridge paths now also include cmake/gcc so pip
+# can build from sdist (slow but unblocks a fresh Pi).
+pyapriltags>=3.3.0
