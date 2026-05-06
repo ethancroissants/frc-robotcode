@@ -678,19 +678,54 @@ def bridge_internet_for_setup(
         # and properly resolves extras like `uvicorn[standard]` → uvloop +
         # httptools. Stamps vendor/wheels/.cache-stamp with sha256 of
         # requirements.txt so future runs can skip the bridge if unchanged.
+        #
+        # If the Pi's system python3 is < 3.10 (Bullseye ships 3.9), we
+        # bootstrap a standalone Python 3.11 via uv before downloading.
+        # Same logic as manual_net_install.sh — robotpy-apriltag wheels
+        # only exist for cp310+, so without this the bridge would fail
+        # with "no matching distribution" on a fresh Orange Pi 5.
         script_lines += [
             f"if [ ! -f {shlex.quote(INSTALL_DIR)}/requirements.txt ]; then",
             "  echo '[bridge] requirements.txt missing — was push_files run?' >&2",
             "  exit 4",
             "fi",
+            "# === bootstrap Python ≥ 3.10 if needed ===",
+            "BRIDGE_PY=python3",
+            "SYS_MINOR=\"$(python3 -c 'import sys;print(sys.version_info[1])' 2>/dev/null || echo 0)\"",
+            "if [ \"$SYS_MINOR\" -lt 10 ]; then",
+            "  echo \"[bridge] system python is 3.$SYS_MINOR — installing standalone Python 3.11 via uv\"",
+            "  if [ ! -x \"$HOME/.local/bin/uv\" ] && ! command -v uv >/dev/null 2>&1; then",
+            "    curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "  fi",
+            "  export PATH=\"$HOME/.local/bin:$PATH\"",
+            "  UV_BIN=\"$(command -v uv || echo $HOME/.local/bin/uv)\"",
+            "  if [ ! -x \"$UV_BIN\" ]; then",
+            "    echo '[bridge] uv install failed — falling back to system python3' >&2",
+            "  else",
+            "    \"$UV_BIN\" python install 3.11",
+            "    BRIDGE_PY=\"$($UV_BIN python find 3.11 2>/dev/null || true)\"",
+            "    if [ -z \"$BRIDGE_PY\" ] || [ ! -x \"$BRIDGE_PY\" ]; then",
+            "      echo '[bridge] uv could not provide python 3.11 — falling back' >&2",
+            "      BRIDGE_PY=python3",
+            "    else",
+            "      echo \"[bridge] using bootstrap python: $BRIDGE_PY ($($BRIDGE_PY --version))\"",
+            "      mkdir -p " + shlex.quote(INSTALL_DIR),
+            "      echo \"$BRIDGE_PY\" > " + shlex.quote(INSTALL_DIR) + "/.python-bin",
+            "    fi",
+            "  fi",
+            "fi",
             "echo '[bridge] downloading Pi wheels from PyPI…'",
             f"mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
+            # Bullseye's stock pip is too old to resolve some modern wheel
+            # tags; refresh pip in the bootstrap interpreter before download.
+            "LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
+            "\"$BRIDGE_PY\" -m pip install --upgrade pip >/dev/null 2>&1 || true",
             # Force a UTF-8 locale so pip's progress / log output doesn't
             # crash with "'charmap' codec can't decode" — non-tty SSH
             # sessions default to a minimal locale and pip writes non-ASCII
             # progress glyphs.
             f"LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
-            f"python3 -m pip download --only-binary=:all: "
+            f"\"$BRIDGE_PY\" -m pip download --only-binary=:all: "
             f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
             f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
             # Strip CR before hashing so this stamp matches what the

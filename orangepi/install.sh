@@ -81,9 +81,39 @@ else
 fi
 
 # --- 2. python venv --------------------------------------------------------
-log "creating venv"
+# Prefer a bootstrap Python (uv-managed standalone) if manual_net_install.sh
+# or the bridge step left a .python-bin pointer behind. This is how we get
+# Python ≥ 3.10 onto Bullseye-era Pis whose system python3 is 3.9, which
+# robotpy-apriltag requires for its wheels. If .python-bin is missing or
+# stale, fall back to system python3 — install will still succeed but the
+# AprilTag detector will use cv2.aruco's lower-range fallback path.
+PY_FOR_VENV="python3"
+if [ -f "$INSTALL_DIR/.python-bin" ]; then
+  CACHED_PY="$(cat "$INSTALL_DIR/.python-bin" 2>/dev/null || true)"
+  if [ -n "$CACHED_PY" ] && [ -x "$CACHED_PY" ]; then
+    PY_FOR_VENV="$CACHED_PY"
+    log "using bootstrap python from .python-bin: $PY_FOR_VENV"
+  else
+    log "$INSTALL_DIR/.python-bin is stale — falling back to system python3"
+  fi
+fi
+log "creating venv with $PY_FOR_VENV"
+# If the venv already exists but was built against a different Python than
+# the one we want now (e.g., upgraded from system 3.9 → bootstrap 3.11),
+# rebuild it. Otherwise the venv's python symlink points at a stale
+# interpreter and pip would resolve cp39 wheels into a cp311 environment
+# (or vice versa), failing in confusing ways.
+if [ -d "$INSTALL_DIR/.venv" ]; then
+  WANT_PY_FULL="$("$PY_FOR_VENV" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo unknown)"
+  HAVE_PY_FULL="$("$INSTALL_DIR/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo missing)"
+  if [ "$WANT_PY_FULL" != "$HAVE_PY_FULL" ]; then
+    log "venv python is $HAVE_PY_FULL but we want $WANT_PY_FULL — rebuilding venv"
+    rm -rf "$INSTALL_DIR/.venv"
+    rm -f "$INSTALL_DIR/.venv/.pip-stamp" 2>/dev/null || true
+  fi
+fi
 if [ ! -d "$INSTALL_DIR/.venv" ]; then
-  python3 -m venv "$INSTALL_DIR/.venv"
+  "$PY_FOR_VENV" -m venv "$INSTALL_DIR/.venv"
 fi
 
 # Offline pip install: setup_orangepi.py pre-downloads matching wheels into
