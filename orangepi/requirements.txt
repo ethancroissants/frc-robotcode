@@ -16,8 +16,14 @@ msgpack>=1.0
 # can't be imported.
 opencv-contrib-python-headless>=4.8
 numpy>=1.24
-# WPILib's wrapper around the upstream C++ AprilTag detector. Same
-# library PhotonVision and the rio's vision pipelines use, so detection
-# behavior here matches what teams are used to. linux_aarch64 wheels
-# are on PyPI; install will pull them via pip on a connected Pi.
-robotpy-apriltag>=2024.0
+# Pupil Labs' wrapper around the same upstream C++ AprilTag library
+# that PhotonVision / robotpy-apriltag use — identical detection
+# algorithm. We use this instead of robotpy-apriltag because:
+#   - robotpy-apriltag's aarch64 wheels target manylinux_2_35 (glibc
+#     2.35, Bookworm-era), so on Debian Bullseye + Orange Pi 5 stock
+#     image (glibc 2.31) pip reports "no matching distribution".
+#   - pupil-apriltags ships manylinux2014 wheels (glibc 2.17+) that
+#     install cleanly on every supported Pi/Orange Pi image we've
+#     tried — Bullseye, Bookworm, Trixie.
+# Same algorithm, same long-range performance.
+pupil-apriltags>=1.0.4

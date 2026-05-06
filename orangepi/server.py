@@ -62,16 +62,19 @@ import cv2
 import nt4_client
 import numpy as np
 
-# robotpy-apriltag: WPILib's wrapper around the upstream C++ AprilTag
-# library. Same algorithm PhotonVision uses, much better long-range
-# detection than cv2.aruco's port. We import optionally so a fresh
-# clone without the package still runs (falls back to cv2.aruco).
+# pupil-apriltags: Python wrapper around the *same* upstream C++
+# AprilTag library that PhotonVision / WPILib's robotpy-apriltag use
+# — identical detection algorithm, ~2× the cv2.aruco port's range.
+# Picked over robotpy-apriltag because pupil-apriltags ships
+# manylinux2014 wheels that install on Bullseye (glibc 2.31) where
+# robotpy's manylinux_2_35 wheels won't. Imported optionally so a
+# fresh clone without the package still runs (falls back to cv2.aruco).
 try:
-    import robotpy_apriltag as _rpa
-    _HAVE_RPA = True
-except Exception as _e:  # ImportError, plus any wheel-mismatch surprises
-    _rpa = None
-    _HAVE_RPA = False
+    import pupil_apriltags as _pa
+    _HAVE_PA = True
+except Exception as _e:  # ImportError + any wheel-mismatch surprises
+    _pa = None
+    _HAVE_PA = False
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
@@ -910,63 +913,43 @@ class CameraEngine:
         self._stream_quality = int(STREAM_QUALITY)
         self._camera_fps = int(CAMERA_FPS)
 
-        # Detector setup. We build BOTH a robotpy-apriltag detector
-        # (preferred — same library PhotonVision uses, the upstream
-        # AprilTag C++ implementation) AND an OpenCV ArUco detector
-        # (fallback, when robotpy-apriltag isn't installed). The 36h11
+        # Detector setup. We build BOTH a pupil-apriltags detector
+        # (preferred — the upstream AprilTag C++ implementation, same
+        # algorithm PhotonVision uses) AND an OpenCV ArUco detector
+        # (fallback, when pupil-apriltags isn't installed). The 36h11
         # family is what FRC standardized on in 2023.
         #
-        # Why prefer robotpy-apriltag: cv2.aruco's "AprilTag" support
+        # Why prefer pupil-apriltags: cv2.aruco's "AprilTag" support
         # is a *port*, not a wrapper around the real lib. It uses
-        # ArUco's quad detection by default and only routes some logic
-        # through the AprilTag-specific path; in practice this loses
-        # tags ~5-10 ft sooner than the upstream lib. Adding the
-        # upstream lib via robotpy-apriltag matches what teams running
-        # PhotonVision are already getting.
-        self._rpa_detector: "_rpa.AprilTagDetector | None" = None
+        # ArUco's quad detection by default; in practice this loses
+        # tags ~5-10 ft sooner than the upstream lib.
+        self._pa_detector: "_pa.Detector | None" = None
         self._cv_detector: "cv2.aruco.ArucoDetector | None" = None
         self._detector_kind: str = "none"
 
-        if _HAVE_RPA:
+        if _HAVE_PA:
             try:
-                d = _rpa.AprilTagDetector()
-                d.addFamily("tag36h11")
-                cfg = d.getConfig()
-                cfg.numThreads = APRILTAG_NUM_THREADS
-                cfg.quadDecimate = APRILTAG_QUAD_DECIMATE
-                cfg.quadSigma = APRILTAG_QUAD_SIGMA
-                cfg.refineEdges = True
-                cfg.decodeSharpening = APRILTAG_DECODE_SHARPENING
-                cfg.debug = False
-                d.setConfig(cfg)
-                # Quad-threshold knobs — these gate which candidate
-                # blobs get sent to the bit-pattern decoder. Lowering
-                # minClusterPixels is the single biggest win for
-                # detecting small/distant tags. Wrapped in try/except
-                # because the QuadThresholdParameters API exists in
-                # newer robotpy-apriltag versions; older wheels just
-                # use the defaults silently.
-                try:
-                    qtp = d.getQuadThresholdParameters()
-                    qtp.minClusterPixels = APRILTAG_MIN_CLUSTER_PIXELS
-                    qtp.minWhiteBlackDiff = APRILTAG_MIN_WHITE_BLACK_DIFF
-                    d.setQuadThresholdParameters(qtp)
-                except Exception as e:
-                    log.warning("QuadThresholdParameters not available (%s) — using defaults", e)
-                self._rpa_detector = d
-                self._detector_kind = "robotpy-apriltag"
+                self._pa_detector = _pa.Detector(
+                    families="tag36h11",
+                    nthreads=APRILTAG_NUM_THREADS,
+                    quad_decimate=APRILTAG_QUAD_DECIMATE,
+                    quad_sigma=APRILTAG_QUAD_SIGMA,
+                    refine_edges=1,
+                    decode_sharpening=APRILTAG_DECODE_SHARPENING,
+                    debug=0,
+                )
+                self._detector_kind = "pupil-apriltags"
                 log.info(
-                    "AprilTag detector: robotpy-apriltag (decimate=%.2f sigma=%.2f sharpen=%.2f "
-                    "threads=%d margin_min=%.0f min_cluster_px=%d min_wb_diff=%d)",
+                    "AprilTag detector: pupil-apriltags (decimate=%.2f sigma=%.2f sharpen=%.2f "
+                    "threads=%d margin_min=%.0f)",
                     APRILTAG_QUAD_DECIMATE, APRILTAG_QUAD_SIGMA,
                     APRILTAG_DECODE_SHARPENING, APRILTAG_NUM_THREADS,
-                    APRILTAG_DECISION_MARGIN_MIN, APRILTAG_MIN_CLUSTER_PIXELS,
-                    APRILTAG_MIN_WHITE_BLACK_DIFF,
+                    APRILTAG_DECISION_MARGIN_MIN,
                 )
             except Exception as e:
-                log.warning("robotpy-apriltag setup failed (%s) — falling back to cv2.aruco", e)
+                log.warning("pupil-apriltags setup failed (%s) — falling back to cv2.aruco", e)
 
-        if self._rpa_detector is None:
+        if self._pa_detector is None:
             # cv2.aruco fallback — *exact* original config. Don't add
             # tuning here: every "improvement" we tried (lowering
             # minMarkerPerimeterRate, switching to CORNER_REFINE_APRILTAG,
@@ -974,16 +957,16 @@ class CameraEngine:
             # *worse* in cv2.aruco's port. The original SUBPIX corner
             # refinement is the known-good baseline that hit ~15 ft
             # range on a 6.5" tag. To go past that, install
-            # robotpy-apriltag (the upstream lib) instead.
+            # pupil-apriltags (the upstream lib) instead.
             dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
             params = cv2.aruco.DetectorParameters()
             params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
             self._cv_detector = cv2.aruco.ArucoDetector(dictionary, params)
             self._detector_kind = "cv2.aruco (fallback)"
             log.warning(
-                "AprilTag detector: cv2.aruco FALLBACK — robotpy-apriltag isn't "
+                "AprilTag detector: cv2.aruco FALLBACK — pupil-apriltags isn't "
                 "installed. Detection range is capped at ~15 ft. Install with: "
-                "  .venv/bin/pip install robotpy-apriltag  (needs Python 3.11+ wheel)"
+                "  .venv/bin/pip install pupil-apriltags"
             )
 
         # Real intrinsics if available; otherwise FOV synthesis. Logged at
@@ -1584,38 +1567,35 @@ class CameraEngine:
         """Run whichever detector is loaded. Always returns corners in
         cv2.aruco's TL, TR, BR, BL order so the rest of the pipeline
         (PnP object points, hit-testing, rendering) is detector-
-        agnostic. robotpy-apriltag returns BL, BR, TR, TL — we reverse
+        agnostic. pupil-apriltags returns BL, BR, TR, TL — we reverse
         on the way out.
 
         Returns (ids: list[int], corners: list of (4, 2) float32).
         Empty list when nothing detected.
         """
-        if self._rpa_detector is not None:
+        if self._pa_detector is not None:
             ids: list[int] = []
             corners: list[np.ndarray] = []
             try:
-                results = self._rpa_detector.detect(gray)
+                results = self._pa_detector.detect(gray, estimate_tag_pose=False)
             except Exception as e:
-                # robotpy-apriltag's detect() can raise on malformed
-                # buffers; fall back to cv2.aruco for this frame so a
-                # transient hiccup doesn't blank detection entirely.
-                log.warning("robotpy-apriltag detect raised (%s)", e)
+                # pupil-apriltags' detect() can raise on malformed
+                # buffers; swallow so a transient hiccup doesn't blank
+                # detection entirely.
+                log.warning("pupil-apriltags detect raised (%s)", e)
                 return [], []
             for r in results:
                 # PhotonVision-style decision-margin filter: lower =
                 # more accepting (catches faint distant tags) at the
                 # cost of more false positives. The 36h11 family has
-                # huge Hamming distance, so even at margin=20 false
+                # huge Hamming distance, so even at margin=0 false
                 # positives are vanishingly rare.
-                if r.getDecisionMargin() < APRILTAG_DECISION_MARGIN_MIN:
+                if r.decision_margin < APRILTAG_DECISION_MARGIN_MIN:
                     continue
-                pts = np.empty((4, 2), dtype=np.float32)
-                # robotpy-apriltag corner order: BL, BR, TR, TL.
+                # pupil-apriltags corner order: BL, BR, TR, TL (CCW).
                 # cv2.aruco order: TL, TR, BR, BL = reverse.
-                for i in range(4):
-                    c = r.getCorner(i)
-                    pts[3 - i] = (c.x, c.y)
-                ids.append(int(r.getId()))
+                pts = np.array(r.corners, dtype=np.float32)[::-1].copy()
+                ids.append(int(r.tag_id))
                 corners.append(pts)
             return ids, corners
 

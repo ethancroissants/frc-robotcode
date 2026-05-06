@@ -50,8 +50,11 @@ REPO_RAW="${CFR_REPO_RAW:-https://raw.githubusercontent.com/ethancroissants/frc-
 INSTALL_DIR="${CFR_INSTALL_DIR:-$HOME/cold-fusion-sight}"
 PY_VERSION="${CFR_PY_VERSION:-3.11}"
 
-log()  { printf '\033[36m[manual-install]\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
+# All status output goes to stderr so functions like bootstrap_python can
+# write the resolved python path to stdout without log messages getting
+# concatenated into it. The user's terminal still sees both streams.
+log()  { printf '\033[36m[manual-install]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[warn]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
