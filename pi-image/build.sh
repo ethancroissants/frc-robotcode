@@ -73,9 +73,14 @@ fi
 
 mkdir -p "$WORK_DIR" "$OUT_DIR"
 
+# Pin pi-gen to a known-good ref. Master moves fast and breaks builds
+# (e.g. they renamed stages, shuffled binfmt expectations, etc.). A
+# tagged release is much more stable. The `arm64` branch is the one
+# Raspberry Pi maintains for 64-bit builds.
+PI_GEN_REF="${PI_GEN_REF:-arm64}"
 if [ ! -d "$PI_GEN_DIR" ]; then
-  log "cloning pi-gen (Raspberry Pi's official image builder)"
-  git clone --depth 1 -b master https://github.com/RPi-Distro/pi-gen.git "$PI_GEN_DIR"
+  log "cloning pi-gen ref=$PI_GEN_REF"
+  git clone --depth 1 -b "$PI_GEN_REF" https://github.com/RPi-Distro/pi-gen.git "$PI_GEN_DIR"
 else
   log "reusing existing pi-gen at $PI_GEN_DIR (rm -rf to force re-clone)"
 fi
@@ -134,17 +139,28 @@ rsync -a --delete \
   "$SCRIPT_DIR/setup-wizard/" \
   "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source/setup-wizard/"
 
+# === Register qemu binfmts on the host kernel ===
+# Even though pi-gen runs inside Docker, the kernel needs to know how
+# to execute foreign-arch (aarch64) binaries inside the chroot — this
+# is binfmt_misc registration, which is a host-kernel concern shared
+# between containers and the host. On older Linux this was handled by
+# the qemu-user-binfmt apt package, but Ubuntu 24.04 made it conflict
+# with qemu-user-static so neither approach is universal anymore. The
+# multiarch/qemu-user-static container registers handlers via
+# --privileged + the kernel's binfmt_misc interface and works on
+# every modern Linux host.
+log "registering qemu binfmts via multiarch/qemu-user-static"
+sudo docker run --rm --privileged multiarch/qemu-user-static:latest \
+    --reset -p yes >/dev/null \
+    || fail "binfmt registration failed — check kernel binfmt_misc support"
+
 # === Build ===
 # We use pi-gen's *Docker* path (./build-docker.sh) instead of the
 # host path (./build.sh). Reasons:
 #   1. Pi-gen pins specific dep versions inside its Docker image, so
-#      Ubuntu 22.04 vs 24.04 vs Debian-host conflicts (notably the
-#      qemu-user-static vs qemu-user-binfmt conflict on noble) just
-#      go away.
+#      host distro / version drift doesn't bite us.
 #   2. The image is cached after first run, so re-builds are faster.
 #   3. CI runners have Docker pre-installed; no extra setup.
-# We pass DOCKER_OPTS="" so pi-gen's docker invocation doesn't try to
-# add its own funky --tty flag (CI has no TTY and that would trip).
 log "building image via pi-gen's Docker path (this takes ~15-30 min)"
 cd "$PI_GEN_DIR"
 if ! command -v docker >/dev/null 2>&1; then
@@ -153,16 +169,26 @@ fi
 sudo CONTINUE=1 ./build-docker.sh 2>&1 | sed 's/^/  /'
 
 # === Collect ===
-DEPLOY_DIR="$PI_GEN_DIR/deploy"
-log "collecting build output from $DEPLOY_DIR"
+# Pi-gen sometimes deposits artifacts under deploy/ AND sometimes under
+# work/<imgname>/<stage>/exports/ depending on version. Walk both so
+# we don't fail purely because of layout drift between pi-gen tags.
+DEPLOY_DIRS=( "$PI_GEN_DIR/deploy" "$PI_GEN_DIR/work" )
+log "collecting build output"
 shopt -s nullglob
 moved=0
-for f in "$DEPLOY_DIR"/*.img.xz "$DEPLOY_DIR"/*.zip; do
-  cp -v "$f" "$OUT_DIR/"
-  moved=$((moved + 1))
+for d in "${DEPLOY_DIRS[@]}"; do
+  [ -d "$d" ] || continue
+  while IFS= read -r f; do
+    cp -v "$f" "$OUT_DIR/"
+    moved=$((moved + 1))
+  done < <(find "$d" -maxdepth 5 -type f \( -name '*.img.xz' -o -name '*.img' -o -name '*.zip' \) 2>/dev/null)
 done
 shopt -u nullglob
-[ "$moved" -gt 0 ] || fail "no .img.xz produced in $DEPLOY_DIR"
+if [ "$moved" -eq 0 ]; then
+  log "no image found! pi-gen layout for debugging:"
+  find "$PI_GEN_DIR/deploy" "$PI_GEN_DIR/work" -maxdepth 4 -type f 2>/dev/null | head -50 || true
+  fail "no .img.xz / .img / .zip produced. See log above for what pi-gen did write."
+fi
 
 if [ "${KEEP_WORK:-0}" != "1" ]; then
   log "cleaning pi-gen work dir (set KEEP_WORK=1 to skip)"

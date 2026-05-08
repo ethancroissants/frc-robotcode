@@ -60,17 +60,33 @@ jobs:
         # We build via pi-gen's Docker path (build-docker.sh), so all
         # of pi-gen's heavy chroot deps live inside its Docker image
         # and don't need to be on the host. We just install our
-        # wrapper script's own deps. Notably this avoids the
-        # qemu-user-static-vs-qemu-user-binfmt conflict that ships
-        # with Ubuntu 24.04 (noble) — the two packages are now
-        # mutually exclusive at the apt level.
+        # wrapper script's own deps.
         run: |
           sudo apt-get update
           sudo apt-get install -y git rsync xz-utils
-          # Docker is pre-installed on ubuntu-latest runners; we just
-          # confirm it's running.
           docker --version
           sudo systemctl is-active docker || sudo systemctl start docker
+
+      - name: Register qemu binfmt handlers on the host kernel
+        # pi-gen's chroot tries to execute aarch64 binaries (apt, dpkg,
+        # debconf etc.). The Linux kernel needs to know "ah, this is
+        # foreign-arch, route it through qemu-aarch64-static" — that's
+        # binfmt_misc registration. On older Debian/Ubuntu the
+        # `qemu-user-binfmt` apt package handled this, but on Ubuntu
+        # 24.04 it conflicts with `qemu-user-static`, so we can't
+        # install both. The multiarch/qemu-user-static Docker image
+        # registers binfmt handlers via the kernel's binfmt_misc
+        # interface without needing either apt package — works on
+        # every modern Linux host and ALSO works inside CI runners
+        # that don't have the apt packages.
+        run: |
+          docker run --rm --privileged multiarch/qemu-user-static:latest \
+              --reset -p yes
+          # Sanity-check: the kernel should now have an entry for
+          # qemu-aarch64. If this is empty, pi-gen's chroot will fail
+          # when it tries to apt-install inside the rootfs.
+          ls /proc/sys/fs/binfmt_misc/ | grep -E "qemu-aarch64|aarch64" || true
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
 
       - name: Free up disk on the runner
         # ubuntu-latest comes with ~14 GB free which is *just barely*
