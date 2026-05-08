@@ -194,7 +194,18 @@ def _logic(force_mode: str = "off") -> int:
             "relying on your existing git credential helper."
         )
 
-    push_cmd = ["git", "push"]
+    push_cmd = ["git"]
+    if token:
+        # Override any system credential helper for this single push.
+        # `-c credential.helper=` (empty value) tells git "ignore the
+        # configured helper", which forces it to fall through to our
+        # GIT_ASKPASS env var. Without this, on macOS the keychain
+        # helper would intercept the auth request and serve a cached
+        # (possibly stale) token before askpass ever runs — that's
+        # the failure mode that wedged a "PAT lacks workflow scope"
+        # error even after we gave the new token workflow scope.
+        push_cmd += ["-c", "credential.helper="]
+    push_cmd += ["push"]
     if force_mode == "lease":
         push_cmd.append("--force-with-lease")
     elif force_mode == "force":
