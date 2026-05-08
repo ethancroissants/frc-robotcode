@@ -368,22 +368,52 @@ button.ghost.square {
   pointer-events: none;
 }
 
-/* Tag selection ring drawn by JS — viewBox is normalized 0..1000 along
- * each axis; JS scales corner pixels into that range so the SVG always
- * fits the displayed image regardless of object-fit. */
-#tag-select-layer .tag-box {
-  fill: rgba(0, 220, 0, 0.08);
-  stroke: #00dc00;
-  stroke-width: 2;
+/* Server-side flip is OFF — we mirror the IMG with CSS transforms,
+ * which is free (compositor only) compared to a full cv2.flip on the
+ * Pi for every frame. cf-flip-layer mirrors the SVG overlays
+ * alongside the IMG so boxes track the visible tags. The fixed layer
+ * (crosshair, FPS readout) stays upright through any flip. */
+.camera-frame img.flip-h,
+#cf-flip-layer.flip-h { transform: scaleX(-1); transform-origin: center; }
+.camera-frame img.flip-v,
+#cf-flip-layer.flip-v { transform: scaleY(-1); transform-origin: center; }
+.camera-frame img.flip-hv,
+#cf-flip-layer.flip-hv { transform: scale(-1, -1); transform-origin: center; }
+
+/* Per-tag overlays. All drawn in SVG client-side now (server doesn't
+ * cv2.putText / cv2.polylines / cv2.imencode every frame anymore). */
+.tag-poly {
+  fill: transparent;
   vector-effect: non-scaling-stroke;
 }
-#tag-hover-layer .tag-box {
-  fill: rgba(255, 255, 255, 0.04);
-  stroke: rgba(255, 255, 255, 0.6);
+.tag-poly.tag-target { stroke: #00dc00; stroke-width: 2; }
+.tag-poly.tag-other  { stroke: #ff8a32; stroke-width: 1; }
+.tag-poly.tag-selected {
+  stroke: #00dc00;
+  stroke-width: 3;
+  fill: rgba(0, 220, 0, 0.08);
+}
+.tag-poly.tag-hover {
+  stroke: rgba(255, 255, 255, 0.7);
   stroke-width: 1;
   stroke-dasharray: 3 3;
+}
+.tag-label {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.85);
+  stroke-width: 3;
+  fill: #ffffff;
+  pointer-events: none;
   vector-effect: non-scaling-stroke;
 }
+.tag-label.tag-label-target { fill: #00ff00; }
+.tag-label.tag-label-other  { fill: #ffb380; }
+
+/* FPS readout (top-left, always upright — fixed layer doesn't flip). */
+.fps-text { fill: #ffffff; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-weight: 600; }
+.fps-text-shadow { fill: rgba(0, 0, 0, 0.85); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-weight: 600; }
 
 /* ================= Target panel ================= */
 .target-body {

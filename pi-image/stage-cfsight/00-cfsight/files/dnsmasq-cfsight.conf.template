@@ -1,0 +1,31 @@
+# dnsmasq config for AP mode: hand out DHCP leases on 192.168.50.0/24
+# and answer ALL DNS queries with our gateway IP. That last bit is
+# what makes phones (iOS, Android) auto-detect us as a captive portal
+# and pop the wizard form without the operator having to type a URL.
+#
+# AP gateway: 192.168.50.1 (matches /etc/cfsight/ap-iface.env)
+# Lease range: 192.168.50.10 — 192.168.50.50 (40 leases is plenty for
+# a setup portal — only 1 device ever connects in practice)
+
+interface=wlan0
+bind-interfaces
+domain-needed
+bogus-priv
+
+# DHCP
+dhcp-range=192.168.50.10,192.168.50.50,255.255.255.0,10m
+dhcp-option=3,192.168.50.1     # default gateway
+dhcp-option=6,192.168.50.1     # DNS
+dhcp-authoritative
+
+# Captive-portal trick: every DNS lookup → us.
+# `address=/#/...` is dnsmasq's wildcard syntax for "match any name".
+# Matches connectivitycheck.gstatic.com (Android), captive.apple.com
+# (iOS), www.msftconnecttest.com (Windows) — all of which trigger
+# the OS's captive-portal detection and pop our portal automatically.
+address=/#/192.168.50.1
+
+# Don't use /etc/resolv.conf — we have no upstream DNS in AP mode.
+no-resolv
+no-poll
+log-facility=/var/log/dnsmasq-cfsight.log

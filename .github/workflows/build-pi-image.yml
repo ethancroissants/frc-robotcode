@@ -1,0 +1,116 @@
+name: Build Pi image
+
+# Two ways to trigger:
+#   1. Push a tag like `v0.1.0` → builds + creates a GitHub Release with
+#      the .img.xz attached. That's the "I just want to download it"
+#      workflow for everyone else.
+#   2. Manually via the Actions tab → "Run workflow". Useful for
+#      iterating without bumping a version tag.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string (e.g. 0.1.0). Leave blank to read pi-image/VERSION.'
+        required: false
+        default: ''
+
+# pi-gen needs root for losetup / chroot etc. The hosted ubuntu-latest
+# runner gives us passwordless sudo, which is exactly what build.sh
+# expects.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+            VER="${{ github.ref_name }}"
+            VER="${VER#v}"
+          else
+            VER="$(cat pi-image/VERSION 2>/dev/null || echo 0.0.0-dev)"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Building cfsight-$VER"
+
+      - name: Install host build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git qemu-user-static binfmt-support debootstrap \
+            parted kpartx xz-utils rsync zip
+          # Register qemu binfmt so the chroot can run aarch64 binaries.
+          sudo update-binfmts --enable qemu-aarch64 || true
+
+      - name: Free up disk on the runner
+        # ubuntu-latest comes with ~14 GB free which is *just barely*
+        # enough for a Bookworm Lite arm64 build. Reclaim a few GB by
+        # nuking the bloated stuff GitHub pre-installs that we don't
+        # need (Android SDK, .NET, ghc, big browser caches).
+        run: |
+          sudo rm -rf /usr/local/lib/android \
+                      /usr/share/dotnet \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost
+          df -h /
+
+      - name: Build image
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          chmod +x pi-image/build.sh
+          ./pi-image/build.sh
+
+      - name: Show output
+        run: |
+          ls -la pi-image/out/
+          (cd pi-image/out && sha256sum *.img.xz > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      # Always upload as a workflow artifact (kept ~90 days), so even
+      # workflow_dispatch runs produce a download.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfsight-${{ steps.ver.outputs.version }}-arm64
+          path: |
+            pi-image/out/*.img.xz
+            pi-image/out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      # If we were triggered by a tag push, also publish a Release with
+      # the .img.xz attached. End users just open the Releases page,
+      # download, flash. That's the "I don't want to think about CI"
+      # workflow.
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Cold Fusion Sight ${{ github.ref_name }}
+          body: |
+            **Vision Pi image** — flash with Raspberry Pi Imager
+            (Use custom image → select the `.img.xz` below).
+
+            See `pi-image/README.md` for first-boot setup instructions.
+
+            ## Verify
+            ```
+            sha256sum -c SHA256SUMS.txt
+            ```
+          files: |
+            pi-image/out/*.img.xz
+            pi-image/out/SHA256SUMS.txt
+          draft: false
+          prerelease: false

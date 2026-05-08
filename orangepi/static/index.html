@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Cold Fusion Sight</title>
-  <link rel="stylesheet" href="/static/style.css?v=10" />
+  <link rel="stylesheet" href="/static/style.css?v=11" />
 </head>
 <body>
   <header class="topbar">
@@ -57,11 +57,28 @@
       <div class="panel-body camera-body">
         <div class="camera-frame" id="camera-frame">
           <img id="stream" src="/stream.mjpg" alt="camera feed" draggable="false" />
+          <!-- Overlay layers (server passes raw camera JPEGs through —
+               crosshair/boxes/labels/FPS readout are drawn here in SVG
+               on top of the IMG, far cheaper than cv2.line/putText
+               followed by re-encode on the Pi). The flip-aware layer
+               wraps everything that has to mirror with the camera
+               (boxes, hover, selection); fixed-orientation overlays
+               (crosshair, FPS readout) live on the raw layer so they
+               don't get mirrored when you click "Mirror" in the cog.
+          -->
           <svg id="overlay" class="overlay"
                preserveAspectRatio="xMidYMid meet"
                viewBox="0 0 1000 1000">
-            <g id="tag-hover-layer"></g>
-            <g id="tag-select-layer"></g>
+            <g id="cf-flip-layer">
+              <g id="tag-hover-layer"></g>
+              <g id="tag-select-layer"></g>
+              <g id="tag-box-layer"></g>
+              <g id="tag-label-layer"></g>
+            </g>
+            <g id="cf-fixed-layer">
+              <g id="crosshair-layer"></g>
+              <g id="fps-layer"></g>
+            </g>
           </svg>
         </div>
       </div>
@@ -275,6 +292,6 @@
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
   <script src="/static/modals.js?v=7"></script>
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

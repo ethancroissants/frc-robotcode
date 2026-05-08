@@ -1,0 +1,23 @@
+# hostapd config for the AP-mode setup portal.
+# {AP_SSID} is the SSID we expose ("CFSight-Setup-XXXX"); rendered by
+# cfsight-firstboot.sh from the wlan0 MAC suffix so each Pi shows up as
+# a distinct AP if multiple are on the bench at once.
+#
+# OPEN network — no password — by user request. Risk surface is
+# narrow: the only thing this AP serves is /etc/cfsight/wpa-savefile
+# via the captive portal, and even that requires a POST with a valid
+# multipart body. There's no SSH access from the AP (sshd is bound to
+# any iface but the AP isn't routed to anything meaningful, and SSH
+# requires the cfsight user's password which is the well-known image
+# default — change it once you've configured WiFi).
+interface=wlan0
+driver=nl80211
+ssid={AP_SSID}
+hw_mode=g
+channel=1
+ieee80211n=1
+wmm_enabled=1
+auth_algs=1
+ignore_broadcast_ssid=0
+# OPEN auth: no wpa= line, no key.
+country_code=US

@@ -322,15 +322,26 @@ class CameraPanel {
     this.hoverLayer = $("tag-hover-layer");
     this.selectLayer = $("tag-select-layer");
     this.imgEl = $("stream");
+    // All overlay drawing now happens here, not server-side (cheaper —
+    // the Pi doesn't have to cv2.imencode every frame, and SVG renders
+    // crisp at any zoom). Layers split into "flip" (boxes, labels —
+    // mirror with the camera) and "fixed" (crosshair, FPS readout —
+    // stay upright regardless of camera flip).
+    this.boxLayer = $("tag-box-layer");
+    this.labelLayer = $("tag-label-layer");
+    this.crosshairLayer = $("crosshair-layer");
+    this.fpsLayer = $("fps-layer");
     this.imageW = 1;
     this.imageH = 1;
     this.allTags = [];
+    this.targetTag = null;
+    this.targetReady = false;
     this.selectedId = null;
-    // Server-side display flip ("none" | "h" | "v" | "hv"). The SSE feed
-    // tells us via s.camera_flip; we mirror clicks the *opposite* way
-    // before hit-testing so they land where the operator sees the tag,
-    // and we mirror corners_px the *same* way when drawing SVG hover /
-    // select boxes so the overlay wraps the visual tag.
+    this.fpsInfo = null;
+    // Server-side display flip ("none" | "h" | "v" | "hv"). On modern
+    // Pis no flip happens server-side at all — we apply CSS transforms
+    // here so the Pi never has to memcopy the flipped frame. Click
+    // coords are inverse-flipped before hit-testing.
     this.flip = "none";
 
     this.frame.addEventListener("click", (e) => this._onClick(e));
@@ -352,44 +363,135 @@ class CameraPanel {
   }
 
   setFlip(flip) {
-    this.flip = (["none", "h", "v", "hv"].includes(flip)) ? flip : "none";
-    // Re-render the selection ring with the new flip applied so it
-    // wraps the tag in the new orientation immediately, instead of
-    // jumping next time setTags() runs.
+    const next = (["none", "h", "v", "hv"].includes(flip)) ? flip : "none";
+    if (next === this.flip) return;
+    this.flip = next;
+    // CSS transform on the IMG is free — no Pi-side memcpy. SVG flip
+    // layer mirrors with it so boxes track tags; the fixed layer
+    // (crosshair, FPS readout) stays upright.
+    if (this.imgEl) {
+      this.imgEl.classList.remove("flip-h", "flip-v", "flip-hv");
+      if (this.flip !== "none") this.imgEl.classList.add(`flip-${this.flip}`);
+    }
+    const flipLayer = document.getElementById("cf-flip-layer");
+    if (flipLayer) {
+      flipLayer.classList.remove("flip-h", "flip-v", "flip-hv");
+      if (this.flip !== "none") flipLayer.classList.add(`flip-${this.flip}`);
+    }
     this._render();
   }
 
-  // Apply forward flip to a (x,y) for DRAWING on the flipped display.
-  _flipForDraw(x, y) {
-    if (this.flip === "h" || this.flip === "hv") x = (this.imageW - 1) - x;
-    if (this.flip === "v" || this.flip === "hv") y = (this.imageH - 1) - y;
-    return [x, y];
-  }
-
-  setTags(allTags, selectedId) {
+  setTags(allTags, selectedId, targetTag, targetReady) {
     this.allTags = allTags || [];
     this.selectedId = (selectedId == null) ? null : Number(selectedId);
+    this.targetTag = targetTag || null;
+    this.targetReady = !!targetReady;
     this._render();
+  }
+
+  setFps(info) {
+    // info: {capture, detect, version} or null
+    this.fpsInfo = info;
+    this._renderFps();
   }
 
   _render() {
-    // Selection ring around the locked tag (if any + visible). Mirror
-    // the corner coords through the same display-flip as the camera
-    // image so the SVG ring wraps the tag in the operator's view
-    // instead of jumping to the unflipped pixel.
-    while (this.selectLayer.firstChild) this.selectLayer.removeChild(this.selectLayer.firstChild);
+    // Drop everything into the flip-mirrored layer so a single CSS
+    // scale on cf-flip-layer mirrors the entire overlay alongside
+    // the IMG. No per-corner JS math needed — the browser's GPU
+    // does the transform.
+    [this.boxLayer, this.labelLayer, this.selectLayer, this.hoverLayer]
+      .forEach(g => { while (g.firstChild) g.removeChild(g.firstChild); });
+
+    const targetId = this.targetTag ? Number(this.targetTag.tag_id) : null;
+    for (const tag of this.allTags) {
+      if (!tag.corners_px || tag.corners_px.length < 4) continue;
+      const tid = Number(tag.tag_id);
+      const isTarget = (tid === targetId);
+      const points = tag.corners_px.map(([x, y]) => `${x},${y}`).join(" ");
+
+      const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      poly.setAttribute("points", points);
+      // Color matches the old cv2 overlay: green for the chosen target,
+      // soft orange for "seen but not the target".
+      poly.setAttribute("class", isTarget ? "tag-poly tag-target" : "tag-poly tag-other");
+      this.boxLayer.appendChild(poly);
+
+      // Label near the tag center.
+      const cx = tag.corners_px.reduce((a, p) => a + p[0], 0) / tag.corners_px.length;
+      const cy = tag.corners_px.reduce((a, p) => a + p[1], 0) / tag.corners_px.length;
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", String(cx + 8));
+      label.setAttribute("y", String(cy - 8));
+      label.setAttribute("class", isTarget ? "tag-label tag-label-target" : "tag-label tag-label-other");
+      let text = `#${tid}`;
+      if (isTarget && this.targetTag) {
+        const bd = this.targetTag.bearing_deg;
+        if (Number.isFinite(bd)) text += `  ${bd >= 0 ? "+" : ""}${bd.toFixed(1)}°`;
+        const r = this.targetTag.range_m;
+        if (Number.isFinite(r) && r > 0) text += `  ${(r / 0.3048).toFixed(1)}ft`;
+      }
+      label.textContent = text;
+      this.labelLayer.appendChild(label);
+    }
+
+    // Selection ring (thicker) drawn last so it sits on top.
     if (this.selectedId != null) {
       const tag = this.allTags.find(t => Number(t.tag_id) === this.selectedId);
       if (tag && tag.corners_px) {
-        const pts = tag.corners_px.map(([x, y]) => {
-          [x, y] = this._flipForDraw(x, y);
-          return `${x},${y}`;
-        }).join(" ");
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        poly.setAttribute("points", pts);
-        poly.setAttribute("class", "tag-box");
+        poly.setAttribute("points", tag.corners_px.map(([x, y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("class", "tag-poly tag-selected");
         this.selectLayer.appendChild(poly);
       }
+    }
+
+    this._renderCrosshair();
+  }
+
+  _renderCrosshair() {
+    while (this.crosshairLayer.firstChild) this.crosshairLayer.removeChild(this.crosshairLayer.firstChild);
+    const w = this.imageW, h = this.imageH;
+    const color = this.targetReady ? "#00d800" : "#ffffff";
+    const v = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    v.setAttribute("x1", String(w / 2)); v.setAttribute("x2", String(w / 2));
+    v.setAttribute("y1", "0");           v.setAttribute("y2", String(h));
+    v.setAttribute("stroke", color);     v.setAttribute("stroke-width", "1");
+    this.crosshairLayer.appendChild(v);
+    const hl = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    hl.setAttribute("x1", "0");          hl.setAttribute("x2", String(w));
+    hl.setAttribute("y1", String(h / 2));hl.setAttribute("y2", String(h / 2));
+    hl.setAttribute("stroke", color);    hl.setAttribute("stroke-width", "1");
+    this.crosshairLayer.appendChild(hl);
+  }
+
+  _renderFps() {
+    while (this.fpsLayer.firstChild) this.fpsLayer.removeChild(this.fpsLayer.firstChild);
+    if (!this.fpsInfo) return;
+    const info = this.fpsInfo;
+    const lines = [
+      `${(info.capture ?? 0).toFixed(1)} fps cap`,
+      `${(info.detect ?? 0).toFixed(1)} fps det`,
+    ];
+    const fontSize = Math.max(10, Math.round(this.imageH * 0.025));
+    let y = fontSize + 4;
+    for (const ln of lines) {
+      // Black drop shadow so it stays legible on bright field.
+      const shadow = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      shadow.setAttribute("x", "9");
+      shadow.setAttribute("y", String(y + 1));
+      shadow.setAttribute("class", "fps-text-shadow");
+      shadow.setAttribute("font-size", String(fontSize));
+      shadow.textContent = ln;
+      this.fpsLayer.appendChild(shadow);
+      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t.setAttribute("x", "8");
+      t.setAttribute("y", String(y));
+      t.setAttribute("class", "fps-text");
+      t.setAttribute("font-size", String(fontSize));
+      t.textContent = ln;
+      this.fpsLayer.appendChild(t);
+      y += fontSize + 4;
     }
   }
 
@@ -438,13 +540,11 @@ class CameraPanel {
       if (!tag.corners_px || tag.corners_px.length < 4) continue;
       if (Number(tag.tag_id) === this.selectedId) continue;
       if (pointInQuad(p.x, p.y, tag.corners_px)) {
-        const pts = tag.corners_px.map(([x, y]) => {
-          [x, y] = this._flipForDraw(x, y);
-          return `${x},${y}`;
-        }).join(" ");
+        // Hover layer is a child of cf-flip-layer — CSS mirrors it
+        // alongside the IMG, so we feed raw (unflipped) corners.
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        poly.setAttribute("points", pts);
-        poly.setAttribute("class", "tag-box");
+        poly.setAttribute("points", tag.corners_px.map(([x, y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("class", "tag-poly tag-hover");
         this.hoverLayer.appendChild(poly);
         break;
       }
@@ -752,7 +852,14 @@ class StateView {
       // in every snapshot so the dashboard never lags the engine's
       // runtime flip state.
       this.camera.setFlip(s.camera_flip || "none");
-      this.camera.setTags(s.all_tags || [], s.selected_tag_id);
+      const target = (s.target && s.target.detected) ? s.target : null;
+      this.camera.setTags(
+        s.all_tags || [], s.selected_tag_id,
+        target, target ? !!target.ready : false,
+      );
+      // FPS readout drawn in SVG (server doesn't burn cv2.putText
+      // cycles for it on weak CPUs anymore).
+      this.camera.setFps(s.fps || null);
     });
 
     safe("stats", () => this._refreshStats(s));

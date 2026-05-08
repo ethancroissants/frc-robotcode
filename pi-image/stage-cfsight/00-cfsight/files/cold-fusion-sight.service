@@ -1,0 +1,28 @@
+[Unit]
+Description=Cold Fusion Sight (camera + control web UI)
+# `network.target` (any iface) instead of `network-online.target` —
+# we want the dashboard to come up even in AP mode, where there's no
+# upstream link. AP-mode-only the dashboard reads "rio disconnected"
+# but the operator can still see the camera feed.
+After=network.target cfsight-firstboot.service
+Wants=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=cfsight
+WorkingDirectory=/opt/cfsight/sight
+EnvironmentFile=-/opt/cfsight/sight/sight.env
+ExecStart=/opt/cfsight/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8080 --timeout-graceful-shutdown 3
+Restart=always
+RestartSec=2
+TimeoutStopSec=5
+SupplementaryGroups=video
+LimitNOFILE=4096
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cold-fusion-sight
+
+[Install]
+WantedBy=multi-user.target

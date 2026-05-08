@@ -1,0 +1,21 @@
+[Unit]
+Description=Cold Fusion Sight — first-boot WiFi configurator
+# We want this to run before the dashboard so the dashboard either
+# starts on the team WiFi or in AP-mode-only-on-the-portal-IP. Order
+# doesn't strictly matter for correctness (the dashboard works either
+# way) but the journalctl is much easier to read this way.
+DefaultDependencies=no
+After=local-fs.target sysinit.target
+Before=cold-fusion-sight.service network-online.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/cfsight-firstboot.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cfsight-firstboot
+
+[Install]
+WantedBy=multi-user.target
