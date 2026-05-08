@@ -40,39 +40,24 @@ if [ "$EUID" -ne 0 ] && ! sudo -n true 2>/dev/null; then
   sudo -v || fail "sudo required"
 fi
 
-# Auto-install host deps if they're missing. Skip when CI sets
-# CFSIGHT_SKIP_DEPS=1 (the GitHub Actions workflow installs them
-# explicitly so it can pin versions and surface failures on its own
-# step).
+# Auto-install host deps if they're missing. Since we use pi-gen's
+# Docker path, the only host deps we need are *our wrapper's* tools:
+# git for cloning pi-gen, rsync for staging our app source into
+# pi-gen's stage, and xz-utils for inspecting the output. Pi-gen's
+# heavy chroot deps (quilt, qemu-user-binfmt, etc.) live inside the
+# Docker image — no need to install them on the host.
+#
+# Skip when CI sets CFSIGHT_SKIP_DEPS=1.
 if [ "${CFSIGHT_SKIP_DEPS:-0}" != "1" ]; then
-  # Pi-gen has a strict check for these packages by name (see its
-  # `dependencies_check` step). Some of them (quilt, libarchive-tools,
-  # arch-test) only exist for pi-gen's internal use; we install them
-  # to keep the build from refusing to start. The cmd:pkg pairs let us
-  # detect "already installed" via `command -v` for the ones with a
-  # binary entrypoint, plus `dpkg-query` for pure-data packages.
   MISSING=()
   for cmd_pkg in \
       "git:git" \
-      "quilt:quilt" \
-      "qemu-aarch64-static:qemu-user-static" \
-      "debootstrap:debootstrap" \
-      "parted:parted" \
-      "kpartx:kpartx" \
-      "xz:xz-utils" \
       "rsync:rsync" \
-      "bsdtar:libarchive-tools" \
-      "arch-test:arch-test"; do
+      "xz:xz-utils" \
+      "docker:docker.io"; do
     cmd="${cmd_pkg%%:*}"
     pkg="${cmd_pkg##*:}"
     if ! command -v "$cmd" >/dev/null 2>&1; then
-      MISSING+=( "$pkg" )
-    fi
-  done
-  # qemu-user-binfmt and binfmt-support don't ship an obvious binary
-  # to probe for, so we check via dpkg directly.
-  for pkg in qemu-user-binfmt binfmt-support; do
-    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
       MISSING+=( "$pkg" )
     fi
   done
@@ -83,7 +68,6 @@ if [ "${CFSIGHT_SKIP_DEPS:-0}" != "1" ]; then
     fi
     sudo apt-get update
     sudo apt-get install -y "${MISSING[@]}"
-    sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
   fi
 fi
 
@@ -151,9 +135,22 @@ rsync -a --delete \
   "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source/setup-wizard/"
 
 # === Build ===
-log "building image (this takes ~15-30 min on a modern laptop, mostly debootstrap + apt)"
+# We use pi-gen's *Docker* path (./build-docker.sh) instead of the
+# host path (./build.sh). Reasons:
+#   1. Pi-gen pins specific dep versions inside its Docker image, so
+#      Ubuntu 22.04 vs 24.04 vs Debian-host conflicts (notably the
+#      qemu-user-static vs qemu-user-binfmt conflict on noble) just
+#      go away.
+#   2. The image is cached after first run, so re-builds are faster.
+#   3. CI runners have Docker pre-installed; no extra setup.
+# We pass DOCKER_OPTS="" so pi-gen's docker invocation doesn't try to
+# add its own funky --tty flag (CI has no TTY and that would trip).
+log "building image via pi-gen's Docker path (this takes ~15-30 min)"
 cd "$PI_GEN_DIR"
-sudo PIGEN_DOCKER=0 ./build.sh 2>&1 | sed 's/^/  /'
+if ! command -v docker >/dev/null 2>&1; then
+  fail "docker not installed — install docker.io / docker-ce, or run on a host with Docker"
+fi
+sudo CONTINUE=1 ./build-docker.sh 2>&1 | sed 's/^/  /'
 
 # === Collect ===
 DEPLOY_DIR="$PI_GEN_DIR/deploy"
