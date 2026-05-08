@@ -45,19 +45,34 @@ fi
 # explicitly so it can pin versions and surface failures on its own
 # step).
 if [ "${CFSIGHT_SKIP_DEPS:-0}" != "1" ]; then
-  HOST_DEPS=( git qemu-user-static binfmt-support debootstrap parted kpartx xz-utils rsync zip )
+  # Pi-gen has a strict check for these packages by name (see its
+  # `dependencies_check` step). Some of them (quilt, libarchive-tools,
+  # arch-test) only exist for pi-gen's internal use; we install them
+  # to keep the build from refusing to start. The cmd:pkg pairs let us
+  # detect "already installed" via `command -v` for the ones with a
+  # binary entrypoint, plus `dpkg-query` for pure-data packages.
   MISSING=()
   for cmd_pkg in \
       "git:git" \
+      "quilt:quilt" \
       "qemu-aarch64-static:qemu-user-static" \
       "debootstrap:debootstrap" \
       "parted:parted" \
       "kpartx:kpartx" \
       "xz:xz-utils" \
-      "rsync:rsync"; do
+      "rsync:rsync" \
+      "bsdtar:libarchive-tools" \
+      "arch-test:arch-test"; do
     cmd="${cmd_pkg%%:*}"
     pkg="${cmd_pkg##*:}"
     if ! command -v "$cmd" >/dev/null 2>&1; then
+      MISSING+=( "$pkg" )
+    fi
+  done
+  # qemu-user-binfmt and binfmt-support don't ship an obvious binary
+  # to probe for, so we check via dpkg directly.
+  for pkg in qemu-user-binfmt binfmt-support; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
       MISSING+=( "$pkg" )
     fi
   done

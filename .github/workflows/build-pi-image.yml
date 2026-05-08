@@ -59,9 +59,27 @@ jobs:
       - name: Install host build deps
         run: |
           sudo apt-get update
+          # pi-gen's check_dependencies expects every one of these by
+          # exact package name, with `quilt`/`qemu-user-binfmt`/
+          # `libarchive-tools`/`arch-test` being the four it's most
+          # likely to complain about on a fresh Ubuntu image. Also
+          # qemu-user-static is what actually contains the aarch64
+          # interpreter; qemu-user-binfmt is the auto-registration
+          # package — the two are NOT the same and you need both.
           sudo apt-get install -y \
-            git qemu-user-static binfmt-support debootstrap \
-            parted kpartx xz-utils rsync zip
+            git \
+            quilt \
+            qemu-user-static \
+            qemu-user-binfmt \
+            binfmt-support \
+            libarchive-tools \
+            arch-test \
+            debootstrap \
+            parted \
+            kpartx \
+            xz-utils \
+            rsync \
+            zip
           # Register qemu binfmt so the chroot can run aarch64 binaries.
           sudo update-binfmts --enable qemu-aarch64 || true
 
