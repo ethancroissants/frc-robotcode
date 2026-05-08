@@ -139,7 +139,15 @@ def _make_askpass_script(token: str) -> tuple[Path, dict[str, str]]:
     return p, env
 
 
-def _logic() -> int:
+def _logic(force_mode: str = "off") -> int:
+    """force_mode:
+       "off"            — plain `git push`, fails on non-fast-forward (safe)
+       "lease"          — `git push --force-with-lease`, only overwrites
+                          remote if it matches what we last fetched
+       "force"          — `git push --force`, the foot-gun. Requires explicit
+                          --force on the CLI; --force-with-lease is the
+                          default destructive option because it's safer.
+    """
     repo = Path(__file__).resolve().parent
     os.chdir(repo)
 
@@ -163,7 +171,15 @@ def _logic() -> int:
         _step("Committing")
         _run(["git", "commit", "-m", "update"])
 
-    _step(f"Pushing to {remote}/{branch}")
+    label = {"off": "", "lease": " (--force-with-lease)", "force": " (--force)"}[force_mode]
+    _step(f"Pushing to {remote}/{branch}{label}")
+
+    if force_mode == "force":
+        _info(
+            "WARNING: --force is the foot-gun version. It overwrites the "
+            "remote even if someone else pushed concurrently. Prefer "
+            "--force-with-lease unless you have a specific reason."
+        )
 
     token = _read_token()
     askpass_path: Path | None = None
@@ -178,10 +194,17 @@ def _logic() -> int:
             "relying on your existing git credential helper."
         )
 
+    push_cmd = ["git", "push"]
+    if force_mode == "lease":
+        push_cmd.append("--force-with-lease")
+    elif force_mode == "force":
+        push_cmd.append("--force")
+    push_cmd += [remote, branch]
+
     try:
         # Push to the configured remote name (no embedded creds in URL!).
         # Token, if any, is delivered via GIT_ASKPASS in push_env.
-        _run(["git", "push", remote, branch], env=push_env)
+        _run(push_cmd, env=push_env)
     finally:
         # Always delete the askpass script, even on push failure.
         if askpass_path is not None:
@@ -198,12 +221,34 @@ def _logic() -> int:
 
 
 def main() -> int:
-    if "--ui" in sys.argv[1:]:
-        sys.argv = [a for a in sys.argv if a != "--ui"]
+    args = sys.argv[1:]
+
+    if "--help" in args or "-h" in args:
+        print(__doc__)
+        print()
+        print("Flags:")
+        print("  --ui                  Show the friendly Tk progress window")
+        print("  --force-with-lease    Overwrite remote, but only if it matches what we last fetched")
+        print("  --force               Overwrite remote unconditionally (foot-gun)")
+        return 0
+
+    force_mode = "off"
+    if "--force-with-lease" in args:
+        force_mode = "lease"
+        args = [a for a in args if a != "--force-with-lease"]
+    elif "--force" in args:
+        force_mode = "force"
+        args = [a for a in args if a != "--force"]
+
+    if "--ui" in args:
+        args = [a for a in args if a != "--ui"]
+        sys.argv = [sys.argv[0]] + args
         if ui_mode.HAS_TK:
             app = ui_mode.activate("Push", "send changes to GitHub")
-            return app.run(_logic)
-    return _logic()
+            return app.run(lambda: _logic(force_mode=force_mode))
+
+    sys.argv = [sys.argv[0]] + args
+    return _logic(force_mode=force_mode)
 
 
 if __name__ == "__main__":
