@@ -40,12 +40,13 @@ if [ "$EUID" -ne 0 ] && ! sudo -n true 2>/dev/null; then
   sudo -v || fail "sudo required"
 fi
 
-# Auto-install host deps if they're missing. Since we use pi-gen's
-# Docker path, the only host deps we need are *our wrapper's* tools:
-# git for cloning pi-gen, rsync for staging our app source into
-# pi-gen's stage, and xz-utils for inspecting the output. Pi-gen's
-# heavy chroot deps (quilt, qemu-user-binfmt, etc.) live inside the
-# Docker image — no need to install them on the host.
+# Auto-install host deps if they're missing. We use pi-gen's Docker
+# path so heavy chroot deps live inside its image, but pi-gen's
+# launcher does TWO checks on the host before running its container:
+#   1. qemu-aarch64-static must be on PATH (apt: qemu-user-static)
+#   2. /proc/sys/fs/binfmt_misc/qemu-aarch64 must exist (registered
+#      via tonistiigi/binfmt below)
+# We also need rsync / xz-utils / git / docker for our wrapper.
 #
 # Skip when CI sets CFSIGHT_SKIP_DEPS=1.
 if [ "${CFSIGHT_SKIP_DEPS:-0}" != "1" ]; then
@@ -54,6 +55,7 @@ if [ "${CFSIGHT_SKIP_DEPS:-0}" != "1" ]; then
       "git:git" \
       "rsync:rsync" \
       "xz:xz-utils" \
+      "qemu-aarch64-static:qemu-user-static" \
       "docker:docker.io"; do
     cmd="${cmd_pkg%%:*}"
     pkg="${cmd_pkg##*:}"
@@ -140,19 +142,18 @@ rsync -a --delete \
   "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source/setup-wizard/"
 
 # === Register qemu binfmts on the host kernel ===
-# Even though pi-gen runs inside Docker, the kernel needs to know how
-# to execute foreign-arch (aarch64) binaries inside the chroot — this
-# is binfmt_misc registration, which is a host-kernel concern shared
-# between containers and the host. On older Linux this was handled by
-# the qemu-user-binfmt apt package, but Ubuntu 24.04 made it conflict
-# with qemu-user-static so neither approach is universal anymore. The
-# multiarch/qemu-user-static container registers handlers via
-# --privileged + the kernel's binfmt_misc interface and works on
-# every modern Linux host.
-log "registering qemu binfmts via multiarch/qemu-user-static"
-sudo docker run --rm --privileged multiarch/qemu-user-static:latest \
-    --reset -p yes >/dev/null \
+# Pi-gen needs binfmt_misc registered so the kernel knows to route
+# aarch64 binaries through qemu-aarch64-static during apt/dpkg in
+# the chroot. tonistiigi/binfmt is the de-facto standard installer
+# for this — same image Docker Buildx uses — and it works without
+# the conflicting qemu-user-binfmt apt package.
+if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+  log "registering qemu binfmts via tonistiigi/binfmt"
+  sudo docker run --rm --privileged tonistiigi/binfmt:latest --install all \
     || fail "binfmt registration failed — check kernel binfmt_misc support"
+fi
+test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 \
+  || fail "/proc/sys/fs/binfmt_misc/qemu-aarch64 still missing after tonistiigi/binfmt run"
 
 # === Build ===
 # We use pi-gen's *Docker* path (./build-docker.sh) instead of the
