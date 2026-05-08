@@ -326,6 +326,12 @@ class CameraPanel {
     this.imageH = 1;
     this.allTags = [];
     this.selectedId = null;
+    // Server-side display flip ("none" | "h" | "v" | "hv"). The SSE feed
+    // tells us via s.camera_flip; we mirror clicks the *opposite* way
+    // before hit-testing so they land where the operator sees the tag,
+    // and we mirror corners_px the *same* way when drawing SVG hover /
+    // select boxes so the overlay wraps the visual tag.
+    this.flip = "none";
 
     this.frame.addEventListener("click", (e) => this._onClick(e));
     this.frame.addEventListener("mousemove", (e) => this._onMove(e));
@@ -345,6 +351,21 @@ class CameraPanel {
     this.svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   }
 
+  setFlip(flip) {
+    this.flip = (["none", "h", "v", "hv"].includes(flip)) ? flip : "none";
+    // Re-render the selection ring with the new flip applied so it
+    // wraps the tag in the new orientation immediately, instead of
+    // jumping next time setTags() runs.
+    this._render();
+  }
+
+  // Apply forward flip to a (x,y) for DRAWING on the flipped display.
+  _flipForDraw(x, y) {
+    if (this.flip === "h" || this.flip === "hv") x = (this.imageW - 1) - x;
+    if (this.flip === "v" || this.flip === "hv") y = (this.imageH - 1) - y;
+    return [x, y];
+  }
+
   setTags(allTags, selectedId) {
     this.allTags = allTags || [];
     this.selectedId = (selectedId == null) ? null : Number(selectedId);
@@ -352,13 +373,20 @@ class CameraPanel {
   }
 
   _render() {
-    // Selection ring around the locked tag (if any + visible).
+    // Selection ring around the locked tag (if any + visible). Mirror
+    // the corner coords through the same display-flip as the camera
+    // image so the SVG ring wraps the tag in the operator's view
+    // instead of jumping to the unflipped pixel.
     while (this.selectLayer.firstChild) this.selectLayer.removeChild(this.selectLayer.firstChild);
     if (this.selectedId != null) {
       const tag = this.allTags.find(t => Number(t.tag_id) === this.selectedId);
       if (tag && tag.corners_px) {
+        const pts = tag.corners_px.map(([x, y]) => {
+          [x, y] = this._flipForDraw(x, y);
+          return `${x},${y}`;
+        }).join(" ");
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        poly.setAttribute("points", tag.corners_px.map(([x,y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("points", pts);
         poly.setAttribute("class", "tag-box");
         this.selectLayer.appendChild(poly);
       }
@@ -373,7 +401,14 @@ class CameraPanel {
     pt.y = ev.clientY;
     const ctm = this.svg.getScreenCTM();
     if (!ctm) return null;
-    return pt.matrixTransform(ctm.inverse());
+    const p = pt.matrixTransform(ctm.inverse());
+    // The displayed image is server-side-flipped, but corners_px in
+    // the SSE feed are in *unflipped* image space (detection runs on
+    // the unflipped capture). Map the click back to that space so
+    // pointInQuad lines up.
+    if (this.flip === "h" || this.flip === "hv") p.x = (this.imageW - 1) - p.x;
+    if (this.flip === "v" || this.flip === "hv") p.y = (this.imageH - 1) - p.y;
+    return p;
   }
 
   _onClick(ev) {
@@ -403,8 +438,12 @@ class CameraPanel {
       if (!tag.corners_px || tag.corners_px.length < 4) continue;
       if (Number(tag.tag_id) === this.selectedId) continue;
       if (pointInQuad(p.x, p.y, tag.corners_px)) {
+        const pts = tag.corners_px.map(([x, y]) => {
+          [x, y] = this._flipForDraw(x, y);
+          return `${x},${y}`;
+        }).join(" ");
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        poly.setAttribute("points", tag.corners_px.map(([x,y]) => `${x},${y}`).join(" "));
+        poly.setAttribute("points", pts);
         poly.setAttribute("class", "tag-box");
         this.hoverLayer.appendChild(poly);
         break;
@@ -707,6 +746,12 @@ class StateView {
       if (s.image_size) {
         this.camera.setImageSize(s.image_size.w, s.image_size.h);
       }
+      // Tell the camera panel about the current display flip so it
+      // can inverse-flip click coords before hit-testing against
+      // (unflipped) corners_px in s.all_tags. Server publishes flip
+      // in every snapshot so the dashboard never lags the engine's
+      // runtime flip state.
+      this.camera.setFlip(s.camera_flip || "none");
       this.camera.setTags(s.all_tags || [], s.selected_tag_id);
     });
 
@@ -1222,12 +1267,25 @@ const CAMERA_PRESETS = [
   { id: "ultra",   label: "Ultra",    fps: 30, quality: 90 },
 ];
 
+const CAMERA_FLIPS = [
+  // Server-side flip applied to the *display* frame only — detection
+  // still runs on the unflipped capture (AprilTag bit patterns are
+  // direction-aware), and the browser inverse-flips clicks before
+  // hit-testing so click-to-target lines up with the visual tag.
+  { id: "none", label: "None"         },
+  { id: "h",    label: "Mirror"       }, // horizontal flip
+  { id: "v",    label: "Upside-down"  }, // vertical flip
+  { id: "hv",   label: "Rotate 180°"  }, // both
+];
+
 function loadCameraSettings() {
   try {
     const raw = localStorage.getItem(CAMERA_SETTINGS_KEY);
     if (!raw) return null;
     const v = JSON.parse(raw);
     if (typeof v.fps !== "number" || typeof v.quality !== "number") return null;
+    if (typeof v.flip !== "string") v.flip = "none";
+    if (!CAMERA_FLIPS.some(f => f.id === v.flip)) v.flip = "none";
     return v;
   } catch (_) { return null; }
 }
@@ -1270,7 +1328,7 @@ class CameraSettings {
   constructor() {
     this.btn = $("settings-btn");
     if (!this.btn) return;
-    this.current = loadCameraSettings() || { fps: 20, quality: 55 };
+    this.current = loadCameraSettings() || { fps: 20, quality: 55, flip: "none" };
     // On page load: replay our saved settings to the server so the
     // stream encoding matches what the operator asked for. Without
     // this, a service restart on the Pi would silently revert to
@@ -1330,7 +1388,24 @@ class CameraSettings {
     est.className = "cf-settings-est";
     box.appendChild(est);
 
-    const draftRef = { fps: this.current.fps, quality: this.current.quality };
+    // Flip row — server-side flip of the *displayed* frame. Detection
+    // still runs unflipped (AprilTag bit patterns are direction-aware),
+    // but corner-box overlay coords map through the flip so they track
+    // the tag in the operator's view and click-to-target inverse-maps
+    // pointer coords so it lines up too.
+    const flipLbl = document.createElement("div");
+    flipLbl.className = "cf-settings-est";
+    flipLbl.textContent = "Flip camera (display only — detection unaffected)";
+    box.appendChild(flipLbl);
+    const flips = document.createElement("div");
+    flips.className = "cf-presets";
+    box.appendChild(flips);
+
+    const draftRef = {
+      fps: this.current.fps,
+      quality: this.current.quality,
+      flip: this.current.flip || "none",
+    };
 
     const renderPresets = () => {
       presets.replaceChildren();
@@ -1345,8 +1420,25 @@ class CameraSettings {
           draftRef.fps = p.fps;
           draftRef.quality = p.quality;
           syncControls();
+          this._applyDebounced(draftRef);
         });
         presets.appendChild(b);
+      }
+    };
+
+    const renderFlips = () => {
+      flips.replaceChildren();
+      for (const f of CAMERA_FLIPS) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ghost" + (f.id === draftRef.flip ? " active" : "");
+        b.textContent = f.label;
+        b.addEventListener("click", () => {
+          draftRef.flip = f.id;
+          syncControls();
+          this._applyDebounced(draftRef);
+        });
+        flips.appendChild(b);
       }
     };
 
@@ -1357,6 +1449,7 @@ class CameraSettings {
       qVal.textContent   = `q${draftRef.quality}`;
       est.textContent = `≈ ${bandwidthEstimate(draftRef.fps, draftRef.quality)} KB/s`;
       renderPresets();
+      renderFlips();
     };
 
     const onFpsInput = () => {
@@ -1415,13 +1508,22 @@ class CameraSettings {
   }
 
   _commit(draft) {
-    const v = { fps: Number(draft.fps), quality: Number(draft.quality) };
-    if (v.fps === this.current.fps && v.quality === this.current.quality) return;
+    const v = {
+      fps: Number(draft.fps),
+      quality: Number(draft.quality),
+      flip: String(draft.flip || "none"),
+    };
+    if (v.fps === this.current.fps
+        && v.quality === this.current.quality
+        && v.flip === (this.current.flip || "none")) {
+      return;
+    }
     this.current = v;
     saveCameraSettings(v);
     pushCameraSettings(v).then((resp) => {
       if (resp && resp.ok) {
-        toast(`stream → ${v.fps} fps · q${v.quality}`, "info");
+        const flipLabel = (CAMERA_FLIPS.find(f => f.id === v.flip) || {}).label || v.flip;
+        toast(`stream → ${v.fps} fps · q${v.quality} · ${flipLabel}`, "info");
       }
     });
   }

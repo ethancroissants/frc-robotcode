@@ -913,6 +913,16 @@ class CameraEngine:
         self._settings_lock = threading.Lock()
         self._stream_quality = int(STREAM_QUALITY)
         self._camera_fps = int(CAMERA_FPS)
+        # Camera flip: applied to the *display* frame only, before JPEG
+        # encode. Detection still runs on the unflipped capture (AprilTag
+        # bit patterns are direction-aware so a flipped tag wouldn't
+        # match the dictionary). Rendered overlay coords are mapped
+        # through the flip so boxes track tags in the operator's view,
+        # while text labels stay readable left-to-right. Values:
+        # "none", "h" (mirror), "v" (upside-down), "hv" (180°).
+        self._flip_mode = os.environ.get("CAMERA_FLIP", "none").strip().lower()
+        if self._flip_mode not in {"none", "h", "v", "hv"}:
+            self._flip_mode = "none"
 
         # Detector setup. We build BOTH a pyapriltags detector (preferred
         # — the upstream AprilTag C++ implementation, same algorithm
@@ -1160,17 +1170,25 @@ class CameraEngine:
     # see *that* a tag is in frame.
     _FPS_MIN, _FPS_MAX = 1, 30
     _Q_MIN, _Q_MAX = 5, 95
+    _FLIP_MODES = ("none", "h", "v", "hv")
 
     def get_settings(self) -> dict:
         with self._settings_lock:
             return {
                 "fps": int(self._camera_fps),
                 "quality": int(self._stream_quality),
+                "flip": self._flip_mode,
                 "fps_range": [self._FPS_MIN, self._FPS_MAX],
                 "quality_range": [self._Q_MIN, self._Q_MAX],
+                "flip_modes": list(self._FLIP_MODES),
             }
 
-    def update_settings(self, fps: int | None = None, quality: int | None = None) -> dict:
+    def update_settings(
+        self,
+        fps: int | None = None,
+        quality: int | None = None,
+        flip: str | None = None,
+    ) -> dict:
         """Apply new fps/quality. Quality takes effect on the next encoded
         frame (no capture restart). FPS calls cap.set(CAP_PROP_FPS) on
         the live capture — most USB MJPEG cameras honor this without a
@@ -1202,6 +1220,14 @@ class CameraEngine:
                 # cap rate stays at whatever was set on open; if you
                 # need the camera to actually slow down at the V4L2
                 # level, restart the service after editing sight.env.
+            if flip is not None:
+                fv = str(flip).strip().lower()
+                if fv not in self._FLIP_MODES:
+                    fv = "none"
+                if fv != self._flip_mode:
+                    log.info("camera flip: %s → %s", self._flip_mode, fv)
+                self._flip_mode = fv
+                applied["flip"] = fv
         return {**self.get_settings(), "applied": applied}
 
     # ----- lifecycle -----
@@ -1751,9 +1777,46 @@ class CameraEngine:
     # ----- rendering -----
 
     def _render(self, frame: np.ndarray, det: Detection | None) -> bytes:
-        # Center crosshair (always on). Color by ready-state so the operator
-        # gets a "good to fire" signal without taking eyes off the camera.
+        # ---- Camera flip ----
+        # Apply the operator's flip preference to the *display frame* only.
+        # Detection has already run on the unflipped capture (AprilTag's
+        # bit pattern is direction-aware, so we can't detect from a
+        # mirrored image). Below we map every overlay coord through the
+        # same flip transform so boxes wrap the tag in the operator's
+        # flipped view; text labels — drawn AFTER the flip on the
+        # destination buffer — remain readable left-to-right.
+        with self._settings_lock:
+            flip_mode = self._flip_mode
+            qnow = self._stream_quality
+        if flip_mode == "h":
+            frame = cv2.flip(frame, 1)
+        elif flip_mode == "v":
+            frame = cv2.flip(frame, 0)
+        elif flip_mode == "hv":
+            frame = cv2.flip(frame, -1)
+
         h, w = frame.shape[:2]
+        flip_h = flip_mode in ("h", "hv")
+        flip_v = flip_mode in ("v", "hv")
+
+        def _map_xy(x: float, y: float) -> tuple[float, float]:
+            if flip_h:
+                x = (w - 1) - x
+            if flip_v:
+                y = (h - 1) - y
+            return x, y
+
+        def _map_pts(pts: np.ndarray) -> np.ndarray:
+            if not (flip_h or flip_v):
+                return pts
+            out = pts.astype(np.float64).copy()
+            if flip_h:
+                out[:, 0] = (w - 1) - out[:, 0]
+            if flip_v:
+                out[:, 1] = (h - 1) - out[:, 1]
+            return out
+
+        # Center crosshair (always on, symmetric — flip-agnostic).
         if det is not None and abs(det.bearing_deg) <= READY_BEARING_DEG:
             crosshair = (0, 255, 0)  # green = ready
         else:
@@ -1768,7 +1831,8 @@ class CameraEngine:
         for tid, corners in self._latest_all:
             if tid == target_id:
                 continue
-            pts_other = corners.astype(np.int32).reshape(-1, 2)
+            mapped = _map_pts(corners)
+            pts_other = mapped.astype(np.int32).reshape(-1, 2)
             other_color = (60, 140, 255)  # BGR — soft orange, "seen but not aimed"
             cv2.polylines(frame, [pts_other], isClosed=True, color=other_color,
                           thickness=1, lineType=cv2.LINE_AA)
@@ -1779,7 +1843,8 @@ class CameraEngine:
 
         if det is not None:
             color = (0, 212, 0) if (not TARGET_TAG_IDS or det.tag_id in TARGET_TAG_IDS) else (0, 165, 255)
-            pts = det.corners_px.astype(np.int32).reshape(-1, 2)
+            mapped_corners = _map_pts(det.corners_px)
+            pts = mapped_corners.astype(np.int32).reshape(-1, 2)
             thickness = 3 if det.selected_locked else 2
             cv2.polylines(frame, [pts], isClosed=True, color=color,
                           thickness=thickness, lineType=cv2.LINE_AA)
@@ -1788,7 +1853,10 @@ class CameraEngine:
             if det.selected_locked:
                 for i, p in enumerate(pts):
                     cv2.circle(frame, tuple(p), 4, color, -1, cv2.LINE_AA)
-            cx, cy = int(det.cx_norm * w), int(det.cy_norm * h)
+            cx_raw = det.cx_norm * w
+            cy_raw = det.cy_norm * h
+            cx_m, cy_m = _map_xy(cx_raw, cy_raw)
+            cx, cy = int(cx_m), int(cy_m)
             cv2.circle(frame, (cx, cy), 4, color, -1, cv2.LINE_AA)
             label = f"#{det.tag_id}  {det.bearing_deg:+.1f}°"
             if det.range_m > 0:
@@ -1799,14 +1867,11 @@ class CameraEngine:
             cv2.putText(frame, label, (cx + 12, cy - 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-        # FPS overlay in the top-left corner. Two lines: capture (camera
-        # produces) and detect (effective AprilTag rate). Drawn last so
-        # nothing else can paint over it. Black drop-shadow under white
-        # text keeps it legible on bright field carpet *and* dark bumpers.
+        # FPS overlay in the top-left corner — drawn after the flip on
+        # the destination buffer so it's always in canonical orientation
+        # regardless of camera flip.
         cap_fps = self._fps_capture
         det_fps = self._fps_detect
-        with self._settings_lock:
-            qnow = self._stream_quality
         line1 = f"{cap_fps:4.1f} fps"
         line2 = f"q{qnow}"
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -1939,6 +2004,15 @@ async def api_state(request: Request) -> StreamingResponse:
                 snap["seen_tags"] = sorted({tid for tid, _ in camera._latest_all})
                 snap["selected_tag_id"] = camera.selected_tag_id()
                 snap["image_size"] = {"w": CAMERA_WIDTH, "h": CAMERA_HEIGHT}
+                # Surface the current display flip so the browser can
+                # inverse-flip click coords before hit-testing against
+                # corners_px (which stay in unflipped image space).
+                # Without this, click-to-target was dead the moment the
+                # user enabled any flip — clicks landed at the visual
+                # tag location, but hit-tests ran against original
+                # unflipped corners → no match.
+                with camera._settings_lock:
+                    snap["camera_flip"] = camera._flip_mode
                 snap["fps"] = {
                     "capture": round(camera._fps_capture, 1),
                     "detect": round(camera._fps_detect, 1),
@@ -2091,15 +2165,16 @@ async def api_camera_settings_get() -> JSONResponse:
 
 @app.post("/api/camera/settings")
 async def api_camera_settings_set(payload: dict) -> JSONResponse:
-    """Update runtime camera fps / quality. Both fields are optional —
-    the dashboard sends the full {fps, quality} object every change for
-    simplicity, but partial updates work too. Server clamps to the
-    engine's envelope and returns the post-clamp values so the UI can
-    snap its sliders if it asked for something out of range."""
+    """Update runtime camera fps / quality / flip. All fields optional —
+    the dashboard sends the full object every change for simplicity, but
+    partial updates work too. Server clamps to the engine's envelope and
+    returns the post-clamp values so the UI can snap its controls if it
+    asked for something out of range. `flip` is one of: none, h, v, hv."""
     try:
         fps = payload.get("fps")
         quality = payload.get("quality")
-        result = camera.update_settings(fps=fps, quality=quality)
+        flip = payload.get("flip")
+        result = camera.update_settings(fps=fps, quality=quality, flip=flip)
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         log.exception("camera settings update failed")
