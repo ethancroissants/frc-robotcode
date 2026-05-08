@@ -627,11 +627,19 @@ class App:
     # pre-fed 'y' answers so prompts like robotpy's "uninstall + install?"
     # don't EOF and crash the deploy.
 
-    def stream_subprocess(self, cmd: list[str], capture: list[str] | None = None) -> int:
+    def stream_subprocess(
+        self,
+        cmd: list[str],
+        capture: list[str] | None = None,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> int:
         """Run cmd, streaming stdout/stderr to the details panel.
 
         If `capture` is a list, each output line is also appended to it so
         callers can scan for known error strings after the process exits.
+        `env` is forwarded to Popen unchanged — used by push.py to set
+        GIT_ASKPASS without embedding tokens in argv.
         """
         self._buffer(f"  $ {' '.join(cmd)}\n")
         try:
@@ -649,6 +657,7 @@ class App:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=env,
             )
         except Exception as e:
             self._buffer(f"Failed to launch: {e}\n")

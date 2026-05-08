@@ -36,9 +36,20 @@ networktables.json.bak
 simgui.json
 simgui-window.json
 
-# Contains credentials — never commit
+# Per-developer push helper. The Python version (push.py) used to
+# hardcode a GitHub PAT — that's why this filename was hard-blocklisted.
+# The current push.py reads the token from $GH_TOKEN or
+# ~/.config/cfsight/gh-token instead, so *push.py is now fine to
+# commit*. push.sh is still per-developer though.
 push.sh
-push.py
+
+# Anything that smells like an API token. Belt-and-suspenders so a
+# stray credential file can't sneak in even if mis-named.
+*.token
+*token.txt
+**/gh-token
+.env
+.envrc
 
 # Pi vendoring — laptop-side cached wheels for offline Pi install. Re-fetched
 # on every setup_orangepi.py run, so committing them would just churn diffs.
@@ -46,3 +57,8 @@ orangepi/vendor/
 
 # Per-laptop Pi target (host/user/cached pi_env) — local config, not source.
 .orangepi_cfg
+
+# Pi-image build artifacts (multi-GB images). Don't commit; download
+# from GitHub Releases or rebuild via pi-image/build.sh.
+pi-image/work/
+pi-image/out/
