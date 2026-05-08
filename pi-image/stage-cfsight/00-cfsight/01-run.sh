@@ -4,9 +4,10 @@
 # then use on_chroot to finish per-OS setup (systemd unit installs,
 # venv creation, etc.).
 #
-# The cfsight-source/ directory next to this file was populated by
-# pi-image/build.sh from the project's orangepi/ + firstboot/ +
-# setup-wizard/ trees.
+# The cfsight-source/ directory next to this file is populated by
+# pi-image/build.sh from the project's orangepi/ + setup-wizard/ trees.
+# (The firstboot scripts live alongside this file in files/ — they
+# don't need a separate copy step.)
 
 STAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$STAGE_DIR/cfsight-source"
@@ -21,9 +22,6 @@ install -d -m 755 "$ROOTFS_DIR/opt/cfsight"
 rsync -a --delete \
   --chown=root:root \
   "$SRC/sight/"          "$ROOTFS_DIR/opt/cfsight/sight/"
-rsync -a --delete \
-  --chown=root:root \
-  "$SRC/firstboot/"      "$ROOTFS_DIR/opt/cfsight/firstboot/"
 rsync -a --delete \
   --chown=root:root \
   "$SRC/setup-wizard/"   "$ROOTFS_DIR/opt/cfsight/setup-wizard/"

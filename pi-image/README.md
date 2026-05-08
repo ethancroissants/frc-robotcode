@@ -50,24 +50,24 @@ Boot the Pi. It joins the WiFi directly, no AP step. Same dashboard URL.
 
 You have **three** options, in order of how much work you want to do:
 
-### Option A — Download from GitHub Releases (zero work)
+### Option A — Run the GitHub Actions build (no local Linux needed)
 
-Whenever a `v*.*.*` git tag is pushed, GitHub Actions builds the image
-in CI and attaches the `.img.xz` to a Release. Open the project's
-**Releases** page, grab the latest `cfsight-X.Y.Z-arm64.img.xz`, flash
-with Raspberry Pi Imager. Done.
-
-### Option B — Trigger a one-off CI build (no local Linux needed)
-
-For an in-between bump or a custom build:
+The build is **manual only** — open it explicitly when you want a new
+image:
 
 1. Open the project's **Actions** tab on GitHub.
-2. Pick "Build Pi image" → "Run workflow" → optionally enter a version
-   string → Run.
-3. ~30 minutes later the run page has the `.img.xz` as a downloadable
-   workflow artifact (kept for 90 days).
+2. Pick "Build Pi image" → "Run workflow" (top-right green button) →
+   optionally enter a version string → Run.
+3. Tick **"Also publish a GitHub Release"** if you want the resulting
+   `.img.xz` attached to a public Release page (so other teams can
+   download it without needing GitHub access). Otherwise it's just an
+   artifact on the run page.
+4. ~30 minutes later the run page has the `.img.xz` as a downloadable
+   workflow artifact (kept for 90 days). If you ticked the Release
+   option, it also shows up on the **Releases** page tagged
+   `v<version>`.
 
-### Option C — Build locally on a Linux box
+### Option B — Build locally on a Linux box
 
 Useful for offline builds or when you're iterating on the image.
 

@@ -118,6 +118,11 @@ cp -r "$SCRIPT_DIR/stage-cfsight" "$PI_GEN_DIR/stage-cfsight"
 # rsync them into the chroot rootfs. We copy here (not symlink) so a
 # rebuild reflects the latest commit's content even if you nuked the
 # stage directory by hand.
+#
+# We *don't* rsync any "firstboot" tree — early scaffolding had a
+# pi-image/firstboot/ directory but the firstboot scripts (.service,
+# .sh) actually live in stage-cfsight/00-cfsight/files/ and ride along
+# with the stage automatically. No separate copy needed.
 log "copying app source into stage-cfsight"
 mkdir -p "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source"
 rsync -a --delete \
@@ -125,10 +130,6 @@ rsync -a --delete \
   --exclude="vendor/wheels" --exclude=".venv" \
   "$PROJECT_ROOT/orangepi/" \
   "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source/sight/"
-rsync -a --delete \
-  --exclude=".git" --exclude="__pycache__" \
-  "$SCRIPT_DIR/firstboot/" \
-  "$PI_GEN_DIR/stage-cfsight/00-cfsight/cfsight-source/firstboot/"
 rsync -a --delete \
   --exclude=".git" --exclude="__pycache__" \
   "$SCRIPT_DIR/setup-wizard/" \
