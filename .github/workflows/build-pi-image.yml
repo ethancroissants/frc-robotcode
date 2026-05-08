@@ -1,22 +1,28 @@
 name: Build Pi image
 
-# Two ways to trigger:
-#   1. Push a tag like `v0.1.0` → builds + creates a GitHub Release with
-#      the .img.xz attached. That's the "I just want to download it"
-#      workflow for everyone else.
-#   2. Manually via the Actions tab → "Run workflow". Useful for
-#      iterating without bumping a version tag.
+# Manual-only. Run from Actions → "Build Pi image" → Run workflow.
+# Tag pushes used to auto-trigger this; we removed that to keep the
+# workflow under explicit control. Two inputs:
+#   * version         — the version string to bake into the image's
+#                       filename. Defaults to pi-image/VERSION.
+#   * publish_release — if checked, also creates a GitHub Release named
+#                       "Cold Fusion Sight v<version>" with the .img.xz
+#                       attached. Off by default — you'll usually want
+#                       to verify the artifact downloads cleanly first
+#                       and then re-run with the box checked.
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
         description: 'Version string (e.g. 0.1.0). Leave blank to read pi-image/VERSION.'
         required: false
         default: ''
+      publish_release:
+        description: 'Also publish a GitHub Release with the image attached'
+        required: false
+        type: boolean
+        default: false
 
 # pi-gen needs root for losetup / chroot etc. The hosted ubuntu-latest
 # runner gives us passwordless sudo, which is exactly what build.sh
@@ -25,6 +31,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
+    # action-gh-release needs `contents: write` to actually publish a
+    # Release. Default GITHUB_TOKEN scope is read-only on workflows
+    # that aren't tag/push triggered, so we have to ask for it
+    # explicitly here.
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -35,12 +48,11 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VER="${{ github.event.inputs.version }}"
-          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
-            VER="${{ github.ref_name }}"
-            VER="${VER#v}"
           else
             VER="$(cat pi-image/VERSION 2>/dev/null || echo 0.0.0-dev)"
           fi
+          # Strip any leading 'v' so we get cfsight-0.1.0, not cfsight-v0.1.0
+          VER="${VER#v}"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Building cfsight-$VER"
 
@@ -78,8 +90,10 @@ jobs:
           ls -la pi-image/out/
           (cd pi-image/out && sha256sum *.img.xz > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
-      # Always upload as a workflow artifact (kept ~90 days), so even
-      # workflow_dispatch runs produce a download.
+      # Always upload as a workflow artifact (kept ~90 days). This is
+      # the primary deliverable — every successful run yields a
+      # downloadable image whether or not the user opted into a
+      # Release.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -90,15 +104,16 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # If we were triggered by a tag push, also publish a Release with
-      # the .img.xz attached. End users just open the Releases page,
-      # download, flash. That's the "I don't want to think about CI"
-      # workflow.
+      # Optional: publish a public Release. Only fires when the operator
+      # checks the publish_release input. We tag the Release as
+      # v<version> ourselves so we don't depend on a separate `git tag`
+      # step on the user's laptop.
       - name: Publish Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ github.event.inputs.publish_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          name: Cold Fusion Sight ${{ github.ref_name }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Cold Fusion Sight v${{ steps.ver.outputs.version }}
           body: |
             **Vision Pi image** — flash with Raspberry Pi Imager
             (Use custom image → select the `.img.xz` below).
