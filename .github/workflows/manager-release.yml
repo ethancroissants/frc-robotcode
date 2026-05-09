@@ -10,8 +10,16 @@
 #     publish. Useful for "does it still build" sanity checks.
 #
 # Note on signing: we ship UNSIGNED binaries on purpose. Windows
-# SmartScreen will warn the user on first install and on each
-# update. Signing requires a $200/yr cert which we'll add later.
+# SmartScreen warns the user on first install and on each update.
+# Signing would need a $200/yr cert; deferred until the volume
+# justifies it.
+#
+# Note on caching: we deliberately don't pass `cache: 'npm'` to
+# setup-node. That option requires a checked-in package-lock.json
+# *before* the workflow starts and hard-errors on a fresh repo
+# ("Some specified paths were not resolved, unable to cache
+# dependencies"). We do our own actions/cache step further down
+# that gracefully degrades to a cold install when there's no lock.
 
 name: manager-release
 
@@ -31,11 +39,12 @@ permissions:
 
 jobs:
   build-windows:
-    name: Windows — build${{ (startsWith(github.ref, 'refs/tags/manager-v') || inputs.publish) && ' + publish' || '' }}
+    name: Windows build${{ (startsWith(github.ref, 'refs/tags/manager-v') || inputs.publish) && ' + publish' || '' }}
     runs-on: windows-latest
     defaults:
       run:
         working-directory: acuity/manager
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,41 +54,87 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: acuity/manager/package-lock.json
+          # Intentionally NO `cache: 'npm'` — see header note.
 
-      # Cache the electron-builder downloaded electron / wine binaries
-      # to keep cold-CI builds under 5 minutes.
-      - name: Cache electron-builder
+      # Cache npm's tarball cache directory keyed by package.json.
+      # No-op on first run, big speedup on subsequent runs. Works
+      # whether or not a package-lock.json exists.
+      - name: Cache npm tarballs
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Roaming\npm-cache
+          key: ${{ runner.os }}-npmcache-${{ hashFiles('acuity/manager/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npmcache-
+
+      # Cache the prebuilt Electron download + electron-builder's
+      # extracted Wine/squirrel binaries — these are the slow part of
+      # a cold CI build (~120 MB of downloads).
+      - name: Cache Electron + electron-builder
         uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\electron\Cache
             ~\AppData\Local\electron-builder\Cache
           key: ${{ runner.os }}-electron-${{ hashFiles('acuity/manager/package.json') }}
-          restore-keys: ${{ runner.os }}-electron-
+          restore-keys: |
+            ${{ runner.os }}-electron-
 
-      - name: Install deps
-        # `npm ci` requires a package-lock; if there isn't one yet,
-        # fall back to `npm install` so the first ever workflow run
-        # doesn't fail before we've checked in a lock.
+      - name: Install dependencies
+        # Use `npm ci` when a lockfile exists (reproducible), fall back
+        # to `npm install` on a fresh repo so the very first workflow
+        # run doesn't require us to commit a lockfile up front.
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm install --no-audit --fund=false }
+          if (Test-Path package-lock.json) {
+            Write-Host "package-lock.json found — using npm ci"
+            npm ci --no-audit --fund=false
+          } else {
+            Write-Host "no package-lock.json — using npm install"
+            npm install --no-audit --fund=false
+          }
         shell: pwsh
 
-      - name: Build NSIS installer + portable EXE
+      - name: Sync version from tag
+        # When triggered by a `manager-vX.Y.Z` tag, force-set
+        # package.json's version to X.Y.Z so:
+        #   1. the installer filename matches the tag
+        #   2. electron-builder publishes to a Release whose tag the
+        #      currently-installed binary's app.getVersion() can match
+        #      against (electron-updater compares semver).
+        # Skipped on workflow_dispatch — keep whatever's in source.
+        if: github.ref_type == 'tag'
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = $tag -replace '^manager-v', ''
+          Write-Host "tag $tag → version $version"
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $pkg.version = $version
+          # ConvertTo-Json's default depth (2) truncates electron-builder's
+          # nested `build` config; bump it to keep everything intact.
+          $pkg | ConvertTo-Json -Depth 32 | Set-Content -NoNewline package.json
+          Write-Host "package.json version is now $((Get-Content package.json -Raw | ConvertFrom-Json).version)"
+        shell: pwsh
+
+      - name: Build (and publish on tags)
         env:
+          # GH_TOKEN is what electron-builder reads to publish to
+          # Releases. The default GITHUB_TOKEN has the right perms
+          # because we declared `permissions.contents: write` above.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Skip code signing — we don't have a Windows cert.
-          # electron-builder honors these env vars to bypass signing.
+          # Skip code signing — we don't have a Windows cert. Set
+          # blank values so electron-builder doesn't probe for one.
           CSC_LINK: ''
           CSC_KEY_PASSWORD: ''
           WIN_CSC_LINK: ''
           WIN_CSC_KEY_PASSWORD: ''
         run: |
-          if ('${{ github.ref_type }}' -eq 'tag' -or '${{ inputs.publish }}' -eq 'true') {
+          $isTag = '${{ github.ref_type }}' -eq 'tag'
+          $manualPublish = '${{ inputs.publish }}' -eq 'true'
+          if ($isTag -or $manualPublish) {
+            Write-Host "publishing to GitHub Releases"
             npm run release:win
           } else {
+            Write-Host "build-only (no publish)"
             npm run build:win
           }
         shell: pwsh
@@ -87,8 +142,9 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: manager-windows
+          name: acuity-manager-windows
           # electron-builder drops everything under acuity/manager/dist/.
+          # The blockmap + latest.yml are what electron-updater needs.
           path: |
             acuity/manager/dist/*.exe
             acuity/manager/dist/*.exe.blockmap

@@ -61,6 +61,19 @@ and relaunches.
 We **don't auto-download** — at competition the field WiFi might
 charge per byte and a forced 80 MB download is hostile. Users opt in.
 
+**Important:** electron-updater talks to the GitHub Releases API
+anonymously. If `ethancroissants/frc-robotcode` is **private**,
+end-user installs will silently fail to find updates (the API
+returns 404 without auth). Two fixes when that becomes a problem:
+
+1. **Make the repo public.** The Manager binary is OSS by design
+   anyway — anyone reverse-engineering it learns nothing they
+   couldn't read in this repo.
+2. **Mirror releases to a public repo.** Set up a stub
+   `acuity-releases` public repo that the workflow `gh release
+   create`s into, and point the package.json `publish.repo` at
+   that. Code stays private; binaries are public.
+
 ## First-launch onboarding
 
 A four-step wizard walks new users through:
