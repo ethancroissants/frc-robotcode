@@ -27,6 +27,25 @@ set -euo pipefail
 MODE="${1:-}"
 log() { logger -t cfsight-wifi-mode "$*"; printf '[cfsight-wifi-mode] %s\n' "$*"; }
 
+# Wait until NetworkManager's D-Bus interface answers, or give up
+# after ~10s. systemd `After=NetworkManager.service` only blocks until
+# the service is Active — the D-Bus listener can lag a beat behind on
+# slow Pis, and `nmcli` against a not-yet-ready NM exits with status 8
+# ("NetworkManager is not running"). We saw that bite us during boot
+# on a Pi Zero 2 W: the script raced NM and exited with set -e before
+# wlan0 was configured at all.
+wait_for_nm() {
+  local i
+  for i in $(seq 1 20); do
+    if nmcli -t general status >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  log "warning: NetworkManager never came up within 10s; nmcli calls may fail"
+  return 1
+}
+
 # Compute the AP SSID once. Suffix from MAC so two Pis on the same
 # bench show up as distinct APs ("CFSight-Setup-A1B2", "...-C3D4").
 ap_ssid() {
@@ -122,6 +141,7 @@ start_ap_on_iface() {
 case "$MODE" in
   ap)
     # Take wlan0 out of NetworkManager's hands so hostapd can drive it.
+    wait_for_nm || true
     nmcli device set wlan0 managed no 2>/dev/null || true
     rfkill unblock wifi || true
     stop_ap
@@ -135,6 +155,7 @@ case "$MODE" in
     [ -n "$SSID" ] || { log "sta mode requires SSID"; exit 1; }
 
     log "STA: joining $SSID (country=$COUNTRY)"
+    wait_for_nm || { log "NetworkManager not ready; aborting STA setup"; exit 1; }
     stop_ap
 
     # Hand wlan0 back to NetworkManager and add the connection.
@@ -146,13 +167,19 @@ case "$MODE" in
     # the SSID/PSK changed.
     nmcli connection delete cfsight-team 2>/dev/null || true
 
+    # Don't let `set -e` kill the script if `connection add` fails —
+    # autoconnect=yes means even a partial config gets retried, and
+    # we'd rather log + leave things in a recoverable state than have
+    # firstboot exit non-zero and never come back.
     if [ -z "$PSK" ]; then
       nmcli connection add type wifi con-name cfsight-team ifname wlan0 \
-        ssid "$SSID" -- wifi-sec.key-mgmt none autoconnect yes
+        ssid "$SSID" -- wifi-sec.key-mgmt none autoconnect yes \
+        || log "nmcli connection add failed (will rely on autoconnect)"
     else
       nmcli connection add type wifi con-name cfsight-team ifname wlan0 \
         ssid "$SSID" -- wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" \
-        autoconnect yes
+        autoconnect yes \
+        || log "nmcli connection add failed (will rely on autoconnect)"
     fi
     nmcli connection up cfsight-team || log "STA up failed (will retry on autoconnect)"
     ;;
@@ -171,6 +198,7 @@ case "$MODE" in
     [ -n "$SSID" ] || { log "sta+ap requires SSID"; exit 1; }
 
     log "STA+AP: $SSID over wlan0, AP over wlan0_ap"
+    wait_for_nm || { log "NetworkManager not ready; aborting STA+AP"; exit 1; }
     stop_ap
 
     # Add the virtual AP iface. `iw dev <wlan0> interface add` requires
