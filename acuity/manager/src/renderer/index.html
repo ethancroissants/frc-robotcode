@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Acuity Manager</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">ACUITY</span>
+      <span class="brand-version" id="app-version">v0.1.0</span>
+    </div>
+    <nav class="topbar-tabs">
+      <button class="tab active" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="terminal">Terminal</button>
+      <button class="tab" data-tab="libraries">Libraries</button>
+      <button class="tab" data-tab="logs">Logs</button>
+    </nav>
+    <div class="topbar-right">
+      <span id="update-pill" class="pill" hidden></span>
+      <button id="rescan" class="ghost small">Rescan</button>
+      <button id="help-btn" class="ghost small" title="Show onboarding">?</button>
+    </div>
+  </header>
+
+  <!-- Update banner — shown when a new version is available. -->
+  <div id="update-banner" class="update-banner" hidden>
+    <div class="update-banner-text">
+      <strong id="update-banner-title">Update available</strong>
+      <span id="update-banner-detail" class="muted"></span>
+    </div>
+    <div class="update-banner-actions">
+      <button id="update-download" class="primary">Download</button>
+      <button id="update-install"  class="primary" hidden>Restart &amp; install</button>
+      <button id="update-dismiss"  class="ghost small">Later</button>
+    </div>
+  </div>
+
+  <main>
+    <!-- ============== Devices tab ============== -->
+    <section class="page active" data-page="devices">
+      <div class="device-grid" id="device-grid">
+        <div class="device-empty">
+          <h2>No devices found</h2>
+          <p>
+            Make sure your laptop is on the team WiFi. Acuity devices
+            announce themselves via mDNS and should appear here within
+            a few seconds.
+          </p>
+          <p class="hint">
+            First-time setup? Connect your phone to the open
+            <code>Acuity-Setup-XXXX</code> network the device broadcasts,
+            then come back here.
+          </p>
+        </div>
+      </div>
+
+      <aside class="device-detail" id="device-detail" hidden>
+        <header>
+          <h2 id="dd-name">acuity-1279</h2>
+          <span class="pill" id="dd-status">online</span>
+        </header>
+        <dl class="kv-grid">
+          <dt>IP</dt><dd id="dd-ip">10.12.79.11</dd>
+          <dt>Version</dt><dd id="dd-version">v0.1.0</dd>
+          <dt>Uptime</dt><dd id="dd-uptime">—</dd>
+        </dl>
+        <div class="actions">
+          <button class="primary" id="dd-open-dashboard">Open dashboard</button>
+          <button class="ghost"   id="dd-update">Update firmware</button>
+          <button class="ghost"   id="dd-terminal">Open terminal</button>
+          <button class="ghost"   id="dd-reboot">Reboot</button>
+          <button class="ghost"   id="dd-diagnose">Download diagnostics</button>
+          <button class="danger"  id="dd-forget">Forget WiFi</button>
+        </div>
+        <div class="log-pane" id="dd-log" hidden></div>
+      </aside>
+    </section>
+
+    <!-- ============== Terminal tab ============== -->
+    <section class="page" data-page="terminal">
+      <div class="terminal-header">
+        <span id="term-title">No terminal open</span>
+      </div>
+      <div id="term-host"></div>
+    </section>
+
+    <!-- ============== Libraries tab ============== -->
+    <section class="page" data-page="libraries">
+      <div class="libraries-wrapper">
+        <h2>Install the Acuity vision library</h2>
+        <p class="lead">
+          Pick the language your robot code uses. Manager will detect
+          your robot project and add the dependency for you.
+        </p>
+        <div class="lang-grid">
+          <button class="lang-card" data-lang="java">
+            <span class="lang-name">Java</span>
+            <span class="lang-sub">WPILib vendordep</span>
+          </button>
+          <button class="lang-card" data-lang="python">
+            <span class="lang-name">Python</span>
+            <span class="lang-sub">robotpy package</span>
+          </button>
+          <button class="lang-card" data-lang="cpp">
+            <span class="lang-name">C++</span>
+            <span class="lang-sub">WPILib vendordep</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== Logs tab ============== -->
+    <section class="page" data-page="logs">
+      <pre class="log-pane wide" id="global-log"></pre>
+    </section>
+  </main>
+
+  <!-- ============== Onboarding wizard ==============
+       Shown on first launch, or whenever the user clicks the "?"
+       help button. Steps are switched via .onb-step.active. -->
+  <div id="onboarding" class="onb-overlay" hidden>
+    <div class="onb-card">
+      <header class="onb-header">
+        <span class="brand-name">ACUITY</span>
+        <span class="onb-step-indicator">
+          <span class="onb-dot active" data-step="0"></span>
+          <span class="onb-dot" data-step="1"></span>
+          <span class="onb-dot" data-step="2"></span>
+          <span class="onb-dot" data-step="3"></span>
+        </span>
+        <button class="onb-skip ghost small" id="onb-skip">Skip</button>
+      </header>
+
+      <!-- Step 0: Welcome -->
+      <section class="onb-step active" data-step="0">
+        <h1>Welcome to Acuity Manager</h1>
+        <p class="lead">
+          This is the laptop side of the Acuity vision coprocessor.
+          From here you'll set up new devices, install vision
+          libraries into your robot project, and update firmware in
+          one click.
+        </p>
+        <p class="lead">
+          We'll walk you through it once. You can re-open this guide
+          anytime from the <strong>?</strong> button in the top right.
+        </p>
+        <div class="onb-actions">
+          <button class="primary" data-onb-next>Get started</button>
+        </div>
+      </section>
+
+      <!-- Step 1: Pick a path -->
+      <section class="onb-step" data-step="1">
+        <h1>What are you doing today?</h1>
+        <div class="onb-choice-grid">
+          <button class="onb-choice" data-onb-choice="new-device">
+            <div class="onb-choice-icon">+</div>
+            <div class="onb-choice-text">
+              <strong>Set up a new Acuity device</strong>
+              <span>Plug it in for the first time and configure WiFi.</span>
+            </div>
+          </button>
+          <button class="onb-choice" data-onb-choice="existing">
+            <div class="onb-choice-icon">●</div>
+            <div class="onb-choice-text">
+              <strong>I already have one running</strong>
+              <span>Just want to manage it from here.</span>
+            </div>
+          </button>
+          <button class="onb-choice" data-onb-choice="library">
+            <div class="onb-choice-icon">{}</div>
+            <div class="onb-choice-text">
+              <strong>Install the robot library</strong>
+              <span>Add Acuity to my team's robot code.</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- Step 2a: New device flow -->
+      <section class="onb-step" data-step="2" data-onb-flow="new-device">
+        <h1>Connect to the device's setup network</h1>
+        <ol class="onb-steps">
+          <li>Power the Acuity device on. The status light pulses
+              yellow while it boots — wait about 30 seconds.</li>
+          <li>On <em>this laptop</em>, open the WiFi menu and
+              connect to the open network named
+              <code>Acuity-Setup-XXXX</code>.</li>
+          <li>A setup form should pop up automatically. If not,
+              open a browser and visit
+              <code>http://192.168.50.1/</code>.</li>
+          <li>Fill in your team number, your robot's WiFi name and
+              password, then save. The device reboots and joins the
+              team radio.</li>
+          <li>Reconnect this laptop to your team WiFi, then come
+              back here and click <em>Find my device</em>.</li>
+        </ol>
+        <p class="hint">
+          Tip: this same flow works for any Acuity device — you can
+          re-trigger it later from the dashboard's
+          <em>Forget WiFi</em> button.
+        </p>
+        <div class="onb-actions">
+          <button class="ghost" data-onb-prev>Back</button>
+          <button class="primary" data-onb-finish="rescan">Find my device</button>
+        </div>
+      </section>
+
+      <!-- Step 2b: Existing device flow -->
+      <section class="onb-step" data-step="2" data-onb-flow="existing">
+        <h1>Make sure you're on the team WiFi</h1>
+        <ol class="onb-steps">
+          <li>Connect this laptop to your team's robot WiFi.</li>
+          <li>Acuity advertises itself via mDNS — devices appear in
+              the Devices tab automatically once they're on the
+              network.</li>
+        </ol>
+        <p class="hint">
+          Not seeing it? Plug in a monitor + keyboard on the device
+          and run <code>ip addr show wlan0</code> to confirm it has
+          a team-WiFi IP. Or: Forget WiFi and run through the
+          captive-portal setup again.
+        </p>
+        <div class="onb-actions">
+          <button class="ghost" data-onb-prev>Back</button>
+          <button class="primary" data-onb-finish="rescan">Scan now</button>
+        </div>
+      </section>
+
+      <!-- Step 2c: Library install flow -->
+      <section class="onb-step" data-step="2" data-onb-flow="library">
+        <h1>Add Acuity to your robot project</h1>
+        <p class="lead">
+          Pick the language your team uses. Manager will detect your
+          robot project and add the library for you — no manual
+          vendordep editing.
+        </p>
+        <div class="onb-lang-grid">
+          <button class="onb-lang" data-onb-lang="java">
+            <strong>Java</strong>
+            <span>WPILib vendordep</span>
+          </button>
+          <button class="onb-lang" data-onb-lang="python">
+            <strong>Python</strong>
+            <span>robotpy package</span>
+          </button>
+          <button class="onb-lang" data-onb-lang="cpp">
+            <strong>C++</strong>
+            <span>WPILib vendordep</span>
+          </button>
+        </div>
+        <div class="onb-actions">
+          <button class="ghost" data-onb-prev>Back</button>
+        </div>
+      </section>
+
+      <!-- Step 3: Done -->
+      <section class="onb-step" data-step="3">
+        <h1>You're set</h1>
+        <p class="lead">
+          The Devices tab shows everything Acuity finds on your
+          network. Click a device for one-click update / reboot /
+          terminal / forget-WiFi controls.
+        </p>
+        <p class="lead">
+          The Libraries tab installs the vision client into your
+          robot project. The Logs tab tails everything Manager
+          does.
+        </p>
+        <div class="onb-actions">
+          <button class="primary" data-onb-finish>Open Manager</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[Unit]
+Description=Acuity — captive-portal setup wizard (AP mode only)
+# Started by acuity-wifi-mode.sh when we enter AP mode; stopped when we
+# leave AP mode (i.e. once the operator has saved real WiFi credentials).
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/acuity/setup-wizard
+# Bind to port 80 — captive portals expect plain HTTP on the gateway IP.
+# We need root to bind <1024; the wizard process drops to almost no
+# privileges by way of being short-lived (only runs in AP mode).
+ExecStart=/opt/acuity/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 80 --no-access-log
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=acuity-setup-wizard
+
+[Install]
+# NOT WantedBy=multi-user.target — we do not auto-start at boot. Only
+# acuity-wifi-mode.sh's AP path systemctl-starts this.

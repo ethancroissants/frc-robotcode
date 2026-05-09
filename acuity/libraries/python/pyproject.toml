@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "acuity-vision"
+version = "0.1.0"
+description = "Robot-side client for the Acuity FRC vision coprocessor."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Acuity" }]
+requires-python = ">=3.9"
+dependencies = [
+  # robotpy ships pyntcore as part of `robotpy[all]`. We declare it
+  # loose here because robotpy versions move per-season and we don't
+  # want to fight their pin policy.
+  "pyntcore",
+]
+
+[project.urls]
+Homepage    = "https://github.com/ethancroissants/frc-robotcode/tree/master/acuity"
+Source      = "https://github.com/ethancroissants/frc-robotcode/tree/master/acuity/libraries/python"
+Documentation = "https://github.com/ethancroissants/frc-robotcode/blob/master/acuity/docs/nt4-schema.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["acuity_vision"]

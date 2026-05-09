@@ -1,0 +1,78 @@
+{
+  "name": "acuity-manager",
+  "version": "0.1.0",
+  "description": "Driver-station Manager app for the Acuity vision coprocessor",
+  "main": "src/main.js",
+  "scripts": {
+    "start":        "electron .",
+    "dev":          "electron . --enable-logging",
+    "build":        "electron-builder",
+    "build:mac":    "electron-builder --mac --publish=never",
+    "build:win":    "electron-builder --win --publish=never",
+    "build:linux":  "electron-builder --linux --publish=never",
+    "release:win":  "electron-builder --win --publish=always",
+    "release:mac":  "electron-builder --mac --publish=always",
+    "release:all":  "electron-builder -mwl --publish=always"
+  },
+  "license": "MIT",
+  "author": "Acuity",
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "bonjour-service":  "^1.2.1",
+    "electron-updater": "^6.3.4",
+    "node-pty":         "^1.0.0",
+    "ssh2":             "^1.15.0",
+    "xterm":            "^5.3.0",
+    "xterm-addon-fit":  "^0.8.0"
+  },
+  "build": {
+    "appId":       "tech.acuity.manager",
+    "productName": "Acuity Manager",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../libraries/Acuity.json",
+        "to":   "libraries/Acuity.json"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner":    "ethancroissants",
+        "repo":     "frc-robotcode",
+        "releaseType": "release"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target":   ["dmg", "zip"],
+      "identity": null,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "target":     ["nsis", "portable"],
+      "verifyUpdateCodeSignature": false,
+      "signAndEditExecutable":     false
+    },
+    "nsis": {
+      "oneClick":              false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine":            false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName":          "Acuity Manager"
+    },
+    "linux": {
+      "target":   ["AppImage"],
+      "category": "Development"
+    }
+  }
+}

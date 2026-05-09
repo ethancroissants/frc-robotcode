@@ -1,0 +1,31 @@
+{
+  "fileName":      "Acuity.json",
+  "name":          "Acuity Vision",
+  "version":       "0.1.0",
+  "frcYear":       "2025",
+  "uuid":          "5a7e4d3a-2b12-4d5e-9c2f-acuity00000001",
+  "mavenUrls":     [
+    "https://maven.pkg.github.com/ethancroissants/frc-robotcode"
+  ],
+  "jsonUrl":       "https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/libraries/Acuity.json",
+  "javaDependencies": [
+    {
+      "groupId":    "tech.acuity",
+      "artifactId": "acuity-vision",
+      "version":    "0.1.0"
+    }
+  ],
+  "jniDependencies": [],
+  "cppDependencies": [
+    {
+      "groupId":              "tech.acuity",
+      "artifactId":           "acuity-vision",
+      "version":              "0.1.0",
+      "libName":              "AcuityVision",
+      "headerClassifier":     "headers",
+      "sharedLibrary":        false,
+      "skipInvalidPlatforms": true,
+      "binaryPlatforms":      ["linuxathena", "windowsx86-64", "linuxx86-64", "osxuniversal"]
+    }
+  ]
+}

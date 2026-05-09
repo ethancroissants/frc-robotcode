@@ -1,0 +1,22 @@
+# Acuity dashboard runtime deps. Installed into /opt/acuity/.venv by
+# acuity/firmware/install.sh.
+
+# Web server
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# Camera + vision
+opencv-contrib-python-headless>=4.8
+numpy>=1.24
+
+# AprilTag detector — same upstream C++ library WPILib + PhotonVision
+# use. Provides aarch64 wheels for cp310+ which is what we need on
+# Pi OS Bookworm (Python 3.13).
+pyapriltags>=3.3.0
+
+# Pure-Python NetworkTables 4 client (no robotpy dep on the Pi).
+# WPILib doesn't ship pyntcore for linux_aarch64 outside a robotpy
+# install, so we keep the small hand-rolled client we already wrote.
+websockets>=12
+msgpack>=1.0

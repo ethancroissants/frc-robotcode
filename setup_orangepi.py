@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cold Fusion Robotics — Vision Pi installer.
+"""Acuity — Vision Pi installer.
 
 Mirrors deploy.py / setup.py for the rio: provides a friendly UI (when run
 with --ui) that walks through:
@@ -29,8 +29,13 @@ from pathlib import Path
 import ui_mode
 
 REPO = Path(__file__).resolve().parent
-ORANGEPI_DIR = REPO / "orangepi"
-PI_IMAGE_DIR = REPO / "pi-image"
+# As of the Acuity rename, what used to be `orangepi/` and `pi-image/`
+# at the repo root now lives under `acuity/dashboard/` and
+# `acuity/firmware/`. Keep the old variable names — they're referenced
+# all over this script — but point them at the new locations.
+ACUITY_DIR = REPO / "acuity"
+ORANGEPI_DIR = ACUITY_DIR / "dashboard"
+PI_IMAGE_DIR = ACUITY_DIR / "firmware"
 
 
 def _user_config_dir() -> Path:
@@ -64,9 +69,9 @@ DEFAULT_HOST = "orangepi.local"
 # checkout layout (orangepi/ + pi-image/ as siblings), so it doesn't
 # clone from GitHub when called this way — uses the LATEST local code,
 # uncommitted changes and all. This is the same path everyone ends up
-# at; the actual *install destination* is /opt/cfsight, owned by user
-# `cfsight`, managed by the install script.
-PI_SOURCE_DIR = "/opt/cfsight-source"
+# at; the actual *install destination* is /opt/acuity, owned by user
+# `acuity`, managed by the install script.
+PI_SOURCE_DIR = "/opt/acuity-source"
 # Legacy: the old "install in place" location. Kept for tooling that
 # may still reference it (orangepi_pusher / wipe scripts), but the new
 # install.sh-driven flow doesn't write here.
@@ -703,7 +708,7 @@ def bridge_internet_for_setup(
     # wheels into vendor/wheels (install.sh just pip-installs from
     # PyPI directly). The trap EXIT cleanup tears down wlan0 the
     # moment install.sh exits, regardless of success/failure.
-    install_path = f"{PI_SOURCE_DIR}/pi-image/install.sh"
+    install_path = f"{PI_SOURCE_DIR}/acuity/firmware/install.sh"
     script_lines += [
         f"if [ ! -x {shlex.quote(install_path)} ]; then",
         f"  echo '[bridge] {install_path} missing — was push_files run?' >&2",
@@ -789,13 +794,17 @@ def push_files(cfg: dict) -> bool:
     target = ssh_target(cfg)
 
     # Make sure the destination + its parent exist with the right
-    # permissions before we rsync into them. /opt/cfsight-source is
+    # permissions before we rsync into them. /opt/acuity-source is
     # under /opt which is root-owned by default; we need passwordless
     # sudo (already arranged via _try_install_temp_nopasswd) to mkdir
-    # there as the install user.
+    # there as the install user. Compute the owner from the SSH user
+    # rather than `$USER` — sshd doesn't always export USER for non-
+    # interactive sessions, which silently creates a root-owned dir.
+    user_part = target.split("@", 1)[0] if "@" in target else target
     rc = _stream([
         "ssh", target,
-        f"sudo install -d -m 0755 -o $USER -g $USER {shlex.quote(PI_SOURCE_DIR)}",
+        f"sudo install -d -m 0755 -o {shlex.quote(user_part)} "
+        f"-g {shlex.quote(user_part)} {shlex.quote(PI_SOURCE_DIR)}",
     ])
     if rc != 0:
         _fail(f"Couldn't create {PI_SOURCE_DIR} on the Pi.")
@@ -816,9 +825,9 @@ def push_files(cfg: dict) -> bool:
             "--exclude=*.pyc",
             "--exclude=ctre_sim",
             "--exclude=logs",
-            "--exclude=orangepi/vendor/wheels",  # downloaded on Pi during bridge
-            "--exclude=pi-image/work",
-            "--exclude=pi-image/out",
+            "--exclude=acuity/dashboard/vendor/wheels",  # downloaded on Pi during bridge
+            "--exclude=acuity/firmware/work",
+            "--exclude=acuity/firmware/out",
             # Project source root → PI_SOURCE_DIR (with the trailing
             # slash semantics: contents of REPO go INSIDE PI_SOURCE_DIR).
             f"{REPO}/", f"{target}:{PI_SOURCE_DIR}/",
@@ -869,9 +878,9 @@ def _push_via_tar(target: str) -> bool:
     # rsync's --delete, so leaving stale junk on the Pi is harmless.
     skip_names = {".venv", "__pycache__", ".git", "ctre_sim", "logs", "work", "out"}
     skip_rels = {
-        Path("orangepi") / "vendor" / "wheels",
-        Path("pi-image") / "work",
-        Path("pi-image") / "out",
+        Path("acuity") / "dashboard" / "vendor" / "wheels",
+        Path("acuity") / "firmware" / "work",
+        Path("acuity") / "firmware" / "out",
     }
 
     def _excluded(p: Path) -> bool:
@@ -898,18 +907,59 @@ def _push_via_tar(target: str) -> bool:
             except OSError:
                 pass
     _info(f"  packaging {file_count} file(s), ~{total_bytes // (1024 * 1024)} MB")
+    if file_count < 50:
+        # Hard floor: a real Acuity checkout has hundreds of files.
+        # Fewer means we're walking the wrong directory (e.g. someone
+        # ran setup_orangepi.py from a sparse checkout, or REPO got
+        # resolved to a stub on Windows). Bail loudly — pushing 15
+        # files lands a half-installed Pi that fails install.sh in
+        # confusing ways.
+        _fail(
+            f"Only found {file_count} files under {REPO}. "
+            f"That's not a full Acuity checkout — refusing to push. "
+            f"Run setup_orangepi.py from the repo root (where pi-image/ "
+            f"and orangepi/ both live)."
+        )
+        return False
 
+    # Whoever owns the SSH session drives the install. We compute the
+    # owner from the ssh user (target = "user@host"), not from the
+    # remote $USER shell variable — sshd doesn't always export USER
+    # for non-interactive sessions, so `chown $USER` would silently
+    # produce a root-owned dir on some configurations.
+    user_part = target.split("@", 1)[0] if "@" in target else target
     remote_cmd = (
-        f"sudo install -d -m 0755 -o $USER -g $USER {shlex.quote(PI_SOURCE_DIR)} && "
-        f"cd {shlex.quote(PI_SOURCE_DIR)} && tar xf -"
+        f"sudo install -d -m 0755 -o {shlex.quote(user_part)} "
+        f"-g {shlex.quote(user_part)} {shlex.quote(PI_SOURCE_DIR)} && "
+        f"cd {shlex.quote(PI_SOURCE_DIR)} && tar xpf -"
     )
+    # Capture ssh's stderr so we can include it in the failure message.
+    # Without this, `tar stream failed: [Errno 22] Invalid argument` is
+    # the only clue, and that's just "the remote pipe died" — useless
+    # on its own. The actual reason (sudo refused, no tty, disk full,
+    # whatever) is what sshd writes to stderr before exiting.
     proc = subprocess.Popen(
         ["ssh", target, remote_cmd],
         stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     if proc.stdin is None:
         _fail("Couldn't open ssh stdin pipe.")
         return False
+
+    # Drain stderr in a background thread so the pipe doesn't fill and
+    # block ssh's writes; collect for the failure message.
+    import threading
+    stderr_chunks: list[bytes] = []
+    def _drain_stderr() -> None:
+        try:
+            assert proc.stderr is not None
+            for chunk in iter(lambda: proc.stderr.read(4096), b""):
+                stderr_chunks.append(chunk)
+        except Exception:
+            pass
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
 
     sent_bytes = 0
     last_report = time.monotonic()
@@ -946,18 +996,49 @@ def _push_via_tar(target: str) -> bool:
             sr_parts = list(skip_rel.parts)
             if rel_parts[: len(sr_parts)] == sr_parts:
                 return None
+        # Drop anything that isn't a regular file, dir, or symlink — tar
+        # chokes on Windows reparse points / sockets / device files
+        # with `[Errno 22] Invalid argument` mid-stream. Skipping them
+        # here keeps the stream clean.
+        if not (info.isfile() or info.isdir() or info.issym() or info.islnk()):
+            return None
         return info
 
+    def _last_stderr() -> str:
+        try:
+            stderr_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        return b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+
     try:
-        with tarfile.open(fileobj=_ProgressWriter(proc.stdin), mode="w|") as tar:
+        # Force PAX format explicitly + don't follow symlinks: avoids
+        # mtime/perm encoding errors from Windows files and broken
+        # symlinks the recursive walk would otherwise dereference.
+        with tarfile.open(
+            fileobj=_ProgressWriter(proc.stdin),
+            mode="w|",
+            format=tarfile.PAX_FORMAT,
+            dereference=False,
+        ) as tar:
             tar.add(str(REPO), arcname=".", filter=_filter)
     except Exception as e:
-        _fail(f"tar stream failed: {e}")
+        # `[Errno 22] Invalid argument` here usually means ssh's stdin
+        # closed under us — i.e., the remote command died. Pull the
+        # actual reason out of ssh's stderr.
         try:
             proc.stdin.close()
         except Exception:
             pass
-        proc.wait(timeout=5)
+        rc = proc.wait(timeout=5)
+        err = _last_stderr()
+        msg = f"tar stream failed: {e}"
+        if rc != 0:
+            msg += f"\n  remote ssh exit code: {rc}"
+        if err:
+            # Indent so it reads as nested context under the failure.
+            msg += "\n  remote stderr:\n    " + err.replace("\n", "\n    ")
+        _fail(msg)
         return False
 
     try:
@@ -966,7 +1047,11 @@ def _push_via_tar(target: str) -> bool:
         pass
     rc = proc.wait()
     if rc != 0:
-        _fail(f"Remote tar extraction failed (rc={rc}).")
+        err = _last_stderr()
+        msg = f"Remote tar extraction failed (rc={rc})."
+        if err:
+            msg += "\n  remote stderr:\n    " + err.replace("\n", "\n    ")
+        _fail(msg)
         return False
     _info(f"  pushed {sent_bytes // (1024 * 1024)} MB total")
     return True
@@ -997,7 +1082,7 @@ def run_remote_install(
             "re-run setup and type the Pi user's password."
         )
 
-    install_path = f"{PI_SOURCE_DIR}/pi-image/install.sh"
+    install_path = f"{PI_SOURCE_DIR}/acuity/firmware/install.sh"
     rc = _stream([
         "ssh", "-t", target,
         f"sudo bash {shlex.quote(install_path)}",
@@ -1006,32 +1091,32 @@ def run_remote_install(
         _fail("Remote install failed; check the details panel.")
         return False
 
-    # Drop a per-team cfsight.conf onto the boot partition so the
-    # hostname becomes cfsight-NNNN.local on next boot. We deliberately
+    # Drop a per-team acuity.conf onto the boot partition so the
+    # hostname becomes acuity-NNNN.local on next boot. We deliberately
     # leave SSID/PSK blank — that's the captive-portal wizard's job
     # (operators may want to use AP-mode for first WiFi setup, or
-    # they may pre-fill cfsight.conf manually before shipping the
+    # they may pre-fill acuity.conf manually before shipping the
     # card). Just the team number is enough for mDNS to work.
     team = _read_team_number() or cfg.get("team") or ""
     if team:
-        _info(f"writing /boot/firmware/cfsight.conf for team {team}")
+        _info(f"writing /boot/firmware/acuity.conf for team {team}")
         conf_body = f"# Generated by setup_orangepi.py\nTEAM={team}\n"
         # Pipe via stdin so the body never appears in argv (clean argv
         # = clean shell history + cleaner ps output).
         try:
             proc = subprocess.Popen(
                 ["ssh", target,
-                 "sudo tee /boot/firmware/cfsight.conf >/dev/null"],
+                 "sudo tee /boot/firmware/acuity.conf >/dev/null"],
                 stdin=subprocess.PIPE,
             )
             assert proc.stdin is not None
             proc.stdin.write(conf_body.encode("utf-8"))
             proc.stdin.close()
             if proc.wait(timeout=20) != 0:
-                _info("(skipped cfsight.conf — operator can edit "
-                      "/boot/firmware/cfsight.conf manually)")
+                _info("(skipped acuity.conf — operator can edit "
+                      "/boot/firmware/acuity.conf manually)")
         except Exception as e:
-            _info(f"(skipped cfsight.conf: {e})")
+            _info(f"(skipped acuity.conf: {e})")
 
     _ok("Service installed. Pi will start dashboard on port 8080.")
     return True
@@ -1327,24 +1412,24 @@ def write_team(cfg: dict) -> None:
     """Push the rio team number into the Pi's sight.env so it auto-finds NT.
 
     Under the unified flow, the dashboard service lives at
-    /opt/cfsight/sight/ (owned by user `cfsight`). Its EnvironmentFile
+    /opt/acuity/sight/ (owned by user `acuity`). Its EnvironmentFile
     is sight.env in that directory. We append/replace the TEAM= line
     and bounce the service.
 
-    The cfsight.conf on the boot partition (which run_remote_install
+    The acuity.conf on the boot partition (which run_remote_install
     already wrote) is the authoritative team source for hostname /
     NT discovery. This step is belt-and-suspenders for environments
-    where the operator manually edited cfsight.conf to a different
+    where the operator manually edited acuity.conf to a different
     team number after install.
     """
     target = ssh_target(cfg)
     team = _read_team_number() or "1279"
     env_line = f"TEAM={team}"
-    sight_env = "/opt/cfsight/sight/sight.env"
+    sight_env = "/opt/acuity/sight/sight.env"
     # sight.env may not exist yet on a brand-new install (install.sh
     # only creates it if cold-fusion-sight runs once first). `touch`
-    # is idempotent. sudo because the file is owned by user cfsight
-    # and the install user (cfsight is its own account) may not be
+    # is idempotent. sudo because the file is owned by user acuity
+    # and the install user (acuity is its own account) may not be
     # the SSH user.
     cmd = (
         f"sudo touch {sight_env} && "

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#eef0f3" />
+  <title>Acuity dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">ACUITY</span>
+      <span class="brand-sub" id="dev-name">vision coprocessor</span>
+    </div>
+    <nav class="topbar-tabs">
+      <button class="tab active" data-tab="live">Live</button>
+      <button class="tab" data-tab="settings">Settings</button>
+      <button class="tab" data-tab="network">Network</button>
+      <button class="tab" data-tab="logs">Logs</button>
+    </nav>
+    <div class="topbar-right">
+      <span class="pill" id="link-pill">link</span>
+      <span class="pill" id="fps-pill">— FPS</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============== Live tab ============== -->
+    <section class="page active" data-page="live">
+      <div class="camera-card">
+        <div class="camera-frame" id="camera-frame">
+          <img id="camera-img" src="/stream.mjpg" alt="camera feed" />
+          <svg id="overlay" class="overlay" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="camera-meta">
+          <span class="meta-item"><span class="k">res</span><span class="v" id="meta-res">—</span></span>
+          <span class="meta-item"><span class="k">fps</span><span class="v" id="meta-fps">—</span></span>
+          <span class="meta-item"><span class="k">tags</span><span class="v" id="meta-tags">0</span></span>
+          <span class="meta-item"><span class="k">cpu</span><span class="v" id="meta-cpu">—</span></span>
+          <span class="meta-item"><span class="k">temp</span><span class="v" id="meta-temp">—</span></span>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="panel">
+          <div class="panel-header"><h2>Best target</h2></div>
+          <dl class="kv-grid kv-big" id="best-grid">
+            <dt>id</dt>      <dd id="best-id" class="v-stale">—</dd>
+            <dt>distance</dt><dd id="best-dist" class="v-stale">—</dd>
+            <dt>yaw</dt>     <dd id="best-yaw" class="v-stale">—</dd>
+            <dt>pitch</dt>   <dd id="best-pitch" class="v-stale">—</dd>
+            <dt>area</dt>    <dd id="best-area" class="v-stale">—</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>All detections</h2>
+            <span class="muted" id="det-count">0</span>
+          </div>
+          <div class="det-list" id="det-list">
+            <div class="det-empty">No tags in view.</div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ============== Settings tab ============== -->
+    <section class="page" data-page="settings">
+      <div class="settings-grid">
+        <div class="panel settings-panel">
+          <div class="panel-header"><h2>Camera</h2></div>
+          <div class="panel-body">
+            <div class="field">
+              <label for="set-resolution">Resolution</label>
+              <select id="set-resolution">
+                <option value="640x480">640 × 480</option>
+                <option value="800x600">800 × 600</option>
+                <option value="1280x720" selected>1280 × 720</option>
+                <option value="1640x1232">1640 × 1232</option>
+                <option value="1920x1080">1920 × 1080</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="set-fps">Target FPS</label>
+              <input type="number" id="set-fps" min="5" max="60" />
+            </div>
+            <div class="field row">
+              <label class="check"><input type="checkbox" id="set-flip-h" /> Flip horizontal</label>
+              <label class="check"><input type="checkbox" id="set-flip-v" /> Flip vertical</label>
+            </div>
+            <div class="field">
+              <label for="set-cam-idx">Camera index</label>
+              <input type="number" id="set-cam-idx" min="0" max="9" />
+              <div class="hint">Usually 0 — bump only if you have multiple cameras attached.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel settings-panel">
+          <div class="panel-header"><h2>Detection</h2></div>
+          <div class="panel-body">
+            <div class="field">
+              <label for="set-tag-size">Tag size (m)</label>
+              <input type="number" id="set-tag-size" step="0.001" min="0.01" max="1.0" />
+              <div class="hint">2025 FRC tags are 6.5 in = 0.1651 m.</div>
+            </div>
+            <div class="field">
+              <label for="set-min-margin">Min decision margin</label>
+              <input type="number" id="set-min-margin" step="1" min="0" max="200" />
+              <div class="hint">Drop detections below this score (typical 30–50).</div>
+            </div>
+            <div class="field">
+              <label for="set-pref-tags">Preferred tag IDs</label>
+              <input type="text" id="set-pref-tags" placeholder="e.g. 7, 8, 1, 2" />
+              <div class="hint">Comma-separated. Empty = treat any tag as a candidate.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel settings-panel">
+          <div class="panel-header"><h2>NetworkTables</h2></div>
+          <div class="panel-body">
+            <div class="field">
+              <label for="set-team">Team number</label>
+              <input type="number" id="set-team" min="0" max="99999" />
+              <div class="hint">
+                Acuity will publish to <code>/acuity/*</code> on the
+                RoboRIO at <code>roborio-NNNN-frc.local</code>. Leave 0 to
+                disable upstream and run the dashboard standalone.
+              </div>
+            </div>
+            <div class="field">
+              <label for="set-nt-host">NT server host (optional)</label>
+              <input type="text" id="set-nt-host" placeholder="auto" />
+              <div class="hint">Override for non-FRC setups (e.g. <code>10.12.79.2</code>).</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-actions">
+          <button class="primary" id="settings-save">Save settings</button>
+          <span class="settings-status" id="settings-status"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== Network tab ============== -->
+    <section class="page" data-page="network">
+      <div class="settings-grid">
+        <div class="panel">
+          <div class="panel-header"><h2>Connection</h2></div>
+          <dl class="kv-grid">
+            <dt>hostname</dt><dd id="net-host">—</dd>
+            <dt>ip</dt>      <dd id="net-ip">—</dd>
+            <dt>mode</dt>    <dd id="net-mode">—</dd>
+            <dt>config</dt>  <dd id="net-conf">—</dd>
+            <dt>build</dt>   <dd id="net-build">—</dd>
+            <dt>uptime</dt>  <dd id="net-uptime">—</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><h2>Actions</h2></div>
+          <div class="panel-body actions-list">
+            <button class="ghost" id="action-reboot">Reboot device</button>
+            <button class="danger" id="action-forget">
+              Forget WiFi & reboot into setup
+            </button>
+            <p class="hint">
+              Forgetting WiFi removes <code>/boot/firmware/acuity.conf</code> and
+              reboots — the device comes back as the open
+              <code>Acuity-Setup-XXXX</code> AP for re-configuration.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== Logs tab ============== -->
+    <section class="page" data-page="logs">
+      <div class="logs-toolbar">
+        <button class="ghost small" id="logs-refresh">Refresh</button>
+        <span class="muted">tail of <code>journalctl -u acuity-dashboard</code></span>
+      </div>
+      <pre class="log-pane" id="log-pane">loading…</pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

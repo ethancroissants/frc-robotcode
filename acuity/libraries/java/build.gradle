@@ -1,0 +1,80 @@
+// Acuity vendordep — Java library build.
+//
+// Builds a single jar containing tech.acuity.* and publishes a
+// vendordep manifest (Acuity.json) that teams add to their robot
+// project via the WPILib VS Code extension.
+//
+// To build locally:
+//   ./gradlew build
+//
+// Outputs land under build/libs/ (the jar) and build/Acuity.json
+// (the manifest, copied from acuity/libraries/Acuity.json).
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group   = 'tech.acuity'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+    // WPILib's Maven repo for ntcore. Version pinned to match the
+    // current FRC season — bump per-season.
+    maven { url 'https://frcmaven.wpi.edu/artifactory/release/' }
+}
+
+ext {
+    // Bump this every January when WPILib cuts the new season.
+    wpilibVersion = '2025.3.2'
+}
+
+dependencies {
+    compileOnly "edu.wpi.first.ntcore:ntcore-java:${wpilibVersion}"
+    compileOnly "edu.wpi.first.wpiutil:wpiutil-java:${wpilibVersion}"
+    // Test-only — robot projects bring their own at runtime.
+    testImplementation "edu.wpi.first.ntcore:ntcore-java:${wpilibVersion}"
+    testImplementation "edu.wpi.first.wpiutil:wpiutil-java:${wpilibVersion}"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// Copy the vendordep manifest into build/ alongside the jar so
+// `gradle build` produces a release-ready folder.
+task copyVendordep(type: Copy) {
+    from "${rootDir}/Acuity.json"
+    into "${buildDir}"
+}
+build.dependsOn copyVendordep
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            artifactId = 'acuity-vision'
+        }
+    }
+    // GitHub Packages — replace once we have a real maven host.
+    repositories {
+        maven {
+            name = 'GitHubPackages'
+            url  = 'https://maven.pkg.github.com/ethancroissants/frc-robotcode'
+            credentials {
+                username = System.getenv('GITHUB_ACTOR') ?: ''
+                password = System.getenv('GITHUB_TOKEN') ?: ''
+            }
+        }
+    }
+}

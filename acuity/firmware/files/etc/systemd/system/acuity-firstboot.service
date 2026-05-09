@@ -1,0 +1,23 @@
+[Unit]
+Description=Acuity — first-boot WiFi configurator
+# MUST run after NetworkManager. The script calls `nmcli` to drive
+# STA mode and to release wlan0 (`managed=no`) before hostapd takes
+# it for AP mode. If we run earlier, nmcli fails with "NetworkManager
+# is not running" — set -e kills the script — wlan0 is left down in
+# *both* paths. Found the hard way: hostapd would briefly come up,
+# then NM would start and yank wlan0 back ("INTERFACE-DISABLED →
+# Failed to set beacon parameters"), or STA would never even try.
+After=NetworkManager.service local-fs.target
+Wants=NetworkManager.service
+Before=acuity-dashboard.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/acuity-firstboot.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=acuity-firstboot
+
+[Install]
+WantedBy=multi-user.target
