@@ -1,5 +1,10 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
+# Required by FastAPI's Form(...) parser. The setup-wizard captive-portal
+# uses Form() to parse the team/SSID/PSK submission; without this the
+# wizard import-crashes on the @app.post("/save") decorator before it
+# can even bind to port 80.
+python-multipart>=0.0.9
 # Pure-Python NT4 client deps. WPILib doesn't ship pyntcore for linux_aarch64
 # (only for linux_roborio and desktop sim), and the Pi has no internet so we
 # can't build from source. We implement enough of the NT4 protocol ourselves

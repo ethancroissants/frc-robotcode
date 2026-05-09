@@ -51,9 +51,21 @@ app = FastAPI(title="CFSight Setup")
 # ---------- Captive-portal probe handlers ----------
 #
 # Each OS hits a specific URL on first WiFi-connect to test for
-# internet. We answer them all with a redirect to /, which on iOS /
-# Android pops the captive-portal page automatically. On older OSes /
-# desktops, the user manually opens 192.168.50.1 → also lands on /.
+# internet:
+#   * iOS / macOS expects 200 OK with body literally containing
+#     "Success" — anything else (200 OK with non-Success body, or
+#     a 302) triggers the captive-portal sheet.
+#   * Android expects HTTP 204 No Content. ANY other status (200 OK,
+#     302) triggers CaptivePortalLogin.
+#   * Windows expects body "Microsoft Connect Test" on /connecttest.txt.
+#     Anything else triggers their captive UI.
+#
+# Earlier we returned 302 → "/", but iOS's captive sheet sometimes
+# silently closes on a redirect chain instead of rendering the
+# destination. Returning the form HTML *directly* with status 200 is
+# the reliable answer for all three OSes — they each detect "this
+# isn't internet" and pop their captive UI showing exactly the body
+# we returned, which is the wizard form.
 
 _PROBE_PATHS = (
     "/generate_204",          # Android
@@ -68,11 +80,17 @@ _PROBE_PATHS = (
 
 def _attach_probe_handlers() -> None:
     """Register a handler for every captive-portal probe path that
-    returns a 302 to / so the OS opens our wizard form."""
+    returns the wizard form directly with HTTP 200 + HTML, so the OS's
+    captive sheet renders the form immediately."""
+    async def probe_handler(_request: Request) -> HTMLResponse:
+        cur = _read_conf()
+        return _render_form(
+            team=str(cur.get("TEAM", "")),
+            ssid=str(cur.get("SSID", "")),
+            country=str(cur.get("COUNTRY", "US")) or "US",
+        )
     for p in _PROBE_PATHS:
-        async def handler(_request: Request, _p: str = p) -> RedirectResponse:
-            return RedirectResponse(url="/", status_code=302)
-        app.add_api_route(p, handler, methods=["GET"])
+        app.add_api_route(p, probe_handler, methods=["GET"])
 
 
 _attach_probe_handlers()
