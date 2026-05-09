@@ -71,13 +71,30 @@ After reboot, **either**:
 
 If you're prepping a card to **clone for shipping**, run
 `manufacturer-setup.sh` rather than `install.sh`. It does everything
-`install.sh` does, then adds a "ready to clone" cleanup pass:
+`install.sh` does, then adds a "ready to clone" cleanup pass.
+
+If the repo is **public**:
 
 ```sh
 sudo curl -fsSL \
    https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/pi-image/manufacturer-setup.sh \
    | sudo bash
 ```
+
+If the repo is **private** (raw.githubusercontent.com returns 404 to
+unauthenticated requests, even though the URL loads in your browser),
+clone with your token first:
+
+```sh
+GH_TOKEN=ghp_yourtoken
+git clone "https://${GH_TOKEN}@github.com/ethancroissants/frc-robotcode.git" /tmp/cfs-src
+sudo bash /tmp/cfs-src/pi-image/manufacturer-setup.sh
+```
+
+(The token only stays in `/tmp/cfs-src/.git/config` for the duration
+of this run; the master image won't ship it because we delete `/tmp`
+contents at shutdown anyway. If you want extra paranoia, `rm -rf
+/tmp/cfs-src` after the script finishes and before `dd`.)
 
 What the cleanup adds on top of `install.sh`:
 

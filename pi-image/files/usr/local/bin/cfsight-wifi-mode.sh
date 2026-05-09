@@ -41,6 +41,11 @@ stop_ap() {
   systemctl stop cfsight-setup-wizard.service 2>/dev/null || true
   pkill -x dnsmasq 2>/dev/null || true
   pkill -x hostapd 2>/dev/null || true
+  # wpa_supplicant ALSO has to die — if it stays bound to wlan0, hostapd
+  # fails ~100ms after fork with "nl80211: Could not configure driver
+  # mode" and our `hostapd -B` parent has already returned 0. That's
+  # the silent-success-but-no-AP failure mode that kept biting us.
+  pkill -f "wpa_supplicant.*wlan0" 2>/dev/null || true
   ip addr flush dev wlan0 2>/dev/null || true
   ip link delete wlan0_ap 2>/dev/null || true
 }
@@ -53,15 +58,28 @@ start_ap_on_iface() {
 
   # Render hostapd config from template.
   local cfg=/run/cfsight/hostapd.conf
+  local hostapd_log=/var/log/cfsight-hostapd.log
   mkdir -p "$(dirname "$cfg")"
   sed "s/{AP_SSID}/$AP_SSID/g" \
     /etc/cfsight/hostapd-cfsight.conf.template \
     | sed "s/^interface=.*/interface=$iface/" \
     > "$cfg"
 
-  # Static IP for AP (the gateway clients will see).
-  ip addr flush dev "$iface" 2>/dev/null || true
+  # Aggressive interface cleanup before hostapd. Anything else holding
+  # wlan0 (NetworkManager, wpa_supplicant from a previous Imager-set
+  # WiFi, leftover hostapd from a half-prior run) makes hostapd fail
+  # asynchronously, AFTER `-B` has returned 0 — which used to look like
+  # success. Now we force the iface fully idle first.
+  if [ "$iface" = "wlan0" ]; then
+    nmcli device set "$iface" managed no 2>/dev/null || true
+    pkill -f "wpa_supplicant.*$iface" 2>/dev/null || true
+    sleep 1
+  fi
+  rfkill unblock wifi 2>/dev/null || true
+  ip link set "$iface" down 2>/dev/null || true
+  sleep 0.5
   ip link set "$iface" up
+  ip addr flush dev "$iface" 2>/dev/null || true
   ip addr add 192.168.50.1/24 dev "$iface"
 
   # Render dnsmasq config (template just needs the iface substituted).
@@ -69,10 +87,31 @@ start_ap_on_iface() {
   sed "s/^interface=.*/interface=$iface/" \
     /etc/cfsight/dnsmasq-cfsight.conf.template > "$dconf"
 
-  # Launch hostapd + dnsmasq in the background. systemd-managed would be
-  # nicer but the configs are runtime-rendered so a static unit file is
-  # awkward; daemonising directly works fine for this short-lived role.
-  hostapd -B "$cfg" || { log "hostapd failed"; return 1; }
+  # Launch hostapd. -B daemonizes; the parent returns 0 even if the
+  # child dies 100ms later. We capture stderr to a log file and verify
+  # the daemon is still alive 2s after fork before claiming success.
+  log "launching hostapd (log: $hostapd_log)"
+  : > "$hostapd_log"
+  if ! hostapd -B -P /run/cfsight/hostapd.pid -f "$hostapd_log" "$cfg"; then
+    log "hostapd failed to fork. last log lines:"
+    tail -20 "$hostapd_log" >&2 || true
+    return 1
+  fi
+  sleep 2
+  if ! [ -s /run/cfsight/hostapd.pid ] \
+     || ! kill -0 "$(cat /run/cfsight/hostapd.pid)" 2>/dev/null; then
+    log "hostapd died after fork. last log lines:"
+    tail -30 "$hostapd_log" >&2 || true
+    log "(common cause: wpa_supplicant or NetworkManager still has wlan0;"
+    log " run \`pkill -f wpa_supplicant\` and try again)"
+    return 1
+  fi
+  log "hostapd PID $(cat /run/cfsight/hostapd.pid) alive after fork — good"
+
+  # dnsmasq runs in foreground by default; -C points at our config which
+  # tells it to bind only to wlan0 on 192.168.50.1. systemd-resolved on
+  # the standard listen socket is fine because of `bind-interfaces` in
+  # the template — dnsmasq won't fight it for :53.
   dnsmasq -C "$dconf" || { log "dnsmasq failed"; return 1; }
 
   # Bring up the captive portal.

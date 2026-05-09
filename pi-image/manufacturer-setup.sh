@@ -23,11 +23,19 @@
 #      don't accidentally inherit your bench history.
 #
 # Usage (from a fresh Pi OS Lite that you've already got on internet
-# WiFi via Raspberry Pi Imager's advanced settings):
+# WiFi via Raspberry Pi Imager's advanced settings).
 #
+# If the repo is *public*, one-liner works:
 #   sudo curl -fsSL \
 #     https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/pi-image/manufacturer-setup.sh \
 #     | sudo bash
+#
+# If the repo is *private* (raw.githubusercontent.com returns 404 to
+# unauthenticated requests), git-clone first using your token, then
+# run from the local checkout:
+#   GH_TOKEN=ghp_yourtoken
+#   git clone "https://${GH_TOKEN}@github.com/ethancroissants/frc-robotcode.git" /tmp/cfs-src
+#   sudo bash /tmp/cfs-src/pi-image/manufacturer-setup.sh
 #
 # When it finishes, run:   sudo shutdown -h now
 # Then `dd` the SD card to a master image and clone away.
