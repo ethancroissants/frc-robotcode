@@ -30,6 +30,7 @@ import ui_mode
 
 REPO = Path(__file__).resolve().parent
 ORANGEPI_DIR = REPO / "orangepi"
+PI_IMAGE_DIR = REPO / "pi-image"
 
 
 def _user_config_dir() -> Path:
@@ -58,6 +59,17 @@ TARGET_PATH = REPO / "pi_target.json"
 
 DEFAULT_USER = "orangepi"
 DEFAULT_HOST = "orangepi.local"
+# Where on the Pi we rsync the project source to. pi-image/install.sh
+# runs from $PI_SOURCE_DIR/pi-image/install.sh and detects the local
+# checkout layout (orangepi/ + pi-image/ as siblings), so it doesn't
+# clone from GitHub when called this way — uses the LATEST local code,
+# uncommitted changes and all. This is the same path everyone ends up
+# at; the actual *install destination* is /opt/cfsight, owned by user
+# `cfsight`, managed by the install script.
+PI_SOURCE_DIR = "/opt/cfsight-source"
+# Legacy: the old "install in place" location. Kept for tooling that
+# may still reference it (orangepi_pusher / wipe scripts), but the new
+# install.sh-driven flow doesn't write here.
 INSTALL_DIR = "/home/orangepi/cold-fusion-sight"
 
 # rio SSH details. The roboRIO ships with `admin` (no password) on port 22.
@@ -174,6 +186,26 @@ def ping(host: str) -> bool:
     return subprocess.run(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode == 0
+
+
+def _pi_has_internet(cfg: dict) -> bool:
+    """Probe whether the Pi has an upstream internet path right now.
+    Used to decide whether the install needs the WiFi bridge.
+
+    Cheap: one curl-with-timeout against a well-known mirror, run
+    *on the Pi* via SSH. Connection-only check; we don't actually
+    download anything."""
+    target = ssh_target(cfg)
+    try:
+        r = subprocess.run(
+            ["ssh", target,
+             "curl -fsSL --max-time 8 -o /dev/null https://deb.debian.org/ "
+             "|| curl -fsSL --max-time 8 -o /dev/null https://github.com/"],
+            capture_output=True, timeout=20,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def have(tool: str) -> bool:
@@ -665,83 +697,21 @@ def bridge_internet_for_setup(
         "  echo '[bridge] could not read Date header — continuing anyway' >&2",
         "fi",
     ]
-    if apt_missing:
-        script_lines += [
-            "echo '[bridge] running apt-get update'",
-            "sudo apt-get update",
-            f"echo '[bridge] installing: {' '.join(apt_missing)}'",
-            f"sudo apt-get install -y {pkgs_q}",
-        ]
-    if need_wheels:
-        # Download wheels on the Pi itself — that way pip picks the right
-        # platform/ABI tags automatically (no laptop-side --platform guesswork)
-        # and properly resolves extras like `uvicorn[standard]` → uvloop +
-        # httptools. Stamps vendor/wheels/.cache-stamp with sha256 of
-        # requirements.txt so future runs can skip the bridge if unchanged.
-        #
-        # If the Pi's system python3 is < 3.10 (Bullseye ships 3.9), we
-        # bootstrap a standalone Python 3.11 via uv before downloading.
-        # Same logic as manual_net_install.sh — robotpy-apriltag wheels
-        # only exist for cp310+, so without this the bridge would fail
-        # with "no matching distribution" on a fresh Orange Pi 5.
-        script_lines += [
-            f"if [ ! -f {shlex.quote(INSTALL_DIR)}/requirements.txt ]; then",
-            "  echo '[bridge] requirements.txt missing — was push_files run?' >&2",
-            "  exit 4",
-            "fi",
-            "# === bootstrap Python ≥ 3.10 if needed ===",
-            "BRIDGE_PY=python3",
-            "SYS_MINOR=\"$(python3 -c 'import sys;print(sys.version_info[1])' 2>/dev/null || echo 0)\"",
-            "if [ \"$SYS_MINOR\" -lt 10 ]; then",
-            "  echo \"[bridge] system python is 3.$SYS_MINOR — installing standalone Python 3.11 via uv\"",
-            "  if [ ! -x \"$HOME/.local/bin/uv\" ] && ! command -v uv >/dev/null 2>&1; then",
-            "    curl -LsSf https://astral.sh/uv/install.sh | sh",
-            "  fi",
-            "  export PATH=\"$HOME/.local/bin:$PATH\"",
-            "  UV_BIN=\"$(command -v uv || echo $HOME/.local/bin/uv)\"",
-            "  if [ ! -x \"$UV_BIN\" ]; then",
-            "    echo '[bridge] uv install failed — falling back to system python3' >&2",
-            "  else",
-            "    \"$UV_BIN\" python install 3.11",
-            "    BRIDGE_PY=\"$($UV_BIN python find 3.11 2>/dev/null || true)\"",
-            "    if [ -z \"$BRIDGE_PY\" ] || [ ! -x \"$BRIDGE_PY\" ]; then",
-            "      echo '[bridge] uv could not provide python 3.11 — falling back' >&2",
-            "      BRIDGE_PY=python3",
-            "    else",
-            "      echo \"[bridge] using bootstrap python: $BRIDGE_PY ($($BRIDGE_PY --version))\"",
-            "      mkdir -p " + shlex.quote(INSTALL_DIR),
-            "      echo \"$BRIDGE_PY\" > " + shlex.quote(INSTALL_DIR) + "/.python-bin",
-            "    fi",
-            "  fi",
-            "fi",
-            "echo '[bridge] downloading Pi wheels from PyPI…'",
-            f"mkdir -p {shlex.quote(INSTALL_DIR)}/vendor/wheels",
-            # Bullseye's stock pip is too old to resolve some modern wheel
-            # tags; refresh pip in the bootstrap interpreter before download.
-            "LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
-            "\"$BRIDGE_PY\" -m pip install --upgrade pip >/dev/null 2>&1 || true",
-            # Force a UTF-8 locale so pip's progress / log output doesn't
-            # crash with "'charmap' codec can't decode" — non-tty SSH
-            # sessions default to a minimal locale and pip writes non-ASCII
-            # progress glyphs.
-            #
-            # No `--only-binary=:all:`: when a package doesn't ship a wheel
-            # for our (python, glibc, arch) combo, pip falls back to fetching
-            # the sdist and install.sh builds from source on the Pi (we
-            # already added build-essential + cmake to apt deps for this).
-            f"LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 "
-            f"\"$BRIDGE_PY\" -m pip download "
-            f"-r {shlex.quote(INSTALL_DIR)}/requirements.txt "
-            f"-d {shlex.quote(INSTALL_DIR)}/vendor/wheels",
-            # Strip CR before hashing so this stamp matches what the
-            # Windows-side laptop computes (same normalization).
-            f"tr -d '\\r' < {shlex.quote(INSTALL_DIR)}/requirements.txt "
-            f"| sha256sum | awk '{{print $1}}' "
-            f"> {shlex.quote(INSTALL_DIR)}/vendor/wheels/.cache-stamp",
-            "echo '[bridge] wheels downloaded.'",
-        ]
+    # The bridge's actual job in the unified flow is just: keep wlan0
+    # on an internet-having WiFi while pi-image/install.sh runs. The
+    # apt + pip work happens INSIDE install.sh — we no longer pre-fetch
+    # wheels into vendor/wheels (install.sh just pip-installs from
+    # PyPI directly). The trap EXIT cleanup tears down wlan0 the
+    # moment install.sh exits, regardless of success/failure.
+    install_path = f"{PI_SOURCE_DIR}/pi-image/install.sh"
     script_lines += [
-        "echo '[bridge] done — disconnecting'",
+        f"if [ ! -x {shlex.quote(install_path)} ]; then",
+        f"  echo '[bridge] {install_path} missing — was push_files run?' >&2",
+        "  exit 4",
+        "fi",
+        "echo '[bridge] running pi-image/install.sh over the temp WiFi…'",
+        f"sudo bash {shlex.quote(install_path)}",
+        "echo '[bridge] install.sh done — disconnecting'",
     ]
     script = "\n".join(script_lines) + "\n"
 
@@ -806,20 +776,52 @@ def check_reachable(cfg: dict) -> bool:
 
 
 def push_files(cfg: dict) -> bool:
+    """Rsync the project source (orangepi/ + pi-image/) to the Pi.
+
+    pi-image/install.sh detects a "local checkout" layout — it expects
+    to find both directories as siblings under PI_SOURCE_DIR, with
+    install.sh at PI_SOURCE_DIR/pi-image/install.sh. Pushing the whole
+    project from the laptop means the Pi runs the LATEST local code
+    (uncommitted changes too) — install.sh skips its built-in
+    "git clone from GitHub" fallback because the layout's already there.
+    """
     _step("Sending files to the Pi")
     target = ssh_target(cfg)
 
+    # Make sure the destination + its parent exist with the right
+    # permissions before we rsync into them. /opt/cfsight-source is
+    # under /opt which is root-owned by default; we need passwordless
+    # sudo (already arranged via _try_install_temp_nopasswd) to mkdir
+    # there as the install user.
+    rc = _stream([
+        "ssh", target,
+        f"sudo install -d -m 0755 -o $USER -g $USER {shlex.quote(PI_SOURCE_DIR)}",
+    ])
+    if rc != 0:
+        _fail(f"Couldn't create {PI_SOURCE_DIR} on the Pi.")
+        return False
+
     rsync_avail = have("rsync") and not sys.platform.startswith("win")
     if rsync_avail:
-        # Trailing slash on the source = "copy contents into INSTALL_DIR".
+        # We push from the project root so orangepi/ and pi-image/
+        # land as siblings under PI_SOURCE_DIR/. Excludes prevent
+        # huge / pointless / privacy-sensitive trees from going over
+        # the wire (and from getting --delete'd-in to the Pi side).
         rc = _stream([
             "rsync", "-az", "--info=progress2",
             "--delete",
-            "--exclude=.venv", "--exclude=__pycache__",
-            # Wheels are downloaded on the Pi inside the bridge; never push
-            # or delete them from the laptop side.
-            "--exclude=vendor/wheels",
-            f"{ORANGEPI_DIR}/", f"{target}:{INSTALL_DIR}/",
+            "--exclude=.git",
+            "--exclude=.venv",
+            "--exclude=__pycache__",
+            "--exclude=*.pyc",
+            "--exclude=ctre_sim",
+            "--exclude=logs",
+            "--exclude=orangepi/vendor/wheels",  # downloaded on Pi during bridge
+            "--exclude=pi-image/work",
+            "--exclude=pi-image/out",
+            # Project source root → PI_SOURCE_DIR (with the trailing
+            # slash semantics: contents of REPO go INSIDE PI_SOURCE_DIR).
+            f"{REPO}/", f"{target}:{PI_SOURCE_DIR}/",
         ])
         if rc != 0:
             _fail("File transfer failed (rsync).")
@@ -838,7 +840,7 @@ def push_files(cfg: dict) -> bool:
     # .gitattributes / line-ending settings on every contributor's laptop.
     _info("Normalizing line endings on shell scripts…")
     fix_cmd = (
-        f"find {shlex.quote(INSTALL_DIR)} -type f "
+        f"find {shlex.quote(PI_SOURCE_DIR)} -type f "
         f"\\( -name '*.sh' -o -name 'install.sh' \\) "
         f"-exec sed -i 's/\\r$//' {{}} +"
     )
@@ -849,32 +851,34 @@ def push_files(cfg: dict) -> bool:
 
 
 def _push_via_tar(target: str) -> bool:
-    """Stream orangepi/ to the Pi as one tar archive over a single SSH session.
+    """Stream the project root to the Pi as one tar archive over a single
+    SSH session.
 
-    Faster than `scp -r` for the wheel cache because it's one TCP stream and
-    one SSH auth; scp does per-file negotiation and falls off a cliff on slow
-    links. We feed Python's tarfile output through `ssh ... tar xf -` so the
+    Faster than `scp -r` because it's one TCP stream and one SSH auth;
+    scp does per-file negotiation and falls off a cliff on slow links.
+    We feed Python's tarfile output through `ssh ... tar xf -` so the
     Pi extracts as we transfer (no temp file on either end).
 
-    Excludes .venv/ and __pycache__/ matches the rsync filter above. Wheels
-    are already zip-compressed, so we don't bother gzipping the tar.
+    Pushes both orangepi/ and pi-image/ as siblings under PI_SOURCE_DIR
+    so pi-image/install.sh sees the local-checkout layout it expects.
     """
-    import io
     import tarfile
     import time
 
-    # Match the rsync exclusions: skip .venv, __pycache__ (build artifacts),
-    # and vendor/wheels (downloaded on the Pi during the bridge — never
-    # pushed from the laptop). Tar doesn't have rsync's --delete, so leaving
-    # an old dir on the Pi is harmless.
-    skip_names = {".venv", "__pycache__"}
-    skip_rels = {Path("vendor") / "wheels"}
+    # Skip transient / build / privacy-sensitive trees. Tar doesn't have
+    # rsync's --delete, so leaving stale junk on the Pi is harmless.
+    skip_names = {".venv", "__pycache__", ".git", "ctre_sim", "logs", "work", "out"}
+    skip_rels = {
+        Path("orangepi") / "vendor" / "wheels",
+        Path("pi-image") / "work",
+        Path("pi-image") / "out",
+    }
 
     def _excluded(p: Path) -> bool:
         if any(part in skip_names for part in p.parts):
             return True
         try:
-            rel = p.relative_to(ORANGEPI_DIR)
+            rel = p.relative_to(REPO)
         except ValueError:
             return False
         return any(rel == r or r in rel.parents for r in skip_rels)
@@ -884,7 +888,7 @@ def _push_via_tar(target: str) -> bool:
     # the byte total is what matters.
     total_bytes = 0
     file_count = 0
-    for p in ORANGEPI_DIR.rglob("*"):
+    for p in REPO.rglob("*"):
         if _excluded(p):
             continue
         if p.is_file():
@@ -896,8 +900,8 @@ def _push_via_tar(target: str) -> bool:
     _info(f"  packaging {file_count} file(s), ~{total_bytes // (1024 * 1024)} MB")
 
     remote_cmd = (
-        f"mkdir -p {shlex.quote(INSTALL_DIR)} && "
-        f"cd {shlex.quote(INSTALL_DIR)} && tar xf -"
+        f"sudo install -d -m 0755 -o $USER -g $USER {shlex.quote(PI_SOURCE_DIR)} && "
+        f"cd {shlex.quote(PI_SOURCE_DIR)} && tar xf -"
     )
     proc = subprocess.Popen(
         ["ssh", target, remote_cmd],
@@ -946,7 +950,7 @@ def _push_via_tar(target: str) -> bool:
 
     try:
         with tarfile.open(fileobj=_ProgressWriter(proc.stdin), mode="w|") as tar:
-            tar.add(str(ORANGEPI_DIR), arcname=".", filter=_filter)
+            tar.add(str(REPO), arcname=".", filter=_filter)
     except Exception as e:
         _fail(f"tar stream failed: {e}")
         try:
@@ -971,43 +975,65 @@ def _push_via_tar(target: str) -> bool:
 def run_remote_install(
     cfg: dict, password: str | None = None, pi_env: dict | None = None,
 ) -> bool:
-    _step("Installing on the Pi (apt + venv + systemd + static IP)")
-    target = ssh_target(cfg)
-    team = _read_team_number() or "1279"
+    """Run pi-image/install.sh on the Pi from the source tree we just
+    rsynced. install.sh detects the local-checkout layout (orangepi/ +
+    pi-image/ as siblings under PI_SOURCE_DIR) and uses those files —
+    no GitHub clone needed, latest local code (uncommitted included).
 
-    # install.sh runs `sudo apt-get`, `sudo systemctl`, etc. — and most Pi
-    # default users (pi/orangepi) require a password for sudo. The SSH
-    # subprocess has piped stdin (no tty), so sudo can't prompt; we need to
-    # arrange passwordless sudo for the duration of the setup. The matching
-    # _remove_temp_nopasswd() call runs once *all* setup steps that need
-    # sudo are done (write_team, setup_cross_ssh).
+    install.sh handles apt + venv + systemd + AP-mode infra in one
+    idempotent pass. It expects internet, so this should run *after*
+    bridge_internet_for_setup() if the Pi's currently on a no-internet
+    network."""
+    _step("Installing on the Pi (apt + venv + systemd + AP captive portal)")
+    target = ssh_target(cfg)
+
+    # install.sh needs root for apt / systemd / network config.
+    # _try_install_temp_nopasswd grants the install user passwordless
+    # sudo for the rest of the session; _remove_temp_nopasswd revokes
+    # it once we're done with all sudo-using steps.
     if not _try_install_temp_nopasswd(cfg, password) and password is None:
         _info(
             "Tip: if install.sh fails on 'sudo: a password is required', "
             "re-run setup and type the Pi user's password."
         )
 
-    # Tell install.sh which apt deps are missing (vs. already installed) so
-    # it can skip the apt step when everything's already present — the Pi
-    # is offline and apt would fail otherwise.
-    apt_missing = " ".join(pi_env["apt_missing"]) if pi_env else ""
-
-    # install.sh reads these env vars:
-    #   TEAM         — sets static IP (10.TE.AM.11)
-    #   APT_MISSING  — space-separated apt packages to install (empty = skip)
-    #   USE_LOCAL_WHEELS=1 — install pip deps from vendor/wheels offline
-    install_cmd = (
-        f"cd {shlex.quote(INSTALL_DIR)} && "
-        f"TEAM={shlex.quote(team)} "
-        f"APT_MISSING={shlex.quote(apt_missing)} "
-        f"USE_LOCAL_WHEELS=1 "
-        f"bash install.sh"
-    )
-    rc = _stream(["ssh", "-t", target, install_cmd])
+    install_path = f"{PI_SOURCE_DIR}/pi-image/install.sh"
+    rc = _stream([
+        "ssh", "-t", target,
+        f"sudo bash {shlex.quote(install_path)}",
+    ])
     if rc != 0:
         _fail("Remote install failed; check the details panel.")
         return False
-    _ok("Service installed and started.")
+
+    # Drop a per-team cfsight.conf onto the boot partition so the
+    # hostname becomes cfsight-NNNN.local on next boot. We deliberately
+    # leave SSID/PSK blank — that's the captive-portal wizard's job
+    # (operators may want to use AP-mode for first WiFi setup, or
+    # they may pre-fill cfsight.conf manually before shipping the
+    # card). Just the team number is enough for mDNS to work.
+    team = _read_team_number() or cfg.get("team") or ""
+    if team:
+        _info(f"writing /boot/firmware/cfsight.conf for team {team}")
+        conf_body = f"# Generated by setup_orangepi.py\nTEAM={team}\n"
+        # Pipe via stdin so the body never appears in argv (clean argv
+        # = clean shell history + cleaner ps output).
+        try:
+            proc = subprocess.Popen(
+                ["ssh", target,
+                 "sudo tee /boot/firmware/cfsight.conf >/dev/null"],
+                stdin=subprocess.PIPE,
+            )
+            assert proc.stdin is not None
+            proc.stdin.write(conf_body.encode("utf-8"))
+            proc.stdin.close()
+            if proc.wait(timeout=20) != 0:
+                _info("(skipped cfsight.conf — operator can edit "
+                      "/boot/firmware/cfsight.conf manually)")
+        except Exception as e:
+            _info(f"(skipped cfsight.conf: {e})")
+
+    _ok("Service installed. Pi will start dashboard on port 8080.")
     return True
 
 
@@ -1298,18 +1324,33 @@ def _push_authorized_key(dest_target: str, pubkey: str, label: str) -> None:
 
 
 def write_team(cfg: dict) -> None:
-    """Push the rio team number into the Pi's sight.env so it auto-finds NT."""
+    """Push the rio team number into the Pi's sight.env so it auto-finds NT.
+
+    Under the unified flow, the dashboard service lives at
+    /opt/cfsight/sight/ (owned by user `cfsight`). Its EnvironmentFile
+    is sight.env in that directory. We append/replace the TEAM= line
+    and bounce the service.
+
+    The cfsight.conf on the boot partition (which run_remote_install
+    already wrote) is the authoritative team source for hostname /
+    NT discovery. This step is belt-and-suspenders for environments
+    where the operator manually edited cfsight.conf to a different
+    team number after install.
+    """
     target = ssh_target(cfg)
     team = _read_team_number() or "1279"
     env_line = f"TEAM={team}"
-    # sight.env is created by install.sh as the login user (`cat > ... <<EOF`),
-    # so it's user-owned — no sudo needed for sed/tee. The `systemctl restart`
-    # is the one privileged op, and install.sh installs a NOPASSWD sudoers
-    # rule scoped to exactly that command, so it works without a password.
+    sight_env = "/opt/cfsight/sight/sight.env"
+    # sight.env may not exist yet on a brand-new install (install.sh
+    # only creates it if cold-fusion-sight runs once first). `touch`
+    # is idempotent. sudo because the file is owned by user cfsight
+    # and the install user (cfsight is its own account) may not be
+    # the SSH user.
     cmd = (
-        f"sed -i.bak '/^TEAM=/d' {INSTALL_DIR}/sight.env && "
-        f"echo {shlex.quote(env_line)} >> {INSTALL_DIR}/sight.env && "
-        f"sudo systemctl restart cold-fusion-sight"
+        f"sudo touch {sight_env} && "
+        f"sudo sed -i.bak '/^TEAM=/d' {sight_env} && "
+        f"echo {shlex.quote(env_line)} | sudo tee -a {sight_env} >/dev/null && "
+        f"sudo systemctl restart cold-fusion-sight || true"
     )
     _stream(["ssh", "-t", target, cmd])
 
@@ -1365,54 +1406,35 @@ def _logic() -> int:
     if not push_files(cfg):
         return 1
 
-    # Decide whether the bridge needs to run. It does if:
-    #   - any apt dep is missing, OR
-    #   - the Pi's vendor/wheels/.cache-stamp doesn't match our local
-    #     requirements.txt (first install, or requirements.txt changed).
-    # Both checks happen post-push so the Pi has the latest requirements.txt.
-    apt_missing = pi_env.get("apt_missing") or []
-    wheels_ok = pi_wheel_cache_status(cfg)
-    need_bridge = bool(apt_missing) or not wheels_ok
-
-    if need_bridge:
-        # Temp NOPASSWD is needed because the bridge runs sudo for nmcli +
-        # apt-get; the same window also covers the install step below.
+    # Internet bridge: only needed if the Pi can't reach PyPI / apt
+    # mirrors right now. install.sh runs apt + pip itself; we just need
+    # the Pi to have upstream while it does so.
+    #
+    # In bridge mode the bridge script ALSO invokes install.sh inline
+    # (so the temp WiFi is up the whole time install.sh runs). We
+    # skip run_remote_install on that path to avoid running install.sh
+    # twice.
+    bridged = False
+    if not _pi_has_internet(cfg):
+        _info("Pi has no upstream internet — running the WiFi bridge")
         if not _try_install_temp_nopasswd(cfg, password):
             _fail("Couldn't grant temporary sudo — re-run setup and enter password.")
             return 1
-        if not bridge_internet_for_setup(cfg, apt_missing, need_wheels=not wheels_ok):
+        if not bridge_internet_for_setup(cfg, apt_missing=[], need_wheels=False):
             _remove_temp_nopasswd(cfg)
             return 1
-        pi_env["apt_missing"] = []
+        bridged = True
     else:
-        _step("Pi dependencies already satisfied — skipping internet bridge")
-        _ok("apt + wheel cache are up to date.")
+        _info("Pi has internet — skipping bridge")
 
-    # Pass the password through to the install step so we can grant
-    # temporary passwordless sudo for apt/systemctl. Drop it from memory
-    # immediately afterwards — _remove_temp_nopasswd uses key auth, not
-    # the password.
-    install_ok = run_remote_install(cfg, password=password, pi_env=pi_env)
-    password = None  # noqa: F841
-    if not install_ok:
-        # Best effort: still try to clean up the NOPASSWD rule even if
-        # install.sh itself failed midway.
-        _remove_temp_nopasswd(cfg)
-        return 1
-
-    # install.sh pins the Pi's eth0 to 10.TE.AM.11. If we connected via a
-    # different IP (DHCP, mDNS), the deferred IP bounce will switch the
-    # Pi onto the pinned address ~8s after install.sh exits. Update the
-    # cfg + give the Pi a moment so the next SSH calls reach it at the
-    # new address.
-    pinned_ip = _team_pinned_ip()
-    if pinned_ip and cfg.get("host") != pinned_ip:
-        _info(f"Pi will switch to pinned IP {pinned_ip} in ~8s — waiting…")
-        import time
-        time.sleep(12)
-        cfg = dict(cfg)
-        cfg["host"] = pinned_ip
-        save_cfg(cfg)
+    # If the bridge ran install.sh inline already, don't run it again.
+    # (Saves ~5 min of duplicated apt/pip work.)
+    if not bridged:
+        install_ok = run_remote_install(cfg, password=password, pi_env=pi_env)
+        password = None  # noqa: F841
+        if not install_ok:
+            _remove_temp_nopasswd(cfg)
+            return 1
 
     write_team(cfg)
     write_target_file(cfg)
