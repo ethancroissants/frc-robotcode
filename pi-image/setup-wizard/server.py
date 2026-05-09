@@ -215,11 +215,16 @@ def _render_form(message: str = "", team: str = "", ssid: str = "", country: str
     if message:
         cls = "ok" if ok else "err"
         msg_html = f'<div class="err {cls}">{_esc(message)}</div>'
-    body = INDEX_HTML.format(
-        message_html=msg_html,
-        team=_esc(team),
-        ssid=_esc(ssid),
-        country=_esc(country),
+    # Use .replace() instead of .format() because INDEX_HTML contains a
+    # full CSS <style> block with literal `{` / `}`. str.format() tries
+    # to parse those CSS braces as format placeholders and dies with
+    # `KeyError: '\\n  --bg'` on the very first :root rule.
+    body = (
+        INDEX_HTML
+        .replace("{message_html}", msg_html)
+        .replace("{team}", _esc(team))
+        .replace("{ssid}", _esc(ssid))
+        .replace("{country}", _esc(country))
     )
     return HTMLResponse(body)
 
@@ -338,9 +343,11 @@ async def save(
     log.info("config saved: team=%s ssid=%s — rebooting", team, ssid)
     _schedule_reboot()
 
-    return HTMLResponse(_RESULT_HTML.format(
-        team=_esc(team), ssid=_esc(ssid),
-    ))
+    return HTMLResponse(
+        _RESULT_HTML
+        .replace("{team}", _esc(team))
+        .replace("{ssid}", _esc(ssid))
+    )
 
 
 _RESULT_HTML = """<!doctype html>
