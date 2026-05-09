@@ -148,8 +148,8 @@ let termId = null;
 
 async function openTerminal(device) {
   if (!device) return;
-  const { Terminal }  = await import('xterm');
-  const { FitAddon }  = await import('xterm-addon-fit');
+  const { Terminal }  = await import('@xterm/xterm');
+  const { FitAddon }  = await import('@xterm/addon-fit');
 
   if (term) { term.dispose(); term = null; }
   term = new Terminal({

@@ -56,6 +56,18 @@ jobs:
           node-version: '20'
           # Intentionally NO `cache: 'npm'` — see header note.
 
+      # node-gyp (which node-pty's native build invokes) ships an older
+      # `gyp` that imports `distutils.version.StrictVersion`. Python 3.12
+      # deprecated distutils, Python 3.13 removed it. windows-latest now
+      # defaults to Python 3.13 → `ModuleNotFoundError: No module named
+      # 'distutils'` mid-build. Pin Python 3.11 — last version that
+      # ships distutils in stdlib — and put it on PATH for node-gyp to
+      # discover.
+      - name: Set up Python 3.11 (for node-gyp / node-pty native build)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # Cache npm's tarball cache directory keyed by package.json.
       # No-op on first run, big speedup on subsequent runs. Works
       # whether or not a package-lock.json exists.
