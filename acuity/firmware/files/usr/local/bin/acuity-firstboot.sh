@@ -48,6 +48,7 @@ log "config: team=${TEAM:-(unset)} ssid=${SSID:-(unset)} country=$COUNTRY"
 # 2. Set hostname based on team number. This makes mDNS resolve to
 #    `acuity-1279.local` automatically (avahi-daemon picks up the
 #    current hostname every time it advertises).
+HOSTNAME_CHANGED=0
 if [ -n "$TEAM" ]; then
   WANT_HOSTNAME="acuity-${TEAM}"
   CUR_HOSTNAME="$(hostnamectl --static 2>/dev/null || cat /etc/hostname)"
@@ -57,7 +58,26 @@ if [ -n "$TEAM" ]; then
     # Update /etc/hosts so `sudo` doesn't complain about an unresolvable
     # hostname for ~30 s after the change.
     sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$WANT_HOSTNAME/" /etc/hosts
+    HOSTNAME_CHANGED=1
   fi
+fi
+
+# Bounce avahi if we just renamed. avahi is socket-activated in Pi OS
+# Bookworm, so it almost always starts BEFORE we run — with the OLD
+# hostname (`acuity`, or whatever Imager set). The first thing it
+# does is register `<old-name>._acuity._tcp.local` on the LAN. By
+# the time we change the hostname here, that announcement is
+# already cached on every mDNS client (Manager especially) and
+# they'll keep showing the device under the old name AND the new
+# one — phantom duplicate. A restart blows the registrations away
+# and re-announces under the correct name only. Also fixes a
+# separate bug where avahi got into a wedged state on the first
+# boot and didn't re-announce at all.
+if [ "$HOSTNAME_CHANGED" = "1" ]; then
+  log "restarting avahi-daemon so the hostname rename actually propagates"
+  systemctl restart avahi-daemon.service 2>/dev/null \
+    || systemctl restart avahi-daemon.socket 2>/dev/null \
+    || log "  (avahi restart failed — Manager may show duplicate entries)"
 fi
 
 # 3. Decide WiFi mode.
