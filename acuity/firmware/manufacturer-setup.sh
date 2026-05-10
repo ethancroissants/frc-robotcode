@@ -121,6 +121,63 @@ if [ "${#WIFI_CONNS[@]}" -gt 0 ]; then
   esac
 fi
 
+# === 2.5. Verify (or create) the acuity-root admin user ===
+#
+# install.sh provisions acuity-root with NOPASSWD sudo + a known
+# default password — it's what Manager auto-tries first so customers
+# don't have to type SSH creds. We re-validate here as the LAST
+# script before cloning so a half-baked install or a partial reimage
+# can't ship a master where this user is missing or has a different
+# password.
+#
+# Idempotent: if the user already exists, the only thing this block
+# changes is the password (so the documented default holds even if
+# someone changed it during bench testing) and the sudoers drop-in
+# (re-installed verbatim). Safe to run when the operator is logged in
+# AS acuity-root — useradd -e on an existing user is a no-op, and
+# chpasswd against the same user that's currently SSHed in just
+# rewrites /etc/shadow without disturbing the live session.
+log "ensuring acuity-root admin user is provisioned"
+if ! id acuity-root >/dev/null 2>&1; then
+  log "  acuity-root missing — creating it"
+  useradd --create-home --home-dir /home/acuity-root \
+          --shell /bin/bash --groups sudo \
+          --comment "Acuity admin (NOPASSWD sudo)" \
+          acuity-root
+else
+  # Make sure the user has the right groups + shell even if some
+  # previous tooling created it differently.
+  usermod --shell /bin/bash --groups sudo --append acuity-root
+fi
+echo 'acuity-root:acuity-root' | chpasswd
+log "  password set to default 'acuity-root'"
+
+# (Re)install the NOPASSWD sudoers drop-in. Without this, every
+# Manager-driven sudo call on a customer card would hang waiting
+# for a TTY password prompt that ssh2 can never satisfy.
+cat > /tmp/acuity-root.sudoers <<'EOF'
+acuity-root ALL=(ALL) NOPASSWD: ALL
+EOF
+if visudo -c -q -f /tmp/acuity-root.sudoers; then
+  install -m 0440 -o root -g root /tmp/acuity-root.sudoers \
+          /etc/sudoers.d/acuity-root
+  log "  /etc/sudoers.d/acuity-root verified"
+else
+  warn "sudoers drop-in failed visudo lint — leaving any existing one in place"
+fi
+rm -f /tmp/acuity-root.sudoers
+
+# Make sure sshd accepts password auth (some Pi OS variants flip
+# this to no by default).
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/acuity.conf <<'EOF'
+PasswordAuthentication yes
+PermitRootLogin no
+EOF
+systemctl reload ssh.service 2>/dev/null \
+  || systemctl reload sshd.service 2>/dev/null \
+  || true
+
 # === 3. machine-id reset ===
 # avahi uses /etc/machine-id (via libavahi-common) when generating
 # its mDNS Unique Identifier. Cloning SD cards with a populated
@@ -137,9 +194,13 @@ if [ ! -L /var/lib/dbus/machine-id ]; then
 fi
 
 # === 4. Shell history ===
-# Don't ship your bench commands in cloned customer cards.
+# Don't ship your bench commands in cloned customer cards. The
+# acuity-root user gets its history wiped here too — operators
+# routinely SSH in as acuity-root during bench testing, and
+# leaving that history shipped to customers is exactly the kind
+# of "oops I left my IPs in there" that loses trust.
 log "clearing shell history"
-for u in root acuity "$INSTALL_USER"; do
+for u in root acuity acuity-root "$INSTALL_USER"; do
   home="$(getent passwd "$u" 2>/dev/null | cut -d: -f6)"
   if [ -n "$home" ] && [ -d "$home" ]; then
     rm -f "$home/.bash_history" "$home/.zsh_history" "$home/.python_history"
@@ -165,13 +226,13 @@ log "clearing SSH host keys (clones regenerate at sshd start via the install.sh 
 rm -f /etc/ssh/ssh_host_*
 
 if [ -t 0 ] || [ -e /dev/tty ]; then
-  read -r -p "Clear authorized_keys for acuity + $INSTALL_USER too? [y/N] " A2 </dev/tty || A2="n"
+  read -r -p "Clear authorized_keys for acuity + acuity-root + $INSTALL_USER too? [y/N] " A2 </dev/tty || A2="n"
 else
   A2="n"
 fi
 case "$A2" in
   y|Y|yes|YES|Yes)
-    for u in acuity "$INSTALL_USER"; do
+    for u in acuity acuity-root "$INSTALL_USER"; do
       home="$(getent passwd "$u" 2>/dev/null | cut -d: -f6)"
       [ -n "$home" ] && rm -f "$home/.ssh/authorized_keys"
     done

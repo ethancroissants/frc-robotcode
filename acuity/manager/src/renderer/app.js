@@ -236,13 +236,29 @@ $('#ssh-creds-btn').addEventListener('click', () => promptSshCreds({}));
 // creds would be wasted UI. Stored in localStorage rather than
 // keychain because the user explicitly traded security for UX (the
 // device sits on a closed FRC robot radio anyway).
+//
+// The default `acuity-root` / `acuity-root` is what install.sh
+// provisions on every Acuity-imaged Pi:
+//   * acuity-root user, member of `sudo`, full NOPASSWD sudoers
+//   * password literally `acuity-root`
+//   * sshd_config.d/ snippet allowing password auth
+// → Manager's default works out of the box; users only need to
+// touch the credentials button if they're SSHing into a non-Acuity
+// account for debugging.
 const SSH_USER_KEY = 'acuity.ssh.user';
 const SSH_PASS_KEY = 'acuity.ssh.pass';
+const SSH_DEFAULT_USER = 'acuity-root';
+const SSH_DEFAULT_PASS = 'acuity-root';
 
 function getSshCreds() {
+  // Reads from localStorage if populated. Falls through to the
+  // shipped defaults so a fresh Manager install just works against
+  // a freshly-imaged Pi without prompting first.
+  const u = localStorage.getItem(SSH_USER_KEY);
+  const p = localStorage.getItem(SSH_PASS_KEY);
   return {
-    user: localStorage.getItem(SSH_USER_KEY) || 'acuity',
-    pass: localStorage.getItem(SSH_PASS_KEY) || '',
+    user: (u != null && u !== '') ? u : SSH_DEFAULT_USER,
+    pass: (p != null) ? p : SSH_DEFAULT_PASS,
   };
 }
 function setSshCreds(user, pass) {
@@ -293,17 +309,14 @@ async function withSshAuth(invoke) {
 function promptSshCreds({ reason, err } = {}) {
   return new Promise((resolve) => {
     const cur = getSshCreds();
-    const isFirstRun = reason === 'auth-failed' && !localStorage.getItem(SSH_PASS_KEY);
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     const headline = reason === 'auth-failed'
-      ? (isFirstRun ? 'Set SSH credentials' : 'SSH login failed')
+      ? 'SSH login failed'
       : 'SSH credentials';
     const body = reason === 'auth-failed'
-      ? (isFirstRun
-         ? 'Manager runs SSH ops (update firmware, reboot, terminal) against the Pi. Set the credentials once and they get reused for every device.'
-         : 'The Pi rejected the saved password. Update it below — or use a different user just for this run if you\'re debugging.')
-      : 'Saved SSH credentials. Used by every Acuity device.';
+      ? "The Pi rejected the saved password. Try again with corrected credentials, or uncheck \"Save\" to log in as a different user just for this run."
+      : 'Saved SSH credentials. Reused for every Acuity device.';
     overlay.innerHTML = `
       <div class="modal-card">
         <header><h2>${escapeHtml(headline)}</h2></header>
@@ -323,17 +336,10 @@ function promptSshCreds({ reason, err } = {}) {
             <input id="cred-save" type="checkbox" checked />
             <span>Save as default for every device</span>
           </label>
-          <p class="hint" style="font-size:11px;color:var(--text-soft)">
-            Uncheck to use this user/password just for this attempt
-            (debugging) without overwriting the saved default.
-            <br>The Imager-set user is usually
-            <code>cfsight</code> or <code>visionpi</code> — the
-            <code>acuity</code> service account can't SSH (no shell).
-          </p>
         </div>
         <div class="modal-actions">
           <button class="ghost"   data-act="cancel">Cancel</button>
-          <button class="primary" data-act="ok">Retry with these credentials</button>
+          <button class="primary" data-act="ok">Retry</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);

@@ -200,16 +200,72 @@ systemctl mask dnsmasq.service  2>/dev/null || true
 # Unblock WiFi country code so wlan0 isn't soft-blocked.
 raspi-config nonint do_wifi_country US 2>/dev/null || true
 
-# === User account ===
-# Create the acuity unix user if missing (lives in /opt/acuity,
-# member of `video` group so it can talk to /dev/video*). Idempotent.
+# === User accounts ===
+#
+# Two unix users get created here, with very different jobs:
+#
+#   acuity        — service account that runs the dashboard daemon.
+#                   System UID, no shell (nologin), member of `video`
+#                   group so it can open /dev/video*. Cannot SSH.
+#
+#   acuity-root   — admin account the Manager app SSHes in as.
+#                   Real shell, member of `sudo`, full NOPASSWD via a
+#                   dedicated /etc/sudoers.d/ file. Default password
+#                   `acuity-root` so the Manager ships a working
+#                   default that "just works" out of the box. Same
+#                   trade-off the rest of this product makes: the
+#                   device sits on a protected FRC robot radio, the
+#                   convenience is worth the laxity. Customers who
+#                   care can change the password from Manager's
+#                   SSH-credentials button.
 if ! id "$APP_USER" >/dev/null 2>&1; then
-  log "creating user '$APP_USER'"
+  log "creating service user '$APP_USER'"
   useradd --system --create-home --home-dir "/home/$APP_USER" \
           --shell /usr/sbin/nologin --comment "Acuity" \
           "$APP_USER"
 fi
 usermod -a -G video "$APP_USER"
+
+if ! id acuity-root >/dev/null 2>&1; then
+  log "creating admin user 'acuity-root'"
+  useradd --create-home --home-dir /home/acuity-root \
+          --shell /bin/bash --groups sudo \
+          --comment "Acuity admin (NOPASSWD sudo)" \
+          acuity-root
+fi
+# (Re)set password every install so the documented default holds even
+# if someone changed it. chpasswd reads `user:pass` from stdin
+# without echoing into shell history.
+echo 'acuity-root:acuity-root' | chpasswd
+
+# NOPASSWD sudoers drop-in. The bridge / update / reboot / forget-WiFi
+# scripts run multi-step `sudo nmcli` / `sudo systemctl` flows under a
+# non-interactive ssh2 session; no tty means sudo can't prompt, so we
+# configure NOPASSWD globally for this user. visudo -c lints first so
+# a typo never lands in /etc/sudoers.d/ (which would lock every sudo
+# invocation, including this script's own).
+cat > /tmp/acuity-root.sudoers <<'EOF'
+acuity-root ALL=(ALL) NOPASSWD: ALL
+EOF
+visudo -c -q -f /tmp/acuity-root.sudoers \
+  || fail "acuity-root sudoers entry failed validation"
+install -m 0440 -o root -g root /tmp/acuity-root.sudoers \
+        /etc/sudoers.d/acuity-root
+rm -f /tmp/acuity-root.sudoers
+
+# Ensure sshd accepts password auth — Pi OS variants flip this on
+# and off. Drop-in beats editing the main config in place.
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/acuity.conf <<'EOF'
+# Acuity Manager uses password auth for the acuity-root admin user.
+# Root login stays prohibited — we only want the named admin account
+# to be reachable from off-Pi.
+PasswordAuthentication yes
+PermitRootLogin no
+EOF
+systemctl reload ssh.service 2>/dev/null \
+  || systemctl reload sshd.service 2>/dev/null \
+  || true
 
 # === Sync app code into /opt/acuity ===
 log "syncing app code to $INSTALL_DIR"
