@@ -64,16 +64,32 @@
     },
     "win": {
       "target":     ["nsis", "portable"],
+      "icon":       "build/installer-icon.ico",
       "verifyUpdateCodeSignature": false,
       "signAndEditExecutable":     false
     },
+    "portable": {
+      "artifactName":  "${productName}-${version}-portable.${ext}"
+    },
     "nsis": {
-      "oneClick":              false,
+      "oneClick":                false,
       "allowToChangeInstallationDirectory": true,
-      "perMachine":            false,
-      "createDesktopShortcut": true,
+      "perMachine":              false,
+      "createDesktopShortcut":   true,
       "createStartMenuShortcut": true,
-      "shortcutName":          "Acuity Manager"
+      "shortcutName":            "Acuity Manager",
+      "menuCategory":            "Acuity",
+      "runAfterFinish":          true,
+      "deleteAppDataOnUninstall": false,
+      "multiLanguageInstaller":  false,
+      "installerIcon":           "build/installer-icon.ico",
+      "uninstallerIcon":         "build/uninstaller-icon.ico",
+      "installerHeaderIcon":     "build/installer-header-icon.ico",
+      "installerHeader":         "build/installer-header.bmp",
+      "installerSidebar":        "build/installer-sidebar.bmp",
+      "uninstallerSidebar":      "build/uninstaller-sidebar.bmp",
+      "include":                 "build/installer.nsh",
+      "artifactName":            "${productName}-${version}-setup.${ext}"
     },
     "linux": {
       "target":   ["AppImage"],
