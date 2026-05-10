@@ -6,6 +6,58 @@
 const $  = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+// =========== UI feedback primitives ===========
+//
+// Three knobs the rest of the file uses for "this is happening" state:
+//   * `withBusy(button, fn)` — disables the button + shows a spinner
+//     while `fn` runs. Re-enables on resolve OR reject.
+//   * `withGlobalLoading(fn)` — flips on the top-of-window loading
+//     bar for the duration of `fn`. Use for long ops where the user
+//     might think the app froze.
+//   * `bumpValue(el, newText)` — sets text content + adds a brief
+//     yellow flash via CSS animation. Used on telemetry updates so
+//     changes are visible without staring at numbers.
+
+let _globalLoadingDepth = 0;
+function setGlobalLoading(on) {
+  _globalLoadingDepth = Math.max(0, _globalLoadingDepth + (on ? 1 : -1));
+  $('#global-loading').hidden = _globalLoadingDepth === 0;
+}
+async function withGlobalLoading(fn) {
+  setGlobalLoading(true);
+  try { return await fn(); } finally { setGlobalLoading(false); }
+}
+
+async function withBusy(button, fn) {
+  if (!button) return fn();
+  const original = button.innerHTML;
+  button.classList.add('busy');
+  button.disabled = true;
+  // Drop a span so the spinner ends up on top via absolute positioning.
+  const spin = document.createElement('span');
+  spin.className = 'button-spinner';
+  spin.innerHTML = '<span class="spinner small"></span>';
+  button.appendChild(spin);
+  try {
+    return await fn();
+  } finally {
+    button.classList.remove('busy');
+    button.disabled = false;
+    button.innerHTML = original;
+  }
+}
+
+function bumpValue(el, newText) {
+  if (!el) return;
+  if (el.textContent !== String(newText)) {
+    el.textContent = newText;
+    el.classList.remove('bump');
+    // Force reflow so the next add reliably triggers the keyframe.
+    void el.offsetWidth;
+    el.classList.add('bump');
+  }
+}
+
 // ============== Tab routing ==============
 
 $$('.tab').forEach((btn) => {
@@ -28,22 +80,50 @@ const globalLog = $('#global-log');
 let devices  = [];
 let selected = null;
 
+// Tracks whether discovery is actively scanning. We start "scanning"
+// on launch and after a manual Rescan; flip off the first time a
+// device announces (or after a 6 s grace period if nothing shows up).
+let _scanningSince = Date.now();
+let _scanGraceTimer = null;
+
+function startScanning() {
+  _scanningSince = Date.now();
+  if (_scanGraceTimer) clearTimeout(_scanGraceTimer);
+  _scanGraceTimer = setTimeout(() => {
+    _scanningSince = 0;
+    if (!devices.length) renderGrid();
+  }, 6000);
+  if (!devices.length) renderGrid();
+}
+
 function renderGrid() {
   if (!devices.length) {
-    grid.innerHTML = `
-      <div class="device-empty">
-        <h2>No devices found</h2>
-        <p>
-          Make sure your laptop is on the team WiFi. Acuity devices
-          announce themselves via mDNS and should appear here within
-          a few seconds.
-        </p>
-        <p class="hint">
-          First-time setup? Connect your phone to the open
-          <code>Acuity-Setup-XXXX</code> network the device
-          broadcasts, then come back here.
-        </p>
-      </div>`;
+    if (_scanningSince) {
+      grid.innerHTML = `
+        <div class="device-empty scanning">
+          <span class="spinner large"></span>
+          <h2>Scanning the network…</h2>
+          <p>
+            Looking for Acuity devices announcing themselves over
+            mDNS. This usually takes only a few seconds.
+          </p>
+        </div>`;
+    } else {
+      grid.innerHTML = `
+        <div class="device-empty">
+          <h2>No devices found</h2>
+          <p>
+            Make sure your laptop is on the team WiFi. Acuity devices
+            announce themselves via mDNS and should appear here within
+            a few seconds.
+          </p>
+          <p class="hint">
+            First-time setup? Connect your phone to the open
+            <code>Acuity-Setup-XXXX</code> network the device
+            broadcasts, then come back here.
+          </p>
+        </div>`;
+    }
     detail.hidden = true;
     return;
   }
@@ -69,47 +149,47 @@ function renderGrid() {
 function renderDetail() {
   if (!selected) { detail.hidden = true; return; }
   detail.hidden = false;
-  $('#dd-name').textContent    = selected.name;
-  $('#dd-ip').textContent      = selected.ip;
-  $('#dd-version').textContent = selected.version || 'unknown';
-  $('#dd-uptime').textContent  = '—';  // TODO: pull from /acuity/health/uptime_s
+  bumpValue($('#dd-name'),    selected.name);
+  bumpValue($('#dd-ip'),      selected.ip);
+  bumpValue($('#dd-version'), selected.version || 'unknown');
+  bumpValue($('#dd-uptime'),  '—');  // TODO: pull from /acuity/health/uptime_s
 }
 
 // Action button wiring. Each calls into preload, which dispatches IPC.
 $('#dd-open-dashboard').addEventListener('click', () => {
   if (!selected) return;
-  // Open in default browser; we could also embed a webview here.
   window.open(`http://${selected.ip}:${selected.port || 8080}/`, '_blank');
 });
-$('#dd-update').addEventListener('click', async () => {
+$('#dd-update').addEventListener('click', async (e) => {
   if (!selected) return;
   logPane.hidden = false;
   logPane.textContent = '';
-  await window.acuity.ssh.runUpdate(target(selected));
+  await withBusy(e.currentTarget, () =>
+    withGlobalLoading(() => window.acuity.ssh.runUpdate(target(selected)))
+  );
 });
 $('#dd-terminal').addEventListener('click', () => {
   if (!selected) return;
-  // Switch to terminal tab and open a session.
   $('.tab[data-tab="terminal"]').click();
   openTerminal(selected);
 });
-$('#dd-reboot').addEventListener('click', async () => {
+$('#dd-reboot').addEventListener('click', async (e) => {
   if (!selected) return;
   if (!confirm(`Reboot ${selected.name}?`)) return;
-  await window.acuity.ssh.reboot(target(selected));
+  await withBusy(e.currentTarget, () => window.acuity.ssh.reboot(target(selected)));
 });
-$('#dd-forget').addEventListener('click', async () => {
+$('#dd-forget').addEventListener('click', async (e) => {
   if (!selected) return;
   if (!confirm(
     `Forget WiFi on ${selected.name}? It will reboot into the AP-mode setup wizard.`
   )) return;
-  await window.acuity.ssh.forgetWifi(target(selected));
+  await withBusy(e.currentTarget, () => window.acuity.ssh.forgetWifi(target(selected)));
 });
-$('#dd-diagnose').addEventListener('click', async () => {
+$('#dd-diagnose').addEventListener('click', async (e) => {
   if (!selected) return;
   logPane.hidden = false;
   logPane.textContent = '';
-  await window.acuity.ssh.diagnose(target(selected));
+  await withBusy(e.currentTarget, () => window.acuity.ssh.diagnose(target(selected)));
 });
 
 function target(d) {
@@ -124,19 +204,36 @@ window.acuity.ssh.onLog((line) => {
   globalLog.scrollTop = globalLog.scrollHeight;
 });
 
-// Discovery — start on load, listen for updates.
+// Discovery — start on load, listen for updates. We track a
+// "scanning" state so the empty grid shows a spinner instead of
+// "no devices" until we've waited long enough that no devices
+// is genuinely the answer.
 window.acuity.discovery.onUpdate(({ devices: list }) => {
   devices = list || [];
+  // First device announce → end the scanning state.
+  if (devices.length && _scanningSince) {
+    _scanningSince = 0;
+    if (_scanGraceTimer) { clearTimeout(_scanGraceTimer); _scanGraceTimer = null; }
+  }
   if (selected && !devices.find((d) => d.host === selected.host)) {
     selected = null;
   }
   renderGrid();
   renderDetail();
 });
+startScanning();
 window.acuity.discovery.start();
-$('#rescan').addEventListener('click', async () => {
-  await window.acuity.discovery.stop();
-  await window.acuity.discovery.start();
+
+$('#rescan').addEventListener('click', async (e) => {
+  await withBusy(e.currentTarget, async () => {
+    await window.acuity.discovery.stop();
+    devices = [];
+    startScanning();          // shows the spinner immediately
+    await window.acuity.discovery.start();
+    // Hold the busy state for ~2s so the click feels acknowledged
+    // even when there are no devices to find.
+    await new Promise(r => setTimeout(r, 2000));
+  });
 });
 
 // ============== Terminal ==============
@@ -190,9 +287,11 @@ async function openTerminal(device) {
 // ============== Libraries ==============
 
 $$('.lang-card').forEach((card) => {
-  card.addEventListener('click', async () => {
+  card.addEventListener('click', async (e) => {
     const lang = card.dataset.lang;
-    await runLibraryInstaller(lang);
+    await withBusy(e.currentTarget, () =>
+      withGlobalLoading(() => runLibraryInstaller(lang))
+    );
   });
 });
 

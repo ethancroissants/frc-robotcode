@@ -25,13 +25,21 @@
     </div>
   </header>
 
+  <!-- Loading bar — flipped on by app.js while async ops run
+       (settings save, logs refresh, reboot, forget-WiFi). -->
+  <div id="global-loading" class="global-loading-bar" hidden></div>
+
   <main>
     <!-- ============== Live tab ============== -->
     <section class="page active" data-page="live">
       <div class="camera-card">
-        <div class="camera-frame" id="camera-frame">
+        <div class="camera-frame connecting" id="camera-frame">
           <img id="camera-img" src="/stream.mjpg" alt="camera feed" />
           <svg id="overlay" class="overlay" preserveAspectRatio="none"></svg>
+          <div class="camera-loading">
+            <span class="spinner large"></span>
+            <span>Waiting for camera</span>
+          </div>
         </div>
         <div class="camera-meta">
           <span class="meta-item"><span class="k">res</span><span class="v" id="meta-res">—</span></span>

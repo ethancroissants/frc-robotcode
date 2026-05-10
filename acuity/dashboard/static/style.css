@@ -28,6 +28,15 @@
 }
 
 * { box-sizing: border-box; }
+
+/* Make the HTML `hidden` attribute actually hide flex/grid containers.
+ * UA stylesheet sets `[hidden] { display: none }`, but any author
+ * `display: flex/grid` rule overrides it because both selectors
+ * weigh the same. Without this !important, `el.hidden = true` on a
+ * flex container (overlays, banners, the device-detail panel) does
+ * nothing visible. Found the hard way. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0; padding: 0; height: 100%;
   background: var(--bg); color: var(--text);
@@ -306,6 +315,7 @@ input:focus, select:focus {
 .tag-poly {
   fill: transparent; stroke-width: 2;
   vector-effect: non-scaling-stroke;
+  transition: stroke-width 0.12s ease-out;
 }
 .tag-poly.best  { stroke: #00dc00; stroke-width: 3; }
 .tag-poly.other { stroke: #ff8a32; stroke-width: 1.5; }
@@ -318,3 +328,139 @@ input:focus, select:focus {
 }
 .tag-label.best  { fill: #00ff00; }
 .tag-label.other { fill: #ffb380; }
+
+/* ============== Motion + loading primitives ============== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Tabs cross-fade. */
+.page              { opacity: 0; transition: opacity 0.18s ease-out; pointer-events: none; }
+.page.active       { opacity: 1; pointer-events: auto; animation: page-in 0.22s ease-out; }
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tab { transition: background 0.12s, color 0.12s, border-color 0.12s; }
+
+/* Pill pulse when link goes good. */
+@keyframes pill-pulse-good {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(22, 163, 74, 0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.18); }
+}
+.pill.good { animation: pill-pulse-good 2.4s ease-in-out infinite; }
+
+/* Spinner. */
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent-strong);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -3px;
+}
+.spinner.small { width: 10px; height: 10px; border-width: 1.5px; }
+.spinner.large { width: 22px; height: 22px; border-width: 3px; vertical-align: -5px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Camera frame: while waiting on first WS payload, show a soft
+ * pulse over the empty area so the user knows something's loading
+ * (instead of "is the camera even attached?"). */
+.camera-frame.connecting::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg,
+    rgba(255,255,255,0.04) 0%,
+    rgba(255,255,255,0.10) 50%,
+    rgba(255,255,255,0.04) 100%);
+  background-size: 200% 100%;
+  animation: camera-shimmer 1.6s ease-in-out infinite;
+  z-index: 1;
+}
+@keyframes camera-shimmer {
+  0%, 100% { background-position: 200% 0; }
+  50%      { background-position: -200% 0; }
+}
+.camera-frame.connecting .camera-loading {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 10px;
+  color: rgba(255, 255, 255, 0.6);
+  font: 700 11px var(--sans);
+  letter-spacing: 0.10em; text-transform: uppercase;
+  z-index: 2;
+}
+.camera-frame .camera-loading { display: none; }
+
+/* Detection rows: subtle slide-in when a new tag appears. */
+.det-row { animation: det-row-in 0.18s ease-out; }
+@keyframes det-row-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Telemetry numbers bump on update. */
+@keyframes value-bump {
+  0%   { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+.kv-grid dd.bump,
+.meta-item .v.bump {
+  animation: value-bump 0.5s ease-out;
+}
+
+/* Buttons: busy state with hidden label + centered spinner. */
+button { transition: background 0.08s, border-color 0.08s, transform 0.06s; }
+button.busy {
+  position: relative;
+  color: transparent !important;
+  pointer-events: none;
+}
+button.busy::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 14px; height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent-strong);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+button.primary.busy::after {
+  border-color: rgba(31, 21, 0, 0.3);
+  border-top-color: #1f1500;
+}
+
+/* Settings save status fades. */
+.settings-status { transition: opacity 0.25s; }
+.settings-status:empty { opacity: 0; }
+
+/* Top-of-window loading bar. */
+.global-loading-bar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent-strong) 50%,
+    transparent 100%);
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: loading-slide 1.2s linear infinite;
+  z-index: 9999;
+  pointer-events: none;
+}
+@keyframes loading-slide {
+  0%   { background-position: -50% 0; }
+  100% { background-position:  150% 0; }
+}

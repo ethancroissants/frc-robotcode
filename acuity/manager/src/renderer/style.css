@@ -27,6 +27,18 @@
 }
 
 * { box-sizing: border-box; }
+
+/* The HTML `hidden` attribute is supposed to hide elements, but its
+ * UA-stylesheet rule (`[hidden] { display: none }`) loses to any
+ * author rule that sets `display:` on the same element. We use
+ * `el.hidden = true` extensively in renderer code (onboarding,
+ * update banner, device-detail panel) and several of those elements
+ * are flex containers — without this !important override, setting
+ * `hidden` does nothing visible. Found the hard way: the onboarding
+ * Skip / Scan-now buttons fired correctly but the wizard stayed on
+ * screen. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0; padding: 0; height: 100%;
   background: var(--bg); color: var(--text);
@@ -333,6 +345,174 @@ code {
   font-family: var(--mono); font-size: 0.92em;
   background: var(--panel-2); border: 1px solid var(--border);
   padding: 1px 5px; border-radius: 3px;
+}
+
+/* =========== Motion / loading primitives =========== */
+
+/* Respect users with reduced-motion preference — animation goes from
+ * "polish" to "annoyance" fast for vestibular-disorder users. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Page tab cross-fade. Active page fades in. Hidden pages can't
+ * receive pointer events. */
+.page {
+  opacity: 0;
+  transition: opacity 0.18s ease-out;
+  pointer-events: none;
+}
+.page.active {
+  opacity: 1;
+  pointer-events: auto;
+  animation: page-in 0.22s ease-out;
+}
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Tab indicator slides between active tabs. Subtle but signals
+ * navigation direction. */
+.tab { transition: background 0.12s, color 0.12s, border-color 0.12s; }
+
+/* Pills get a small breathing animation when the link comes online. */
+@keyframes pill-pulse-good {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.18); }
+}
+.pill.good { animation: pill-pulse-good 2.4s ease-in-out infinite; }
+
+/* Spinning loader. Used inline via `<span class="spinner"></span>`. */
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent-strong);
+  border-radius: 50%;
+  animation: spinner-spin 0.7s linear infinite;
+  vertical-align: -3px;
+}
+.spinner.small { width: 10px; height: 10px; border-width: 1.5px; }
+.spinner.large { width: 22px; height: 22px; border-width: 3px; vertical-align: -5px; }
+@keyframes spinner-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Buttons can show a busy state — spinner replaces the label. */
+button.busy {
+  position: relative;
+  color: transparent !important;
+  pointer-events: none;
+}
+button.busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background-image: conic-gradient(var(--accent-strong) 0%, transparent 25%);
+  /* Replaced by .busy-icon span at runtime — see below. */
+}
+button.busy .button-spinner {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Card / device tile hover lift. */
+.device-card { transition: transform 0.12s ease-out, box-shadow 0.12s, border-color 0.12s; }
+.device-card:hover { transform: translateY(-1px); }
+
+/* Skeleton loader for the empty Devices state — replaces the
+ * "No devices found" text after we've started a scan. */
+.device-empty.scanning {
+  display: flex; flex-direction: column;
+  align-items: center; gap: 14px;
+  color: var(--text-dim);
+  padding: 80px 24px;
+}
+.device-empty.scanning .spinner { margin-bottom: 8px; }
+.device-empty.scanning h2 { color: var(--text); }
+
+/* Numerical values on the device-detail panel pulse subtly when
+ * they update — gives the operator a "yes, this is live" signal
+ * without screaming for attention. */
+@keyframes value-bump {
+  0%   { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+.kv-grid dd.bump { animation: value-bump 0.6s ease-out; }
+
+/* Update banner slide-in. */
+.update-banner {
+  animation: banner-in 0.22s ease-out;
+}
+@keyframes banner-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* Modal pop-in (replacing the abrupt overlay). */
+.modal-overlay { animation: modal-fade-in 0.14s ease-out; }
+.modal-card    { animation: modal-pop 0.22s cubic-bezier(.18,.9,.35,1.05); }
+@keyframes modal-pop {
+  from { transform: scale(.95); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* Onboarding overlay fades in; steps cross-fade between each other. */
+.onb-overlay { animation: modal-fade-in 0.18s ease-out; }
+.onb-card    { animation: onb-card-in 0.28s cubic-bezier(.18,.9,.35,1.05); }
+@keyframes onb-card-in {
+  from { transform: translateY(8px) scale(.98); opacity: 0; }
+  to   { transform: translateY(0) scale(1);   opacity: 1; }
+}
+.onb-step.active {
+  animation: onb-step-in 0.22s ease-out;
+}
+@keyframes onb-step-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.onb-dot { transition: background 0.2s, transform 0.2s; }
+.onb-dot.active { transform: scale(1.25); }
+.onb-choice    { transition: transform 0.12s, border-color 0.12s, background 0.12s; }
+.onb-choice:hover { transform: translateY(-1px); }
+
+/* Light pulse on freshly-discovered device tiles — the dot inside
+ * the card breathes for the first few seconds after announce. */
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(22, 163, 74, 0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.25); }
+}
+.device-card .status { animation: status-pulse 2.4s ease-in-out infinite; }
+
+/* =========== Top-of-window loading bar =========== */
+/* A thin bar across the top that we flip on for any pending
+ * privileged op (rescan, update download, library install). */
+.global-loading-bar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent-strong) 50%,
+    transparent 100%
+  );
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: global-loading-slide 1.2s linear infinite;
+  z-index: 9999;
+  pointer-events: none;
+}
+@keyframes global-loading-slide {
+  0%   { background-position: -50% 0; }
+  100% { background-position:  150% 0; }
 }
 
 /* =========== Update banner =========== */

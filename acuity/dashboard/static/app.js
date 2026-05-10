@@ -7,6 +7,40 @@
 const $  = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+// =========== UI feedback primitives ===========
+
+let _loadingDepth = 0;
+function setGlobalLoading(on) {
+  _loadingDepth = Math.max(0, _loadingDepth + (on ? 1 : -1));
+  const el = $('#global-loading');
+  if (el) el.hidden = _loadingDepth === 0;
+}
+async function withGlobalLoading(fn) {
+  setGlobalLoading(true);
+  try { return await fn(); } finally { setGlobalLoading(false); }
+}
+
+async function withBusy(button, fn) {
+  if (!button) return fn();
+  button.classList.add('busy');
+  button.disabled = true;
+  try { return await fn(); }
+  finally {
+    button.classList.remove('busy');
+    button.disabled = false;
+  }
+}
+
+function bumpValue(el, newText) {
+  if (!el) return;
+  const txt = String(newText);
+  if (el.textContent === txt) return;
+  el.textContent = txt;
+  el.classList.remove('bump');
+  void el.offsetWidth;
+  el.classList.add('bump');
+}
+
 // --------------------------- tab routing ---------------------------
 
 $$('.tab').forEach((btn) => {
@@ -100,7 +134,7 @@ function setBest(best) {
   };
   for (const [id, val] of Object.entries(fields)) {
     const el = document.getElementById(id);
-    el.textContent = val;
+    bumpValue(el, val);
     el.classList.toggle('v-stale', best == null);
   }
 }
@@ -139,18 +173,23 @@ function setLinkPill(connected) {
 function applySnapshot(s) {
   if (s.width && s.height) {
     frameSize = { w: s.width, h: s.height };
-    metaRes.textContent = `${s.width}×${s.height}`;
+    bumpValue(metaRes, `${s.width}×${s.height}`);
     updateOverlaySize();
   }
   if (s.fps != null) {
-    metaFps.textContent  = s.fps.toFixed(1);
-    fpsPill.textContent  = `${s.fps.toFixed(0)} fps`;
+    bumpValue(metaFps, s.fps.toFixed(1));
+    fpsPill.textContent = `${s.fps.toFixed(0)} fps`;
   }
   setLinkPill(s.connected);
   const bestId = s.best ? s.best.id : null;
   setBest(s.best);
   setDetList(s.tags_full || s.tags, bestId);
   renderOverlay(s.tags_full || s.tags, bestId);
+
+  // First time we see the snapshot, drop the camera-frame shimmer.
+  if (s.connected) {
+    cameraFrame.classList.remove('connecting');
+  }
 }
 
 // WebSocket; reconnect on drop with a short backoff.
@@ -198,14 +237,14 @@ async function refreshHealth() {
     const r = await fetch('/api/health');
     if (!r.ok) return;
     const h = await r.json();
-    metaCpu.textContent  = `${(h.cpu_pct).toFixed(0)}%`;
-    metaTemp.textContent = h.temp_c ? `${h.temp_c.toFixed(1)} °C` : '—';
-    netHost.textContent  = h.net?.hostname || '—';
-    netIp.textContent    = h.net?.ip || '—';
-    netMode.textContent  = h.net?.mode || '—';
-    netConf.textContent  = h.net?.conf_set ? 'team WiFi configured' : 'unset (AP mode)';
-    netBuild.textContent = h.build || '—';
-    netUpt.textContent   = fmtUptime(h.uptime_s);
+    bumpValue(metaCpu,  `${(h.cpu_pct).toFixed(0)}%`);
+    bumpValue(metaTemp, h.temp_c ? `${h.temp_c.toFixed(1)} °C` : '—');
+    bumpValue(netHost,  h.net?.hostname || '—');
+    bumpValue(netIp,    h.net?.ip || '—');
+    bumpValue(netMode,  h.net?.mode || '—');
+    bumpValue(netConf,  h.net?.conf_set ? 'team WiFi configured' : 'unset (AP mode)');
+    bumpValue(netBuild, h.build || '—');
+    bumpValue(netUpt,   fmtUptime(h.uptime_s));
     $('#dev-name').textContent = (h.net?.hostname || 'acuity') + ' • vision coprocessor';
   } catch (e) { /* offline; leave displayed values stale */ }
 }
@@ -247,7 +286,7 @@ async function loadSettings() {
 }
 loadSettings();
 
-$('#settings-save').addEventListener('click', async () => {
+$('#settings-save').addEventListener('click', async (e) => {
   const [w, h] = setRes.value.split('x').map(Number);
   const prefIds = setPrefTags.value
     .split(',')
@@ -267,38 +306,44 @@ $('#settings-save').addEventListener('click', async () => {
     nt_team: Number(setTeam.value),
     nt_server_host: setNtHost.value,
   };
-  try {
-    const r = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) throw new Error(await r.text());
-    settingsStatus.textContent = 'Saved.';
-    settingsStatus.className = 'settings-status ok';
-    setTimeout(() => settingsStatus.textContent = '', 2200);
-  } catch (e) {
-    settingsStatus.textContent = `Save failed: ${e.message || e}`;
-    settingsStatus.className = 'settings-status err';
-  }
+  await withBusy(e.currentTarget, () => withGlobalLoading(async () => {
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      settingsStatus.textContent = 'Saved.';
+      settingsStatus.className = 'settings-status ok';
+      setTimeout(() => settingsStatus.textContent = '', 2200);
+    } catch (err) {
+      settingsStatus.textContent = `Save failed: ${err.message || err}`;
+      settingsStatus.className = 'settings-status err';
+    }
+  }));
 });
 
 // --------------------------- network tab actions ---------------------------
 
-$('#action-reboot').addEventListener('click', async () => {
+$('#action-reboot').addEventListener('click', async (e) => {
   if (!confirm('Reboot the device now?')) return;
-  await fetch('/api/reboot', { method: 'POST' });
-  alert('Reboot scheduled. The dashboard will be unreachable for ~30 s.');
+  await withBusy(e.currentTarget, () => withGlobalLoading(async () => {
+    await fetch('/api/reboot', { method: 'POST' });
+    alert('Reboot scheduled. The dashboard will be unreachable for ~30 s.');
+  }));
 });
 
-$('#action-forget').addEventListener('click', async () => {
+$('#action-forget').addEventListener('click', async (e) => {
   if (!confirm(
     'Forget WiFi and reboot?\n\n' +
     'The device will come back as the open Acuity-Setup-XXXX AP. ' +
     'You\'ll need to reconnect to it from a phone or laptop and ' +
     'walk through the setup wizard again.')) return;
-  await fetch('/api/forget-wifi', { method: 'POST' });
-  alert('Forgetting WiFi + rebooting. Look for the Acuity-Setup-XXXX network.');
+  await withBusy(e.currentTarget, () => withGlobalLoading(async () => {
+    await fetch('/api/forget-wifi', { method: 'POST' });
+    alert('Forgetting WiFi + rebooting. Look for the Acuity-Setup-XXXX network.');
+  }));
 });
 
 // --------------------------- logs tab ---------------------------
@@ -306,12 +351,16 @@ $('#action-forget').addEventListener('click', async () => {
 const logPane = $('#log-pane');
 async function refreshLogs() {
   logPane.textContent = 'loading…';
-  try {
-    const r = await fetch('/api/logs?lines=400');
-    logPane.textContent = await r.text();
-    logPane.scrollTop = logPane.scrollHeight;
-  } catch (e) {
-    logPane.textContent = `failed to load logs: ${e.message || e}`;
-  }
+  await withGlobalLoading(async () => {
+    try {
+      const r = await fetch('/api/logs?lines=400');
+      logPane.textContent = await r.text();
+      logPane.scrollTop = logPane.scrollHeight;
+    } catch (e) {
+      logPane.textContent = `failed to load logs: ${e.message || e}`;
+    }
+  });
 }
-$('#logs-refresh').addEventListener('click', refreshLogs);
+$('#logs-refresh').addEventListener('click', async (e) => {
+  await withBusy(e.currentTarget, refreshLogs);
+});

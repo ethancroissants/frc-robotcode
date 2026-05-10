@@ -68,9 +68,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Cache npm's tarball cache directory keyed by package.json.
-      # No-op on first run, big speedup on subsequent runs. Works
-      # whether or not a package-lock.json exists.
+      # === Cache layers (fast → slow) ===
+      #
+      # The biggest win is caching node_modules directly: without it
+      # npm install takes ~2 minutes for ~400 packages every run.
+      # Cache hit → npm install skipped entirely.
+      #
+      # Cache key includes Node major version (in case we bump it),
+      # the OS, and a hash of package.json. We also include
+      # package-lock.json's hash IF it exists — when it does the
+      # cache becomes lockfile-precise; when it doesn't the
+      # restore-keys fallback finds the most recent compatible
+      # cache.
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: acuity/manager/node_modules
+          key: ${{ runner.os }}-node20-modules-${{ hashFiles('acuity/manager/package.json', 'acuity/manager/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node20-modules-
+
+      # Cache npm's tarball cache too — used as a fallback when
+      # node_modules cache misses but some package versions match.
+      # npm install in that case is still much faster than cold.
       - name: Cache npm tarballs
         uses: actions/cache@v4
         with:
@@ -80,8 +101,11 @@ jobs:
             ${{ runner.os }}-npmcache-
 
       # Cache the prebuilt Electron download + electron-builder's
-      # extracted Wine/squirrel binaries — these are the slow part of
-      # a cold CI build (~120 MB of downloads).
+      # extracted NSIS / app-builder binaries. Big — ~150 MB combined
+      # — but downloaded over a fast GitHub-Actions network and
+      # extracted, so even a cold restore beats cold download by a
+      # lot. Key on Electron version (read from package.json) so a
+      # major Electron bump invalidates cleanly.
       - name: Cache Electron + electron-builder
         uses: actions/cache@v4
         with:
@@ -93,16 +117,21 @@ jobs:
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        # Use `npm ci` when a lockfile exists (reproducible), fall back
-        # to `npm install` on a fresh repo so the very first workflow
-        # run doesn't require us to commit a lockfile up front.
+        # Three paths in priority order:
+        #   1. node_modules cache hit → skip install entirely (saves ~2 min).
+        #   2. lockfile exists        → `npm ci` (reproducible, fast).
+        #   3. fresh repo, no lock    → `npm install` (slowest path).
+        # We pass --prefer-offline so npm tries the local tarball
+        # cache before reaching out to the registry.
         run: |
-          if (Test-Path package-lock.json) {
-            Write-Host "package-lock.json found — using npm ci"
-            npm ci --no-audit --fund=false
+          if ('${{ steps.cache-node-modules.outputs.cache-hit }}' -eq 'true') {
+            Write-Host "node_modules cache HIT — skipping install"
+          } elseif (Test-Path package-lock.json) {
+            Write-Host "node_modules cache MISS, lockfile present — npm ci"
+            npm ci --no-audit --fund=false --prefer-offline
           } else {
-            Write-Host "no package-lock.json — using npm install"
-            npm install --no-audit --fund=false
+            Write-Host "node_modules cache MISS, no lockfile — npm install"
+            npm install --no-audit --fund=false --prefer-offline
           }
         shell: pwsh
 
