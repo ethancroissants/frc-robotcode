@@ -878,10 +878,19 @@ function setCamDevice(d) {
     return;
   }
 
-  // MJPEG stream — straight <img src> hookup.
+  // Always remember the open-dashboard link so users on the Devices
+  // tab can still click "Open dashboard" via the camera toolbar's
+  // anchor — that doesn't actually start a stream.
   const base = `http://${d.ip}:${d.port || 8080}`;
-  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
   camOpenDash.href = `${base}/`;
+
+  // Only open the MJPEG + WS while the Camera tab is actually
+  // visible. mDNS auto-picks fire any time, and we don't want a
+  // background stream burning the device's single-viewer slot when
+  // the user isn't even looking.
+  if (!_camStreamActive) return;
+
+  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
   camFrame.classList.add('connecting');
   camLoadingTxt.textContent = `Connecting to ${d.name}…`;
   camLinkPill.hidden = false; camLinkPill.textContent = 'connecting';
@@ -891,6 +900,15 @@ function setCamDevice(d) {
   // WebSocket for live detections.
   connectCamWs(d);
 }
+
+// Tracks whether the Camera tab is the currently-active tab AND
+// has a selected device. We only auto-reconnect the WS when both
+// are true — without this, the renderer keeps spamming reconnect
+// attempts after the user has navigated away from Camera, which
+// generates noisy "WebSocket opening handshake timed out" errors
+// in the console (and wastes a TCP slot the device's web UI might
+// want).
+let _camStreamActive = false;
 
 function connectCamWs(d) {
   const url = `ws://${d.ip}:${d.port || 8080}/api/detections.ws`;
@@ -907,8 +925,12 @@ function connectCamWs(d) {
   camWs.onclose = () => {
     camLinkPill.textContent = 'no link';
     camLinkPill.classList.remove('good'); camLinkPill.classList.add('bad');
-    if (camDevice && camDevice.host === d.host) {
-      setTimeout(() => connectCamWs(d), camWsBackoff);
+    // Only reconnect if the user is still actively on the Camera
+    // tab AND we haven't switched to a different device meanwhile.
+    if (_camStreamActive && camDevice && camDevice.host === d.host) {
+      setTimeout(() => {
+        if (_camStreamActive) connectCamWs(d);
+      }, camWsBackoff);
       camWsBackoff = Math.min(camWsBackoff * 2, 4000);
     }
   };
@@ -1098,6 +1120,9 @@ camDevicePick.addEventListener('change', onCamDeviceChange);
 function releaseCamStream() {
   // Clearing src closes the underlying TCP connection (browsers
   // gc-finalize the request when the resource ref is dropped).
+  // Flipping _camStreamActive false BEFORE closing the WS prevents
+  // the onclose handler from scheduling a reconnect.
+  _camStreamActive = false;
   if (camImg.src) camImg.src = '';
   if (camWs) {
     try { camWs.close(); } catch (e) {}
@@ -1107,6 +1132,7 @@ function releaseCamStream() {
 }
 function reconnectCamStream() {
   if (!camDevice) return;
+  _camStreamActive = true;
   const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
   camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
   camFrame.classList.add('connecting');
@@ -1288,9 +1314,10 @@ function showFirmwareUpdateModal(device) {
         <strong>don't put this computer to sleep</strong>.
       </p>
       <p class="muted" id="fw-update-detail">
-        The device is downloading the new firmware over a temporary
-        WiFi bridge. It usually takes 2–5 minutes. We'll let you
-        know the moment it comes back online.
+        The device downloads the new firmware over a temporary WiFi
+        bridge, then reboots itself to load the new code. Total
+        time is usually 3–6 minutes. We'll let you know the moment
+        it comes back online.
       </p>
       <p class="muted" id="fw-update-elapsed">elapsed: 0:00</p>
       <div class="modal-actions" id="fw-update-actions" hidden>

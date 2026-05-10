@@ -94,10 +94,26 @@ function register(ipcMain) {
   // Use this only when the device already has internet (e.g. it's
   // on home WiFi). For deployed Pis sitting on a no-internet team
   // radio, use `ssh:run-update-bridged` below instead.
+  //
+  // We always reboot at the end — it's empirically more reliable
+  // than trying to restart every changed service in place. Avahi
+  // tends to get wedged after package upgrades, the dashboard
+  // python process keeps the OLD bytecode in memory until restart,
+  // and a reboot is the one operation that guarantees every part
+  // of the upgraded firmware is actually loaded. Costs the user
+  // ~30–60 s; the firmware-update modal in the renderer waits for
+  // mDNS to re-announce.
   ipcMain.handle('ssh:run-update', async (event, target) => {
     const window = BrowserWindow.fromWebContents(event.sender);
-    const cmd = `curl -fsSL ${INSTALL_URL} | sudo bash`;
-    streamTo(window, `[update] running: ${cmd}\n`);
+    const cmd = [
+      `curl -fsSL ${INSTALL_URL} | sudo bash`,
+      'echo "[update] install.sh finished — rebooting"',
+      // `nohup … &` so the reboot kicks in even after this SSH
+      // session dies. `sleep 2` gives the SSH channel time to flush
+      // the "rebooting" line back to Manager before the link drops.
+      'nohup sh -c "sleep 2 && sudo reboot" >/dev/null 2>&1 &',
+    ].join(' && ');
+    streamTo(window, `[update] running install.sh + reboot\n`);
     try {
       const { code } = await exec(target, cmd, (data) => streamTo(window, data));
       streamTo(window, `[update] exit code: ${code}\n`);
@@ -184,7 +200,15 @@ function register(ipcMain) {
       'fi',
       'echo "[update] running install.sh from GitHub…"',
       `curl -fsSL ${installUrl} | sudo bash`,
-      'echo "[update] install.sh finished"',
+      'echo "[update] install.sh finished — rebooting in 2 s"',
+      // Detach the reboot so we get out cleanly: trap EXIT can run
+      // its `nmcli connection delete acuity-temp-update` first
+      // (cosmetic — reboot would discard that anyway), the SSH
+      // channel can flush the "rebooting" line back to Manager,
+      // and THEN the kernel reboots. Without `nohup … &` the
+      // reboot races the trap and the user occasionally sees a
+      // half-printed line with no closing message.
+      'nohup sh -c "sleep 2 && sudo reboot" >/dev/null 2>&1 &',
     ].join('\n');
 
     streamTo(window, '[bridge] starting bridged firmware update\n');

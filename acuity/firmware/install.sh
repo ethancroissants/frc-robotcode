@@ -438,10 +438,43 @@ systemctl daemon-reload
 systemctl enable acuity-firstboot.service
 systemctl enable acuity-dashboard.service
 systemctl enable acuity-ssh-keygen.service
-systemctl enable avahi-daemon.service
-systemctl restart avahi-daemon.service 2>/dev/null || true
 # acuity-setup-wizard intentionally NOT enabled at boot — only
 # acuity-wifi-mode.sh starts it when entering AP mode.
+
+# Restart the dashboard service so the rsync we just did into
+# /opt/acuity/sight/ takes effect. Without this, the running daemon
+# keeps the OLD code in memory and the user has to reboot for the
+# update to actually do anything.
+systemctl restart acuity-dashboard.service \
+  || warn "acuity-dashboard.service failed to start — see 'journalctl -u acuity-dashboard'"
+
+# avahi mDNS needs to actually be running for Manager to find this
+# device. Earlier we suppressed restart failures silently here,
+# which led to a real "Manager doesn't see the device after update"
+# bug — avahi was masked / failed-to-restart and we'd never know.
+# Now: unmask defensively, restart loudly, verify it actually came
+# up, and re-poke avahi to reread /etc/avahi/services/ so the new
+# acuity.service advertisement gets broadcast.
+systemctl unmask avahi-daemon.service 2>/dev/null || true
+systemctl enable avahi-daemon.service
+systemctl restart avahi-daemon.service \
+  || fail "avahi-daemon failed to restart — Manager's mDNS discovery won't find this device. Check 'journalctl -u avahi-daemon'."
+# Reload picks up new /etc/avahi/services/*.service files even when
+# avahi was already running. Belt + suspenders to the restart above.
+systemctl reload avahi-daemon.service 2>/dev/null || true
+
+# Sanity check: did avahi actually settle into 'active' after the
+# restart, and does it know about our _acuity._tcp advertisement?
+# A failed avahi here is a customer-shipping showstopper — flag it
+# loudly rather than letting the install report "complete."
+sleep 1
+if ! systemctl is-active --quiet avahi-daemon.service; then
+  fail "avahi-daemon is not active after install. mDNS won't work; Manager will never auto-discover this device."
+fi
+if command -v avahi-browse >/dev/null \
+   && ! avahi-browse -a -t -p 2>/dev/null | grep -q '_acuity\._tcp'; then
+  warn "avahi is up but isn't advertising _acuity._tcp yet. It usually picks up the new service file within a couple of seconds; if Manager still doesn't see this device, run: sudo systemctl restart avahi-daemon"
+fi
 
 log "install complete."
 log ""

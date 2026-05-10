@@ -32,6 +32,11 @@
     "appId":       "tech.acuity.manager",
     "productName": "Acuity Manager",
     "asar": true,
+    "asarUnpack": [
+      "**/node_modules/node-pty/**",
+      "**/node_modules/@xterm/**",
+      "**/node_modules/ssh2/lib/protocol/crypto/build/**"
+    ],
     "files": [
       "src/**/*",
       "assets/**/*",
