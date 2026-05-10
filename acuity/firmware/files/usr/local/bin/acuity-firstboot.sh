@@ -62,23 +62,12 @@ if [ -n "$TEAM" ]; then
   fi
 fi
 
-# Bounce avahi if we just renamed. avahi is socket-activated in Pi OS
-# Bookworm, so it almost always starts BEFORE we run — with the OLD
-# hostname (`acuity`, or whatever Imager set). The first thing it
-# does is register `<old-name>._acuity._tcp.local` on the LAN. By
-# the time we change the hostname here, that announcement is
-# already cached on every mDNS client (Manager especially) and
-# they'll keep showing the device under the old name AND the new
-# one — phantom duplicate. A restart blows the registrations away
-# and re-announces under the correct name only. Also fixes a
-# separate bug where avahi got into a wedged state on the first
-# boot and didn't re-announce at all.
-if [ "$HOSTNAME_CHANGED" = "1" ]; then
-  log "restarting avahi-daemon so the hostname rename actually propagates"
-  systemctl restart avahi-daemon.service 2>/dev/null \
-    || systemctl restart avahi-daemon.socket 2>/dev/null \
-    || log "  (avahi restart failed — Manager may show duplicate entries)"
-fi
+# (avahi is restarted unconditionally at the end of this script,
+# AFTER wifi-mode has fully settled the network. See the bottom of
+# this file for the why — short version: avahi is socket-activated
+# and races NetworkManager, so we always need to re-sync it once
+# the final IP / hostname are in place. Doing it here on hostname
+# change isn't enough by itself.)
 
 # 3. Decide WiFi mode.
 if [ -z "$SSID" ]; then
@@ -90,5 +79,29 @@ else
   # IP convention (10.TE.AM.11). With no team, it falls back to DHCP.
   /usr/local/bin/acuity-wifi-mode.sh sta "$SSID" "$PSK" "$COUNTRY" "$TEAM"
 fi
+
+# 4. Re-sync avahi-daemon now that the network is in its final state.
+#
+# Why this is unconditional (not just on hostname change):
+# avahi is socket-activated in Pi OS Bookworm, so it starts WAY
+# before we run — usually before NetworkManager even brings wlan0
+# up. By the time we get here, avahi has already done one of:
+#   a) announced under the old hostname (`acuity` or whatever
+#      Imager set) — the duplicate-tile-in-Manager bug;
+#   b) announced and then watched the interface get torn down +
+#      re-IPed when wifi-mode applied the static `10.TE.AM.11/24`
+#      — avahi handles the address blip but does NOT re-publish
+#      `_acuity._tcp` service records, so the announcement goes
+#      stale and Manager loses the device entirely. This is the
+#      "I had to restart avahi by hand again" symptom.
+#
+# A blanket `systemctl restart avahi-daemon` here re-reads the
+# current hostname + IP + /etc/avahi/services/*.service and
+# re-announces cleanly. Cheap (<1s), idempotent, and runs after
+# every boot regardless of whether anything actually changed.
+log "syncing avahi-daemon with final network state"
+systemctl restart avahi-daemon.service 2>/dev/null \
+  || systemctl restart avahi-daemon.socket 2>/dev/null \
+  || log "  (avahi restart failed — Manager may not auto-discover this device)"
 
 log "done"
