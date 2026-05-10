@@ -214,6 +214,7 @@
           <h3>Getting started</h3>
           <a href="#docs-quickstart"   class="docs-link active">Quickstart</a>
           <a href="#docs-architecture" class="docs-link">How it fits together</a>
+          <a href="#docs-hardware"     class="docs-link">Hardware</a>
         </div>
         <div class="docs-nav-section">
           <h3>Robot libraries</h3>
@@ -233,7 +234,8 @@
           <a href="#docs-commands"   class="docs-link">Sending commands</a>
           <a href="#docs-pipelines"  class="docs-link">Pipelines</a>
           <a href="#docs-telemetry"  class="docs-link">Telemetry log</a>
-          <a href="#docs-fusion"     class="docs-link">Sensor fusion</a>
+          <a href="#docs-fusion"     class="docs-link">Sensor fusion (robot)</a>
+          <a href="#docs-recipes"    class="docs-link">Coprocessor recipes</a>
           <a href="#docs-extending"  class="docs-link">Extending Acuity</a>
         </div>
         <div class="docs-nav-section">
@@ -252,7 +254,8 @@
           <h1>Quickstart</h1>
           <p class="docs-lead">
             From sealed-box Acuity to robot code reading AprilTag
-            poses in about ten minutes.
+            poses — or running custom compute the RoboRIO doesn't
+            have headroom for — in about ten minutes.
           </p>
           <ol>
             <li>Power Acuity (USB-A from the RoboRIO is fine, or any
@@ -284,17 +287,33 @@
         <section class="docs-section" id="docs-architecture">
           <h1>How it fits together</h1>
           <p>
-            An Acuity device runs a vision pipeline that publishes
-            AprilTag detections to NetworkTables 4. Three pieces:
+            Acuity is two things in one box. The default pipeline
+            does vision; the rest of the device is a general-purpose
+            Linux coprocessor on the robot's network that your team
+            can put real compute on — high-rate pose estimation,
+            trajectory pre-computation, interception math, scouting
+            lookups, anything CPU-bound the RoboRIO doesn't have
+            cycles for.
           </p>
           <dl class="docs-defs">
-            <dt>The device</dt>
+            <dt>The device — vision</dt>
             <dd>
               Camera → OpenCV capture → pyapriltags →
-              <code>/acuity/*</code> NT4 topics. Also serves a web
+              <code>/acuity/*</code> NT4 topics. Serves a web
               dashboard at <code>:8080</code> (live feed, settings,
-              network controls, system + scripts API). Mounts via
-              USB-A on the RoboRIO.
+              network controls).
+            </dd>
+            <dt>The device — coprocessor</dt>
+            <dd>
+              Drop any Python script into
+              <code>/var/lib/acuity/scripts/</code>; run it on
+              demand via <code>/api/scripts/&lt;name&gt;/run</code>
+              or at boot via a systemd unit. Publish results to
+              <code>/acuity/user/*</code> NT topics. See
+              <a href="#docs-recipes">Coprocessor recipes</a> for
+              concrete worked examples (high-rate pose fusion,
+              trajectory pre-compute, intercept prediction,
+              scouting lookup).
             </dd>
             <dt>The <code>AcuityClient</code> helper file</dt>
             <dd>
@@ -319,8 +338,143 @@
             Robot code talks to Acuity via NetworkTables 4. It
             never opens an HTTP socket to the device — it reads
             NT4 topics like every other component on the bus. The
-            REST endpoints below are for tools (Manager,
-            dashboard, your own scripts), not robot code.
+            REST endpoints below are for tools (Manager, dashboard,
+            scouting scripts, your own laptop), not robot code.
+          </p>
+        </section>
+
+        <!-- ============== Hardware ============== -->
+        <section class="docs-section" id="docs-hardware">
+          <h1>Hardware</h1>
+          <p class="docs-lead">
+            Acuity is sold as a unit, not a board. Each device is
+            built for speed and configured for the camera count and
+            workload it's going to run. From robot code's
+            perspective the device looks the same regardless of
+            what's inside — same hostname, same NT4 topics, same
+            <code>AcuityClient</code> helper — so you write against
+            the contract, not the silicon underneath.
+          </p>
+
+          <h2>Architecture</h2>
+          <p>
+            Acuity normally runs on the Raspberry Pi or Orange Pi
+            architecture family, picked per device to fit the
+            workload. The firmware build, the API surface, and the
+            user experience are identical across the tiers — only
+            the silicon underneath varies.
+          </p>
+
+          <h2>Specs are not set in stone</h2>
+          <p>
+            We don't publish a single fixed board spec. The compute
+            tier, memory, and peripheral mix we ship may change
+            between batches as parts availability moves and as we
+            tune for what teams are actually running.
+            <strong>These changes don't impact price.</strong>
+          </p>
+          <p>
+            Regardless of which board is inside, every Acuity
+            performs at extremely similar speeds in actual use.
+            That parity isn't an accident — it's because every
+            device runs the <strong>same heavily-optimized Linux
+            build</strong>, a lightweight distribution we maintain
+            based on Raspberry Pi OS / Debian. Vision pipeline,
+            kernel tunings, service set, network stack, and storage
+            layout are identical across tiers; only the silicon
+            underneath varies.
+          </p>
+          <p class="docs-callout">
+            Need exact specs for a specific use case (e.g. you're
+            sizing a heavier custom workload, or your inspector
+            wants a part-number sheet)? <strong>Contact us</strong>
+            and we'll send the bill of materials for the unit you
+            received.
+          </p>
+
+          <h2>Multi-camera, tuned at the hardware level</h2>
+          <p>
+            Multiple-camera setups are where most off-the-shelf FRC
+            vision boards fall over — they advertise the camera
+            count and quietly degrade once you actually run all of
+            them. Acuity handles this differently:
+          </p>
+          <ul>
+            <li>We pick a compute module with enough I/O bandwidth
+                for the camera plan (CSI lanes, dedicated USB
+                controllers, separate buses for each sensor).</li>
+            <li>The firmware image is tuned per device — kernel
+                buffer sizes, CPU governors, USB and CSI driver
+                parameters — to match the cameras we built it
+                with.</li>
+            <li>We do hardware-level modifications where it matters:
+                power rail capacity, thermal pads, antenna placement,
+                additional storage, swap configuration. The board
+                you receive isn't a stock module with a sticker;
+                it's a sub-assembly we stand behind for the workload
+                we sold you.</li>
+          </ul>
+          <p>
+            Net effect for the robot programmer: you can ask Acuity
+            to track AprilTags, detect game pieces, fuse a swerve
+            pose at 200 Hz, and log telemetry concurrently — and
+            the device that arrives is provisioned to do all of it
+            without you tuning anything.
+          </p>
+
+          <h2>Storage — at least 64 GB on every device</h2>
+          <p>
+            Every Acuity ships with <strong>at least 64 GB of
+            storage</strong>, regardless of compute tier. That's
+            roughly <strong>128× the available storage on a
+            RoboRIO</strong>, which is the practical reason teams
+            can:
+          </p>
+          <ul>
+            <li>Keep a full season's worth of
+                <a href="#docs-telemetry">telemetry logs</a> on the
+                device, ready to scp off post-event.</li>
+            <li>Park scouting CSVs, alliance tendency tables, and
+                playbook configs in <code>/var/lib/acuity/</code>
+                without worrying about size.</li>
+            <li>Cache trajectory libraries, pre-computed lookup
+                tables, and recorded match video for review.</li>
+            <li>Snapshot the entire system before a competition and
+                roll back from the same SD card if a mid-event
+                change misbehaves.</li>
+          </ul>
+          <p class="docs-callout">
+            Storage is the resource you'll feel first on the RoboRIO
+            when you try to put real logging or pre-computed assets
+            on the robot. Acuity exists in part so you don't have to.
+          </p>
+
+          <h2>Tested where it matters</h2>
+          <p>
+            Every Acuity tier is tested on our own team's robots
+            before it ships. That's not a focus group — it's the
+            same hardware running the same season, with the same
+            wear, the same radio environment, and the same "the
+            match starts in ten minutes" pressure your team is going
+            to put on it.
+          </p>
+          <p>
+            On top of that we bench-test each tier against the
+            options teams realistically consider:
+          </p>
+          <ul>
+            <li><strong>Limelight</strong> on the vision-only path:
+                AprilTag detection range, latency, and stability under
+                radio contention.</li>
+            <li><strong>A base Raspberry Pi</strong> (or comparable
+                stock board) running off-the-shelf FRC firmware: how
+                much you have to fight the OS to get the same
+                workload running, and how it holds up under
+                multi-camera + non-vision loads.</li>
+          </ul>
+          <p>
+            If a tier doesn't beat both on the workloads we ship it
+            for, we don't ship it.
           </p>
         </section>
 
@@ -1351,6 +1505,360 @@ acuity.getBestTag().ifPresent(tag -&gt; {
 });</code></pre>
             <button class="copy-btn" data-copy>Copy</button>
           </div>
+        </section>
+
+        <!-- ============== Coprocessor recipes ============== -->
+        <section class="docs-section" id="docs-recipes">
+          <h1>Coprocessor recipes</h1>
+          <p class="docs-lead">
+            Worked examples of putting work on Acuity instead of the
+            RoboRIO. Each recipe is a Python script that lives in
+            <code>/var/lib/acuity/scripts/</code> on the device, plus
+            the robot-side code that consumes its output over
+            NetworkTables.
+          </p>
+          <p>
+            Acuity is tuned per device so these recipes "just work";
+            see <a href="#docs-hardware">Hardware</a> for the
+            compute-tier philosophy.
+          </p>
+
+          <h2>Recipe 1: High-rate pose fusion</h2>
+          <p>
+            The RoboRIO can run <code>SwerveDrivePoseEstimator</code>
+            but it's sharing CPU with everything else on the bus. If
+            you want a 200 Hz fused pose (vs. the 50 Hz the periodic
+            loop gives you), offload it. Acuity reads odometry +
+            heading off NT, fuses with its own tag observations,
+            publishes back at 200 Hz.
+          </p>
+          <h3>On the device: <code>scripts/pose_fuser.py</code></h3>
+          <div class="code-block">
+            <pre><code class="lang-python">"""Complementary-filter pose fuser at 200 Hz.
+
+Reads:  /robot/odom/{x,y,heading_deg}   robot publishes at 50 Hz
+        /acuity/tags/best/{distance_m, yaw_deg, id}  (vision)
+Writes: /acuity/user/pose/{x,y,heading_deg,fresh}
+"""
+import math, time, ntcore
+
+inst = ntcore.NetworkTableInstance.getDefault()
+inst.startClient4("acuity-pose-fuser")
+inst.setServerTeam(0)  # set your team number here
+
+robot   = inst.getTable("robot/odom")
+vision  = inst.getTable("acuity/tags/best")
+out     = inst.getTable("acuity/user/pose")
+
+# Subscribers
+sub_x   = robot.getDoubleTopic("x").subscribe(0.0)
+sub_y   = robot.getDoubleTopic("y").subscribe(0.0)
+sub_h   = robot.getDoubleTopic("heading_deg").subscribe(0.0)
+sub_tid = vision.getIntegerTopic("id").subscribe(-1)
+sub_td  = vision.getDoubleTopic("distance_m").subscribe(0.0)
+sub_ty  = vision.getDoubleTopic("yaw_deg").subscribe(0.0)
+
+pub_x   = out.getDoubleTopic("x").publish()
+pub_y   = out.getDoubleTopic("y").publish()
+pub_h   = out.getDoubleTopic("heading_deg").publish()
+pub_f   = out.getBooleanTopic("fresh").publish()
+
+# State
+fx, fy, fh = 0.0, 0.0, 0.0
+ALPHA = 0.92        # odometry trust; (1-alpha) → vision pull
+LOOP_HZ = 200
+dt = 1.0 / LOOP_HZ
+
+# Known tag field positions (fill in for your field season).
+TAG_FIELD = {7: (8.31, 1.45, 0.0)}
+
+next_t = time.monotonic()
+while True:
+    next_t += dt
+
+    ox, oy, oh = sub_x.get(), sub_y.get(), sub_h.get()
+    tid = sub_tid.get()
+
+    # Dead-reckon: trust odometry (cheap, smooth).
+    fx, fy, fh = ox, oy, oh
+
+    # When a known tag is in view, pull toward where it implies we are.
+    if tid in TAG_FIELD:
+        tx, ty, _ = TAG_FIELD[tid]
+        # Reduce tag bearing to field-frame XY using current heading guess.
+        d  = sub_td.get()
+        ya = math.radians(sub_ty.get() + fh)
+        tag_implied_x = tx - d * math.cos(ya)
+        tag_implied_y = ty - d * math.sin(ya)
+        fx = ALPHA * fx + (1 - ALPHA) * tag_implied_x
+        fy = ALPHA * fy + (1 - ALPHA) * tag_implied_y
+
+    pub_x.set(fx); pub_y.set(fy); pub_h.set(fh)
+    pub_f.set(tid &gt;= 0)
+
+    # Stable 200 Hz loop. time.sleep until next tick.
+    slack = next_t - time.monotonic()
+    if slack &gt; 0:
+        time.sleep(slack)</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Drop it in, then make it a service so it runs at boot:
+            <code>scp pose_fuser.py acuity-root@acuity-1279.local:/var/lib/acuity/scripts/</code>
+            and follow the systemd recipe in
+            <a href="#docs-extending">Extending Acuity</a>.
+          </p>
+          <h3>On the robot</h3>
+          <div class="code-block">
+            <pre><code class="lang-java">// In your drivetrain subsystem
+NetworkTable acuityPose =
+    NetworkTableInstance.getDefault().getTable("acuity/user/pose");
+DoubleSubscriber subX = acuityPose.getDoubleTopic("x").subscribe(0.0);
+DoubleSubscriber subY = acuityPose.getDoubleTopic("y").subscribe(0.0);
+DoubleSubscriber subH = acuityPose.getDoubleTopic("heading_deg").subscribe(0.0);
+BooleanSubscriber fresh = acuityPose.getBooleanTopic("fresh").subscribe(false);
+
+public Pose2d getFusedPose() {
+  return new Pose2d(subX.get(), subY.get(), Rotation2d.fromDegrees(subH.get()));
+}
+
+// Robot also publishes /robot/odom/* every periodic; the fuser
+// subscribes and reads it.</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Recipe 2: Trajectory pre-compute</h2>
+          <p>
+            PathPlanner / Choreo trajectories are fast to generate
+            but the RoboRIO would rather not do it mid-auto. Push
+            the planning to Acuity over HTTP — robot POSTs a goal,
+            Acuity returns waypoints, robot drives them.
+          </p>
+          <h3>On the device: <code>scripts/plan_path.py</code></h3>
+          <div class="code-block">
+            <pre><code class="lang-python">"""Synthesizes a cubic-Hermite spline between current pose and
+goal pose, returns waypoints. Called from robot code via
+/api/scripts/plan_path/run with body {"args": ["x0","y0","h0","x1","y1","h1"]}.
+Output appears on the run's stdout — robot polls
+/api/scripts/runs/&lt;id&gt; until exit_code is non-null."""
+import sys, json, math
+
+x0,y0,h0,x1,y1,h1 = (float(a) for a in sys.argv[1:7])
+
+# Tangent magnitude scaled with distance — keeps the spline
+# from looping back on short paths.
+dist = math.hypot(x1-x0, y1-y0)
+m = max(0.5, dist * 1.2)
+tx0, ty0 = m*math.cos(math.radians(h0)), m*math.sin(math.radians(h0))
+tx1, ty1 = m*math.cos(math.radians(h1)), m*math.sin(math.radians(h1))
+
+N = 40
+waypoints = []
+for i in range(N + 1):
+    t = i / N
+    h00 = 2*t**3 - 3*t**2 + 1
+    h10 = t**3 - 2*t**2 + t
+    h01 = -2*t**3 + 3*t**2
+    h11 = t**3 - t**2
+    x = h00*x0 + h10*tx0 + h01*x1 + h11*tx1
+    y = h00*y0 + h10*ty0 + h01*y1 + h11*ty1
+    waypoints.append([round(x, 4), round(y, 4)])
+
+print(json.dumps({"waypoints": waypoints, "count": len(waypoints)}))</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <h3>On the robot</h3>
+          <div class="code-block">
+            <pre><code class="lang-java">// Fire off the plan, then poll for completion.
+public CompletableFuture&lt;List&lt;Translation2d&gt;&gt; planTo(Pose2d goal) {
+  Pose2d cur = getFusedPose();
+  String body = String.format(
+      "{\"args\":[\"%f\",\"%f\",\"%f\",\"%f\",\"%f\",\"%f\"]}",
+      cur.getX(), cur.getY(), cur.getRotation().getDegrees(),
+      goal.getX(), goal.getY(), goal.getRotation().getDegrees());
+  return AcuityHttp.postJson("/api/scripts/plan_path/run", body)
+      .thenCompose(r -&gt; AcuityHttp.pollUntilExited(r.get("id")))
+      .thenApply(r -&gt; parseWaypoints(r.get("output")));
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p class="hint">
+            <code>AcuityHttp</code> is your own tiny wrapper around
+            <code>java.net.http.HttpClient</code> — see the
+            <a href="#docs-commands">Sending commands</a> section
+            for a copy-paste version.
+          </p>
+
+          <h2>Recipe 3: Game-piece intercept prediction</h2>
+          <p>
+            The color-blob detector publishes object centroids at
+            ~30 Hz. To intercept a moving piece, you need its
+            <em>velocity</em>, which means tracking across frames.
+            That's Kalman-filter territory — fits perfectly on Acuity.
+          </p>
+          <h3>On the device: <code>scripts/intercept.py</code></h3>
+          <div class="code-block">
+            <pre><code class="lang-python">"""Tracks the best color-blob across frames, estimates velocity
+via exponential smoothing, projects intercept N seconds ahead.
+
+Reads:  /acuity/objects/best/{tx, ty, area}
+Writes: /acuity/user/intercept/{tx_pred, ty_pred, vx, vy, valid}
+"""
+import time, ntcore
+
+LOOK_AHEAD_S = 0.30   # how far in the future to project
+ALPHA = 0.6           # velocity smoothing
+LOOP_HZ = 60
+
+inst = ntcore.NetworkTableInstance.getDefault()
+inst.startClient4("acuity-intercept")
+inst.setServerTeam(0)
+
+obj = inst.getTable("acuity/objects/best")
+sub_tx   = obj.getDoubleTopic("tx").subscribe(0.0)
+sub_ty   = obj.getDoubleTopic("ty").subscribe(0.0)
+sub_area = obj.getDoubleTopic("area").subscribe(0.0)
+
+out = inst.getTable("acuity/user/intercept")
+pub_tx = out.getDoubleTopic("tx_pred").publish()
+pub_ty = out.getDoubleTopic("ty_pred").publish()
+pub_vx = out.getDoubleTopic("vx").publish()
+pub_vy = out.getDoubleTopic("vy").publish()
+pub_ok = out.getBooleanTopic("valid").publish()
+
+last_tx = last_ty = None
+last_t = time.monotonic()
+vx = vy = 0.0
+dt = 1.0 / LOOP_HZ
+
+while True:
+    t = time.monotonic()
+    area = sub_area.get()
+    if area &lt; 0.002:                   # nothing in view → invalidate
+        pub_ok.set(False)
+        last_tx = last_ty = None
+        time.sleep(dt); continue
+
+    tx, ty = sub_tx.get(), sub_ty.get()
+    if last_tx is not None:
+        elapsed = max(1e-3, t - last_t)
+        nvx = (tx - last_tx) / elapsed
+        nvy = (ty - last_ty) / elapsed
+        vx = ALPHA * vx + (1 - ALPHA) * nvx
+        vy = ALPHA * vy + (1 - ALPHA) * nvy
+
+    pub_tx.set(tx + vx * LOOK_AHEAD_S)
+    pub_ty.set(ty + vy * LOOK_AHEAD_S)
+    pub_vx.set(vx); pub_vy.set(vy)
+    pub_ok.set(True)
+    last_tx, last_ty, last_t = tx, ty, t
+    time.sleep(dt)</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <h3>On the robot</h3>
+          <div class="code-block">
+            <pre><code class="lang-java">var t = NetworkTableInstance.getDefault().getTable("acuity/user/intercept");
+DoubleSubscriber txPred = t.getDoubleTopic("tx_pred").subscribe(0.0);
+BooleanSubscriber valid = t.getBooleanTopic("valid").subscribe(false);
+
+public void teleopPeriodic() {
+  if (valid.get()) {
+    // Aim AT THE PREDICTED POSITION, not the current one. By the
+    // time the projectile / intake gets there, the piece has moved.
+    drivetrain.setHeadingSetpoint(getHeading() + txPred.get() * kFovHalf);
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Recipe 4: Scouting / strategy helper</h2>
+          <p>
+            Scouting data lives in a CSV that's too big to bundle in
+            robot code (and too easy to forget to deploy). Park it on
+            Acuity: scp the CSV up, drop a small lookup script in,
+            robot publishes "current opponents" and reads back
+            "recommended priority targets."
+          </p>
+          <h3>On the device: <code>scripts/scout_lookup.py</code></h3>
+          <div class="code-block">
+            <pre><code class="lang-python">"""Reads opponent alliance from robot, reads scouting CSV, writes
+back a comma-joined list of recommended priority target IDs.
+
+CSV format: team,priority_tags
+            254,7,4
+            148,4,7,8
+"""
+import csv, time, ntcore
+from pathlib import Path
+
+CSV_PATH = Path("/var/lib/acuity/scouting.csv")
+inst = ntcore.NetworkTableInstance.getDefault()
+inst.startClient4("acuity-scout")
+inst.setServerTeam(0)
+
+robot = inst.getTable("robot/match")
+out   = inst.getTable("acuity/user/scout")
+sub_opp = robot.getStringTopic("opponents").subscribe("")
+pub_tgt = out.getStringTopic("priority_tags").publish()
+
+def load_tendencies() -&gt; dict[int, list[int]]:
+    if not CSV_PATH.exists(): return {}
+    d = {}
+    with CSV_PATH.open() as f:
+        for row in csv.reader(f):
+            if not row: continue
+            d[int(row[0])] = [int(x) for x in row[1:]]
+    return d
+
+tend = load_tendencies()
+last_mtime = CSV_PATH.stat().st_mtime if CSV_PATH.exists() else 0
+last_opp = ""
+
+while True:
+    # Hot-reload on CSV change.
+    if CSV_PATH.exists():
+        mt = CSV_PATH.stat().st_mtime
+        if mt != last_mtime:
+            tend = load_tendencies(); last_mtime = mt
+
+    opp = sub_opp.get()
+    if opp != last_opp:
+        targets: list[int] = []
+        for team_s in opp.split(","):
+            team_s = team_s.strip()
+            if team_s.isdigit():
+                targets += tend.get(int(team_s), [])
+        # Deduplicate while preserving order.
+        seen, ordered = set(), []
+        for t in targets:
+            if t not in seen: seen.add(t); ordered.append(t)
+        pub_tgt.set(",".join(str(x) for x in ordered))
+        last_opp = opp
+
+    time.sleep(0.25)   # this isn't latency-critical</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Robot code reads
+            <code>/acuity/user/scout/priority_tags</code> and feeds
+            those IDs into the dashboard's preferred-tag-IDs list
+            (or filters tags client-side). When the scouting team
+            updates the CSV mid-event, just scp the new file —
+            the script hot-reloads.
+          </p>
+
+          <h2>Where to go from here</h2>
+          <ul>
+            <li>Read <a href="#docs-extending">Extending Acuity</a>
+                for the systemd / boot-time pattern so your scripts
+                survive a reboot.</li>
+            <li>Read the <a href="#docs-telemetry">Telemetry log</a>
+                section — every recipe above can append match-time
+                diagnostics for post-match analysis.</li>
+            <li>Combine recipes: a pose fuser publishing into the
+                interception script's input table is just two
+                <code>subscribe()</code> calls.</li>
+          </ul>
         </section>
 
         <!-- ============== Extending Acuity ============== -->

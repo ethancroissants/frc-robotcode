@@ -383,6 +383,120 @@ if [ -f /boot/firmware/cfsight.conf ] && [ ! -f /boot/firmware/acuity.conf ]; th
   cp /boot/firmware/cfsight.conf /boot/firmware/acuity.conf
 fi
 
+# === Per-board overclock + power tuning ===
+#
+# Acuity ships across multiple compute tiers; one of them is the entry
+# tier that uses a Pi Zero 2 W base. Stock that board runs at 1.0 GHz,
+# which is fine for the vision pipeline but leaves no headroom for the
+# coprocessor recipes (high-rate pose fusion, intercept prediction,
+# etc.) teams put on top. We bump it to 1.5 GHz (1.5x base) and tune
+# voltage + memory clocks so the board stays stable under sustained
+# load — and we leave dynamic frequency scaling ON so idle power is
+# still low and the supply current doesn't spike on transients.
+#
+# Idempotent: we maintain a single `# >>> acuity-overclock` block in
+# config.txt and rewrite it in place on every install. Any team-edited
+# lines OUTSIDE that block are preserved.
+#
+# Detection: `/sys/firmware/devicetree/base/model` is the canonical
+# Pi-family identification string ("Raspberry Pi Zero 2 W Rev 1.0").
+# Null-terminated, so strip trailing NULs before comparing.
+PI_MODEL=""
+if [ -r /sys/firmware/devicetree/base/model ]; then
+  PI_MODEL="$(tr -d '\0' < /sys/firmware/devicetree/base/model)"
+fi
+log "detected board model: ${PI_MODEL:-unknown}"
+
+CONFIG_TXT=""
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+  if [ -f "$candidate" ]; then CONFIG_TXT="$candidate"; break; fi
+done
+
+apply_overclock() {
+  local label="$1"      # marker logged + embedded in the config block
+  local block_body="$2" # multi-line content, no trailing newline
+
+  [ -n "$CONFIG_TXT" ] || { log "no config.txt found — skipping overclock"; return 0; }
+
+  # Strip any previous Acuity block, then append the fresh one. awk
+  # eats every line from the `# >>>` sentinel through the matching
+  # `# <<<` (or EOF if a hand-edit left the close marker off). We
+  # accept that "broken open marker = lose the inside" trade — Acuity
+  # owns those marker lines and writes both on every install, so the
+  # only way a file gets out of sync is someone hand-editing inside
+  # the block, which the in-file comment explicitly warns against.
+  local tmp; tmp="$(mktemp)"
+  awk '
+    /^# >>> acuity-overclock/ { skipping=1; next }
+    /^# <<< acuity-overclock/ { skipping=0; next }
+    !skipping
+  ' "$CONFIG_TXT" > "$tmp"
+
+  {
+    cat "$tmp"
+    echo ""
+    echo "# >>> acuity-overclock  (managed by acuity/firmware/install.sh — do not edit by hand)"
+    echo "# Tier: ${label}"
+    printf '%s\n' "$block_body"
+    echo "# <<< acuity-overclock"
+  } > "$CONFIG_TXT.acuity-new"
+  mv "$CONFIG_TXT.acuity-new" "$CONFIG_TXT"
+  rm -f "$tmp"
+  log "wrote overclock block to $CONFIG_TXT ($label) — takes effect on next reboot"
+}
+
+case "$PI_MODEL" in
+  *"Zero 2 W"*)
+    # Pi Zero 2 W → 1.5 GHz @ over_voltage=6.
+    #
+    # Why these values:
+    #   arm_freq=1500          1.5x base; the BCM2710A1 silicon is
+    #                          the same as Pi 3 and tolerates this
+    #                          comfortably with the voltage step
+    #                          below + the thermal pad Acuity adds.
+    #   over_voltage=6         +0.15 V; the minimum step the kernel
+    #                          accepts for arm_freq=1500.
+    #   core_freq=500          GPU/VideoCore at 500 MHz (default 400)
+    #                          — keeps MJPEG encode + CSI capture
+    #                          fed when arm is running hot.
+    #   sdram_freq=600         memory bus matched to the core bump.
+    #   arm_boost=1            the firmware's name for "yes, you may
+    #                          actually run at the requested clock".
+    #
+    # Why NOT force_turbo=1:
+    #   `force_turbo=1` pins the CPU at max all the time. Power draw
+    #   becomes flat-out instead of demand-following, which makes
+    #   the supply current spike on bring-up and stays at peak even
+    #   at idle. Leaving the default ondemand governor + arm_boost=1
+    #   gives us "burst to 1.5 GHz when needed, drop to ~600 MHz
+    #   when idle" — smoother current, cooler board, same peak
+    #   performance for the recipes that matter.
+    apply_overclock "pi-zero-2w-1.5x" \
+"arm_freq=1500
+over_voltage=6
+core_freq=500
+sdram_freq=600
+arm_boost=1
+# Leave force_turbo unset — dynamic scaling keeps idle power low and
+# the supply current draw smooth on transients."
+    ;;
+  *)
+    # Any other tier (Pi 5, Orange Pi 5, etc.) is already fast enough
+    # off the shelf. Don't apply the Zero-2-W overclock to silicon
+    # that doesn't need it — and don't leave a stale block on a
+    # device that was previously a Zero 2 W and got swapped out.
+    if [ -n "$CONFIG_TXT" ] && grep -q '^# >>> acuity-overclock' "$CONFIG_TXT"; then
+      log "removing stale acuity-overclock block from $CONFIG_TXT (not a Pi Zero 2 W)"
+      awk '
+        /^# >>> acuity-overclock/ { skipping=1; next }
+        /^# <<< acuity-overclock/ { skipping=0; next }
+        !skipping
+      ' "$CONFIG_TXT" > "$CONFIG_TXT.acuity-new" && mv "$CONFIG_TXT.acuity-new" "$CONFIG_TXT"
+    fi
+    log "no overclock applied (model is not a Pi Zero 2 W)"
+    ;;
+esac
+
 # === Disable legacy cfsight units (pre-Acuity-rename installs) ===
 # Older versions of this script installed services and scripts under
 # `cfsight-*` / cold-fusion-sight names. If we're upgrading in place,
