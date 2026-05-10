@@ -64,7 +64,7 @@
     },
     "win": {
       "target":     ["nsis", "portable"],
-      "icon":       "build/installer-icon.ico",
+      "icon":       "../img/AcuityAppIcon.ico",
       "verifyUpdateCodeSignature": false,
       "signAndEditExecutable":     false
     },
@@ -82,9 +82,9 @@
       "runAfterFinish":          true,
       "deleteAppDataOnUninstall": false,
       "multiLanguageInstaller":  false,
-      "installerIcon":           "build/installer-icon.ico",
-      "uninstallerIcon":         "build/uninstaller-icon.ico",
-      "installerHeaderIcon":     "build/installer-header-icon.ico",
+      "installerIcon":           "../img/AcuityAppIcon.ico",
+      "uninstallerIcon":         "../img/AcuityAppIcon.ico",
+      "installerHeaderIcon":     "../img/AcuityAppIcon.ico",
       "installerHeader":         "build/installer-header.bmp",
       "installerSidebar":        "build/installer-sidebar.bmp",
       "uninstallerSidebar":      "build/uninstaller-sidebar.bmp",

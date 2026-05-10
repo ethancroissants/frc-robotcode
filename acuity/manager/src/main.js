@@ -18,6 +18,11 @@ function createWindow() {
     minHeight: 600,
     title: 'Acuity Manager',
     backgroundColor: '#eef0f3',
+    // Title-bar / taskbar icon. In packaged builds Windows reads the
+    // icon embedded in the .exe (set via build.win.icon in
+    // package.json) and ignores this; we set it anyway so `npm run
+    // dev` and Linux/macOS dev builds pick up the brand glyph too.
+    icon: path.resolve(__dirname, '..', '..', 'img', 'AcuityAppIcon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
