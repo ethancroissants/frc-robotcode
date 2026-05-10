@@ -67,6 +67,17 @@ $$('.tab').forEach((btn) => {
     $$('.page').forEach((p) =>
       p.classList.toggle('active', p.dataset.page === target)
     );
+    if (target === 'camera') {
+      // The Camera tab was `display: none` until just now, which means
+      // every getBoundingClientRect inside it returned 0×0 and the SVG
+      // overlay sized to nothing. Re-sync once the layout has actually
+      // settled — without this, snapshots arriving while you were on
+      // a different tab leave the overlay invisible the first time
+      // you switch in.
+      requestAnimationFrame(() =>
+        typeof updateCamOverlaySize === 'function' && updateCamOverlaySize()
+      );
+    }
   });
 });
 
@@ -162,10 +173,25 @@ $('#dd-open-dashboard').addEventListener('click', () => {
 });
 $('#dd-update').addEventListener('click', async (e) => {
   if (!selected) return;
+  // Ask for an internet WiFi the Pi can briefly bridge through.
+  // Most production Pis sit on the team radio (no internet), so a
+  // direct curl-from-GitHub would fail. The bridge flow joins
+  // wlan0 to a user-supplied WiFi just long enough to fetch +
+  // re-install, then tears it down.
+  const creds = await promptUpdateCredentials(selected);
+  if (!creds) return;            // user cancelled
   logPane.hidden = false;
   logPane.textContent = '';
   await withBusy(e.currentTarget, () =>
-    withGlobalLoading(() => window.acuity.ssh.runUpdate(target(selected)))
+    withGlobalLoading(() => {
+      if (creds.skipBridge) {
+        // "Pi already has internet" path — direct install.
+        return window.acuity.ssh.runUpdate(target(selected));
+      }
+      return window.acuity.ssh.runUpdateBridged(
+        target(selected), creds.ssid, creds.psk
+      );
+    })
   );
 });
 $('#dd-terminal').addEventListener('click', () => {
@@ -389,6 +415,84 @@ function escapeHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Modal that asks for the WiFi creds the Pi will briefly bridge
+// through to fetch the new firmware. Resolves to an object on
+// continue, or null if the user cancels.
+//   { ssid: string, psk: string, skipBridge: boolean }
+function promptUpdateCredentials(device) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal-card">
+        <header>
+          <h2>Update ${escapeHtml(device.name)}</h2>
+        </header>
+        <p>
+          The device usually sits on the team radio with no internet,
+          so we briefly bridge it onto a WiFi network of your choice
+          to fetch the new firmware. Once the install finishes we
+          drop the temp connection and the device returns to the team
+          radio automatically.
+        </p>
+
+        <div class="upd-form">
+          <label>WiFi SSID
+            <input id="upd-ssid" type="text" autocomplete="off"
+                   spellcheck="false" autocapitalize="off"
+                   placeholder="e.g. MyHomeWiFi" />
+          </label>
+          <label>Password
+            <input id="upd-psk" type="password" autocomplete="off"
+                   placeholder="(leave blank for an open network)" />
+          </label>
+          <label class="upd-check">
+            <input id="upd-skip" type="checkbox" />
+            <span>This device already has internet — skip the bridge</span>
+          </label>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost"   data-act="cancel">Cancel</button>
+          <button class="primary" data-act="ok">Update firmware</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const ssidInput = overlay.querySelector('#upd-ssid');
+    const pskInput  = overlay.querySelector('#upd-psk');
+    const skipBox   = overlay.querySelector('#upd-skip');
+    const okBtn     = overlay.querySelector('[data-act="ok"]');
+
+    const close = (val) => { overlay.remove(); resolve(val); };
+
+    overlay.querySelector('[data-act="cancel"]').addEventListener('click', () => close(null));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+    overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(null); });
+
+    skipBox.addEventListener('change', () => {
+      const sk = skipBox.checked;
+      ssidInput.disabled = sk;
+      pskInput .disabled = sk;
+      ssidInput.required = !sk;
+    });
+
+    okBtn.addEventListener('click', () => {
+      const skipBridge = skipBox.checked;
+      const ssid = ssidInput.value.trim();
+      const psk  = pskInput.value;   // don't strip — passwords can be space-padded
+      if (!skipBridge && !ssid) {
+        ssidInput.focus();
+        ssidInput.style.borderColor = 'var(--bad)';
+        return;
+      }
+      close({ ssid, psk, skipBridge });
+    });
+
+    setTimeout(() => ssidInput.focus(), 50);
+  });
 }
 
 // ============== Auto-updater ==============
@@ -665,25 +769,80 @@ function updateCamOverlaySize() {
 new ResizeObserver(updateCamOverlaySize).observe(camFrame);
 window.addEventListener('resize', updateCamOverlaySize);
 
+// Most recent tags array, kept for the click hit-test. Holds the
+// `corners` field even when the broadcast didn't (we use the WS
+// `tags_full` payload).
+let _camLastTags = [];
+let _camSelectedId = -1;
+
 function renderCamOverlay(tags, bestId) {
   camOverlay.innerHTML = '';
   if (!tags) return;
+  _camLastTags = tags;
   for (const t of tags) {
     if (!t.corners) continue;
     const isBest = bestId != null && t.id === bestId;
+    const isSelected = _camSelectedId === t.id;
+    const cls = isSelected ? 'selected'
+              : isBest     ? 'best'
+              : 'other';
     const points = t.corners.map(([x, y]) => `${x},${y}`).join(' ');
     camOverlay.appendChild(camSvg('polygon', {
       points,
-      class: 'tag-poly ' + (isBest ? 'best' : 'other'),
+      class: 'tag-poly ' + cls,
     }));
     const cx = t.corners.reduce((a, [x]) => a + x, 0) / 4;
     const cy = t.corners.reduce((a, [, y]) => a + y, 0) / 4;
     camOverlay.appendChild(camSvg('text', {
       x: cx, y: cy,
       'text-anchor': 'middle', 'dominant-baseline': 'middle',
-      class: 'tag-label ' + (isBest ? 'best' : 'other'),
+      class: 'tag-label ' + cls,
     }, String(t.id)));
   }
+}
+
+// Hit-test a click against the most-recent tags. Click coords come
+// in viewport space; we translate into the camera image's native
+// pixel space (the same space `corners` uses) so the test works at
+// any window size.
+function camClickToTagId(ev) {
+  if (!camFrameSize.w || !camFrameSize.h || !_camLastTags.length) return null;
+  const imgRect = camImg.getBoundingClientRect();
+  if (imgRect.width <= 0 || imgRect.height <= 0) return null;
+  const px = (ev.clientX - imgRect.left) * (camFrameSize.w / imgRect.width);
+  const py = (ev.clientY - imgRect.top)  * (camFrameSize.h / imgRect.height);
+  // Score by smallest tag whose bounding box contains the click —
+  // smallest wins so overlapping tags resolve to the more specific.
+  let best = null;
+  let bestArea = Infinity;
+  for (const t of _camLastTags) {
+    if (!t.corners) continue;
+    const xs = t.corners.map(([x]) => x);
+    const ys = t.corners.map(([, y]) => y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    if (px < minX || px > maxX || py < minY || py > maxY) continue;
+    const area = (maxX - minX) * (maxY - minY);
+    if (area < bestArea) { bestArea = area; best = t; }
+  }
+  return best ? best.id : null;
+}
+
+async function camPostTarget(id) {
+  if (!camDevice) return;
+  const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
+  try {
+    const r = await fetch(`${base}/api/target`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      _camSelectedId = data.selected_tag_id ?? -1;
+      $('#cam-clear-target').hidden = _camSelectedId < 0;
+    }
+  } catch (e) { /* ignore — server will reflect state on next frame */ }
 }
 
 function fmtMetersUS(m) {
@@ -763,6 +922,50 @@ function applyCamSnapshot(s) {
 }
 
 camDevicePick.addEventListener('change', onCamDeviceChange);
+
+// Click-to-lock: clicking on a tag tells the device "lock onto
+// this id." Clicking on empty space clears the lock. Same UX as
+// the legacy team dashboard.
+camFrame.addEventListener('click', (ev) => {
+  if (!camDevice) return;
+  // Don't intercept clicks on toolbar children.
+  if (ev.target.closest('.cam-toolbar')) return;
+  const id = camClickToTagId(ev);
+  if (id == null) {
+    // Clicked outside any tag → clear.
+    if (_camSelectedId >= 0) camPostTarget(null);
+    return;
+  }
+  // Toggle: click the same tag again to clear.
+  camPostTarget(id === _camSelectedId ? null : id);
+});
+
+$('#cam-clear-target').addEventListener('click', () => camPostTarget(null));
+
+// Quality presets. Three knobs in one — capture stays at full res
+// for AprilTag detection range; we tune what the BROWSER receives.
+const CAM_QUALITY_PRESETS = {
+  low:  { stream_resolution: [480, 270], stream_quality: 50, stream_max_fps: 20 },
+  med:  { stream_resolution: [640, 360], stream_quality: 60, stream_max_fps: 30 },
+  high: { stream_resolution: [960, 540], stream_quality: 75, stream_max_fps: 30 },
+};
+$('#cam-quality').addEventListener('change', async (ev) => {
+  if (!camDevice) return;
+  const preset = CAM_QUALITY_PRESETS[ev.target.value];
+  if (!preset) return;
+  const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
+  try {
+    await fetch(`${base}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(preset),
+    });
+    // Force the <img> to reconnect so the new resolution takes
+    // effect (browsers stick to whatever resolution they got on
+    // the initial multipart-MJPEG content-type sniff).
+    camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+  } catch (e) { /* user can retry */ }
+});
 
 // Hook into the discovery update we already process for the
 // Devices tab. preload registers each `onUpdate(cb)` call as an

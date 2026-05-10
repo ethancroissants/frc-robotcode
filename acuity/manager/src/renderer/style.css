@@ -347,6 +347,45 @@ code {
   padding: 1px 5px; border-radius: 3px;
 }
 
+/* Update-firmware credentials form. */
+.upd-form {
+  display: flex; flex-direction: column; gap: 12px;
+  margin: 12px 0 16px;
+}
+.upd-form > label {
+  display: flex; flex-direction: column; gap: 5px;
+  font: 700 10px var(--sans);
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-soft);
+}
+.upd-form input[type="text"],
+.upd-form input[type="password"] {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  padding: 9px 11px;
+  font: 14px var(--mono);
+  outline: none;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.upd-form input:focus {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.upd-form input:disabled {
+  background: var(--panel-2); color: var(--text-soft);
+  cursor: not-allowed;
+}
+.upd-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  text-transform: none !important;
+  font-weight: 600 !important;
+  color: var(--text) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.04em !important;
+}
+
 /* =========== Motion / loading primitives =========== */
 
 /* Respect users with reduced-motion preference — animation goes from
@@ -595,14 +634,22 @@ button.busy .button-spinner {
   min-height: 0;
 }
 
+/* The camera frame catches clicks (click-to-lock-target). */
+.cam-frame { cursor: crosshair; }
+
 /* SVG tag overlays — shared visual with the device dashboard. */
 .tag-poly {
   fill: transparent; stroke-width: 2;
   vector-effect: non-scaling-stroke;
   transition: stroke-width 0.12s ease-out;
 }
-.tag-poly.best  { stroke: #00dc00; stroke-width: 3; }
-.tag-poly.other { stroke: #ff8a32; stroke-width: 1.5; }
+.tag-poly.best     { stroke: #00dc00; stroke-width: 3; }
+.tag-poly.other    { stroke: #ff8a32; stroke-width: 1.5; }
+.tag-poly.selected {
+  stroke: #00ff7d;
+  stroke-width: 4;
+  fill: rgba(0, 255, 125, 0.10);
+}
 .tag-label {
   font: 700 12px var(--mono);
   paint-order: stroke;
@@ -610,8 +657,9 @@ button.busy .button-spinner {
   fill: #ffffff;
   pointer-events: none;
 }
-.tag-label.best  { fill: #00ff00; }
-.tag-label.other { fill: #ffb380; }
+.tag-label.best     { fill: #00ff00; }
+.tag-label.other    { fill: #ffb380; }
+.tag-label.selected { fill: #00ff7d; }
 
 /* Detection list rows. */
 .det-list {

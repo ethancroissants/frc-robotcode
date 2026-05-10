@@ -50,12 +50,105 @@ function streamTo(window, line) {
 
 function register(ipcMain) {
   // Pull latest install.sh and re-run it. Idempotent on the device.
+  // Use this only when the device already has internet (e.g. it's
+  // on home WiFi). For deployed Pis sitting on a no-internet team
+  // radio, use `ssh:run-update-bridged` below instead.
   ipcMain.handle('ssh:run-update', async (event, target) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     const cmd = `curl -fsSL ${INSTALL_URL} | sudo bash`;
     streamTo(window, `[update] running: ${cmd}\n`);
     try {
       const { code } = await exec(target, cmd, (data) => streamTo(window, data));
+      streamTo(window, `[update] exit code: ${code}\n`);
+      return { ok: code === 0, code };
+    } catch (e) {
+      streamTo(window, `[update] error: ${e.message}\n`);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // Bridge-based update — for the common case where the device is
+  // sitting on the team radio (no internet). We:
+  //   1. Bring up wlan0 on a user-supplied internet WiFi via nmcli
+  //      (temporary connection profile, deleted on EXIT — including
+  //       on Ctrl-C / install.sh failure).
+  //   2. Force wlan0's default route to win (route-metric 50 vs
+  //      eth0's default 100), since the team ethernet has no
+  //      internet and apt would otherwise pick that route.
+  //   3. Sanity-check internet over wlan0 before running install.
+  //   4. Sync the wall clock from an HTTPS Date header — apt's
+  //      signature verifier rejects 'not yet live' signatures, and
+  //      a Pi without an RTC battery often boots into the past.
+  //   5. curl + sudo bash the install.sh from GitHub.
+  //   6. Trap-EXIT cleanup tears the bridge down regardless of
+  //      success or failure.
+  // Returns when install.sh exits OR the SSH session dies (which
+  // happens if install.sh restarts the dashboard service itself).
+  ipcMain.handle('ssh:run-update-bridged', async (event, { target, ssid, psk }) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!ssid) return { ok: false, error: 'WiFi SSID is required' };
+
+    // shlex-quote-equivalent for bash. We control the surrounding
+    // command, so single-quote-and-escape any embedded single quotes
+    // is enough.
+    const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const ssidQ = sq(ssid);
+    const pskQ  = sq(psk || '');
+    const installUrl = INSTALL_URL;
+
+    const script = [
+      'set -e',
+      // Trap cleanup tears the temp profile down on any exit path.
+      'cleanup() {',
+      '  echo "[bridge] tearing down temp WiFi"',
+      '  sudo nmcli connection down acuity-temp-update >/dev/null 2>&1 || true',
+      '  sudo nmcli connection delete acuity-temp-update >/dev/null 2>&1 || true',
+      '}',
+      'trap cleanup EXIT',
+      'if ! command -v nmcli >/dev/null; then',
+      '  echo "[bridge] nmcli missing — Pi OS Bookworm should ship it; aborting" >&2',
+      '  exit 2',
+      'fi',
+      'if command -v rfkill >/dev/null; then sudo rfkill unblock wifi || true; fi',
+      'sudo nmcli radio wifi on || true',
+      'sleep 1',
+      `sudo nmcli connection add type wifi con-name acuity-temp-update ` +
+        `ifname wlan0 ssid ${ssidQ} >/dev/null`,
+      ...(psk ? [
+        `sudo nmcli connection modify acuity-temp-update ` +
+          `wifi-sec.key-mgmt wpa-psk wifi-sec.psk ${pskQ}`,
+      ] : []),
+      'sudo nmcli connection modify acuity-temp-update ' +
+        'connection.autoconnect no ' +
+        'ipv4.route-metric 50 ipv6.route-metric 50',
+      'echo "[bridge] connecting wlan0 to the temp WiFi…"',
+      'sudo nmcli connection up acuity-temp-update',
+      'sleep 5',
+      'echo "[bridge] verifying internet over wlan0…"',
+      'if ! curl -s --max-time 8 --interface wlan0 -o /dev/null ' +
+        'http://archive.raspberrypi.com/debian/dists/trixie/InRelease; then',
+      '  echo "[bridge] cannot reach the package mirror over wlan0." >&2',
+      '  ip route >&2 || true',
+      '  exit 3',
+      'fi',
+      // Sync clock from HTTPS Date header.
+      'echo "[bridge] syncing system clock from HTTPS Date header…"',
+      'http_date=$(curl -sI --max-time 8 --interface wlan0 ' +
+        'https://archive.raspberrypi.com/ ' +
+        '| awk -F\': \' \'tolower($1)=="date"{print $2}\' | tr -d \'\\r\')',
+      'if [ -n "$http_date" ]; then',
+      '  sudo date -u -s "$http_date" >/dev/null && echo "[bridge] clock set to $(date -u)"',
+      'else',
+      '  echo "[bridge] could not read Date header — continuing anyway" >&2',
+      'fi',
+      'echo "[update] running install.sh from GitHub…"',
+      `curl -fsSL ${installUrl} | sudo bash`,
+      'echo "[update] install.sh finished"',
+    ].join('\n');
+
+    streamTo(window, '[bridge] starting bridged firmware update\n');
+    try {
+      const { code } = await exec(target, script, (data) => streamTo(window, data));
       streamTo(window, `[update] exit code: ${code}\n`);
       return { ok: code === 0, code };
     } catch (e) {

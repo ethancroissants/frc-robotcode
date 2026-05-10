@@ -104,12 +104,23 @@ logging.basicConfig(level=logging.INFO,
 # ---------------------------------------------------------------------
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    # Camera
+    # Capture — full resolution, used for AprilTag detection so distance
+    # range stays good. Browser stream is downscaled separately (below).
     "camera_index":     0,
     "resolution":       [1280, 720],   # [w, h]
     "target_fps":       30,
     "flip_horizontal":  False,
     "flip_vertical":    False,
+
+    # Stream — what the browser/Manager actually receives. Defaults
+    # tuned for 2.4 GHz WiFi: 640x360 @ q=60 is ~25 KB/frame, ~600
+    # KB/s @ 30 fps — comfortable on a team radio. If you have wired
+    # ethernet or 5 GHz you can crank both up via the Settings tab.
+    # "stream_max_fps": 0 means "match capture FPS"; set lower (e.g.
+    # 20) to throttle stream without slowing detection.
+    "stream_resolution": [640, 360],
+    "stream_quality":    60,           # JPEG q. 55-65 is the AprilTag-decodable floor.
+    "stream_max_fps":    0,
 
     # Detection
     "tag_family":       "tag36h11",
@@ -120,8 +131,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "nt_team":          0,             # 0 → server mode (publish only)
     "nt_server_host":   "",            # blank → use roborio-{team}-frc.local
 
-    # UI
-    "preferred_tag_ids": [],           # empty → "any tag" is the best target
+    # Targeting
+    # If the operator clicks a tag in the camera view, that ID lands
+    # here and overrides automatic best-target selection. Set to -1
+    # to clear. preferred_tag_ids is the next fallback (empty list →
+    # "any tag is fair game").
+    "selected_tag_id":   -1,
+    "preferred_tag_ids": [],
 }
 
 
@@ -225,10 +241,33 @@ class CameraThread(threading.Thread):
             elif s["flip_vertical"]:
                 frame = cv2.flip(frame, 0)
 
-            # Encode once per frame for the MJPEG stream. Quality 85
-            # is the sweet spot for "looks fine, fits a Pi-Zero-2-W's
-            # WiFi uplink at 30 fps." Bump for higher-tier SKUs.
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Encode once per frame for the MJPEG stream. Two knobs the
+            # operator can tweak from the Settings tab to trade image
+            # quality for network bandwidth + latency:
+            #
+            #   stream_resolution: [w, h] — we cv2.resize the frame
+            #     down to this size before encoding. Big win on WiFi:
+            #     1280x720 → 640x360 cuts the JPEG roughly 4x. Set to
+            #     match `resolution` for no downscale.
+            #
+            #   stream_quality: JPEG quality 5..95. 55-65 is the floor
+            #     where AprilTags stay decodable for the operator and
+            #     network traffic is minimal.
+            #
+            #   stream_max_fps: stream-side FPS cap (0 → match capture).
+            #     Useful when the camera has to run high FPS for the
+            #     detector but the operator only needs a 20 fps preview.
+            stream_w, stream_h = (s["stream_resolution"] or [frame.shape[1], frame.shape[0]])
+            if stream_w != frame.shape[1] or stream_h != frame.shape[0]:
+                stream_frame = cv2.resize(
+                    frame, (int(stream_w), int(stream_h)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                stream_frame = frame
+            jpeg_q = max(5, min(95, int(s["stream_quality"])))
+            ok, jpg = cv2.imencode(".jpg", stream_frame,
+                                   [cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
             if not ok:
                 continue
 
@@ -390,12 +429,27 @@ class TagDetectorThread(threading.Thread):
                    s: dict[str, Any]) -> Optional[Detection]:
         if not tags:
             return None
+
+        # Tier 1: an operator-clicked tag wins outright if it's still
+        # in view. This is the "lock onto THIS tag" behaviour the
+        # legacy team dashboard had — click the tag in the camera
+        # frame and the robot keeps aiming at it even if a closer
+        # nuisance tag pops into frame later.
+        sel = int(s.get("selected_tag_id", -1))
+        if sel >= 0:
+            for t in tags:
+                if t["id"] == sel:
+                    return t
+            # Fall through — clicked tag isn't visible right now.
+
+        # Tier 2: filter to the preferred-IDs allowlist if set.
         preferred = set(int(x) for x in s.get("preferred_tag_ids", []))
         if preferred:
             filt = [t for t in tags if t["id"] in preferred]
             if filt:
                 tags = filt
-        # Largest tag wins — proxies for closest visible.
+
+        # Tier 3: largest visible tag wins — proxies for closest.
         return max(tags, key=lambda t: t["area"])
 
 
@@ -705,21 +759,34 @@ async def favicon() -> Any:
 
 @app.get("/stream.mjpg")
 async def stream_mjpg() -> StreamingResponse:
-    """Multipart MJPEG. Not transcoded — we reuse the JPEG the camera
-    thread already encoded, which is the cheapest possible video
-    feed for a Pi Zero 2 W."""
+    """Multipart MJPEG. Reuses the JPEG the camera thread already
+    encoded — no per-request re-encode. Honors `stream_max_fps`
+    (set in /api/settings) to throttle stream FPS independently of
+    capture, and yields TCP backpressure-aware: if the client is
+    slow to drain, the next yield blocks, the camera thread keeps
+    going, and we naturally drop intermediate frames rather than
+    queuing them."""
     boundary = "acuity-frame"
 
     async def generator():
         last_ts = 0.0
+        last_yield = 0.0
         while True:
             await asyncio.sleep(0.005)
+            s = _settings_provider()
+            max_fps = int(s.get("stream_max_fps", 0) or 0)
+            min_interval = (1.0 / max_fps) if max_fps > 0 else 0.0
+
             with camera._lock:
                 ts = camera.latest_ts
                 jpg = camera.latest_jpeg
             if jpg is None or ts == last_ts:
                 continue
+            now = time.monotonic()
+            if min_interval > 0 and (now - last_yield) < min_interval:
+                continue
             last_ts = ts
+            last_yield = now
             yield (b"--" + boundary.encode() + b"\r\n"
                    b"Content-Type: image/jpeg\r\n"
                    b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n"
@@ -728,7 +795,28 @@ async def stream_mjpg() -> StreamingResponse:
     return StreamingResponse(
         generator(),
         media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/target")
+async def api_target(req: Request) -> JSONResponse:
+    """Operator clicked a tag in the camera view. Latch that tag ID
+    so it wins automatic best-target selection until cleared.
+
+    Body:
+      {"id": <int>}     # lock to that tag id
+      {"id": null}      # clear the lock (auto-pick again)
+
+    The lock survives across reboots because it's stored in the same
+    settings JSON as the rest of the config."""
+    body = await req.json()
+    tag_id = body.get("id") if isinstance(body, dict) else None
+    new = -1 if tag_id is None else int(tag_id)
+    with _settings_lock:
+        _settings["selected_tag_id"] = new
+        _save_settings(_settings)
+    return JSONResponse({"selected_tag_id": new})
 
 
 # ----- API: detections (live) -----

@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('acuity', {
   ssh: {
     connect:    (target) => ipcRenderer.invoke('ssh:connect', target),
     runUpdate:  (target) => ipcRenderer.invoke('ssh:run-update', target),
+    runUpdateBridged: (target, ssid, psk) =>
+      ipcRenderer.invoke('ssh:run-update-bridged', { target, ssid, psk }),
     reboot:     (target) => ipcRenderer.invoke('ssh:reboot', target),
     forgetWifi: (target) => ipcRenderer.invoke('ssh:forget-wifi', target),
     diagnose:   (target) => ipcRenderer.invoke('ssh:diagnose', target),
