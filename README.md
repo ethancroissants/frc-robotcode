@@ -23,3 +23,6 @@ That's it. The control panel handles the rest.
 
 See [`documentation/README.md`](documentation/README.md) for the project
 layout, controls, and contributor notes.
+
+## Acuity [PRE-ALPHA]
+This project also includes Acuity, our upcoming hardware project for other teams, feel free to check it out. It's built on a modified version of our team, COLD FUSION's VisionPi coprocessor system which gained some attention. 

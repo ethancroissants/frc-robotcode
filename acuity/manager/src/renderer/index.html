@@ -5,6 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Acuity Manager</title>
   <link rel="stylesheet" href="style.css" />
+
+  <!--
+    xterm.js terminal libraries — loaded as UMD globals here so the
+    renderer can use `window.Terminal` / `window.FitAddon` without
+    needing a module bundler. We don't have a bundler in this
+    project, and Electron's renderer can't resolve bare imports
+    like `@xterm/xterm` from inside node_modules, which is why an
+    earlier `await import('@xterm/xterm')` was silently failing
+    and the in-app terminal never came up.
+
+    The relative path resolves both in dev (npm install puts the
+    packages two dirs up) and in packaged builds (electron-builder
+    bundles node_modules into the asar with the same layout).
+  -->
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
 </head>
 <body>
   <header class="topbar">

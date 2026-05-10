@@ -18,10 +18,46 @@ function exec(target, cmd, onData) {
     const conn = new Client();
     conn
       .on('ready', () => {
-        conn.exec(cmd, (err, stream) => {
+        // Wrap every remote command in `sudo -S` and feed it the SSH
+        // password through stdin. Why: ssh2's exec channel has no
+        // TTY, and any `sudo` call inside the script (the bridge
+        // update is full of `sudo nmcli` / `sudo systemctl`) would
+        // otherwise die with "a terminal is required to read the
+        // password" the first time we hit a Pi whose SSH user
+        // doesn't have full NOPASSWD configured. With -S, sudo reads
+        // its first line of stdin as the password, then runs the
+        // command — and once we're root, every nested `sudo` inside
+        // the script is a no-op (root→root authenticates without a
+        // prompt). The chicken-and-egg is real: a fresh Pi can't
+        // run install.sh (which provisions acuity-root + NOPASSWD)
+        // until we can already sudo. Feeding the password breaks it.
+        //
+        // -p '' suppresses sudo's prompt so it doesn't bleed into
+        // streamed UI log output. -k forgets any cached creds so
+        // the password we just sent is what gets used (otherwise a
+        // long-lived sudo timestamp could mask wrong-password bugs).
+        // base64-encode the inner script so we don't have to think
+        // about nested-shell quoting; bash decodes + execs it.
+        const encoded = Buffer.from(cmd, 'utf8').toString('base64');
+        const wrapped =
+          `sudo -k -S -p '' bash -c "$(echo ${encoded} | base64 -d)"`;
+
+        conn.exec(wrapped, (err, stream) => {
           if (err) { reject(err); conn.end(); return; }
-          stream.on('data', (data) => onData(data.toString()));
-          stream.stderr.on('data', (data) => onData(data.toString()));
+
+          // Feed sudo the password. -S reads up to one '\n' for
+          // the password, then everything else on stdin is the
+          // command's stdin (our scripts don't read it).
+          if (target.password) {
+            stream.write(target.password + '\n');
+          } else {
+            // No password set: send a blank line so sudo fails
+            // immediately with "no password" rather than hanging.
+            stream.write('\n');
+          }
+
+          stream.on('data',        (d) => onData(d.toString()));
+          stream.stderr.on('data', (d) => onData(d.toString()));
           stream.on('close', (code) => {
             conn.end();
             resolve({ code });
@@ -29,14 +65,19 @@ function exec(target, cmd, onData) {
         });
       })
       .on('error', reject)
+      // Some Pi OS sshd configs treat password auth as a
+      // keyboard-interactive challenge instead of straight
+      // PasswordAuth. Without `tryKeyboard: true` and a handler,
+      // ssh2 hangs at the auth phase against those builds.
+      .on('keyboard-interactive', (_n, _i, _l, _p, finish) => {
+        finish([target.password || '']);
+      })
       .connect({
         host: target.host,
         port: target.port || 22,
-        username: target.user || 'acuity',
-        // Production: use installed key. Dev: fall back to password
-        // if user typed one. Real Manager will prompt + remember.
-        privateKey: target.privateKey,
+        username: target.user || 'acuity-root',
         password: target.password,
+        tryKeyboard: true,
         readyTimeout: 8000,
       });
   });

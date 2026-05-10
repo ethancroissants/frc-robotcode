@@ -7,6 +7,17 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Touch the xterm UMD packages here so electron-builder keeps them
+// bundled. The renderer loads them via <script> tags pointing at
+// `../../node_modules/@xterm/...`, but electron-builder's pruning
+// step removes deps it can't trace through `require()` graphs — so
+// without these requires the asar would ship without them and the
+// terminal feature would silently break in packaged builds. The
+// require calls are otherwise unused; they're a "keep this on disk"
+// signal, not real imports.
+try { require('@xterm/xterm');     } catch (e) { /* dev-only; ignore */ }
+try { require('@xterm/addon-fit'); } catch (e) { /* dev-only; ignore */ }
+
 contextBridge.exposeInMainWorld('acuity', {
   // mDNS discovery — emits { devices: [{name, ip, port, version}] }
   discovery: {

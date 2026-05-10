@@ -414,17 +414,34 @@ let termId = null;
 
 async function openTerminal(device) {
   if (!device) return;
-  const { Terminal }  = await import('@xterm/xterm');
-  const { FitAddon }  = await import('@xterm/addon-fit');
+  // xterm + FitAddon are loaded as UMD globals via <script> tags in
+  // index.html (we don't bundle modules). Both UMD wrappers can
+  // expose either the class directly or wrap it in a namespace
+  // object — handle both.
+  const TermClass =
+    typeof Terminal !== 'undefined' ? Terminal : window.Terminal;
+  const FitClass =
+    (window.FitAddon && window.FitAddon.FitAddon) ||
+    (typeof FitAddon !== 'undefined' ? FitAddon : window.FitAddon);
+  if (!TermClass || !FitClass) {
+    alert(
+      'xterm libraries didn\'t load. The terminal feature is broken on '
+      + 'this build — please report it. ('
+      + (TermClass ? '' : 'no Terminal ')
+      + (FitClass  ? '' : 'no FitAddon')
+      + ')'
+    );
+    return;
+  }
 
   if (term) { term.dispose(); term = null; }
-  term = new Terminal({
+  term = new TermClass({
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
     fontSize: 12,
     theme: { background: '#0e1014', foreground: '#e7e9ef' },
     convertEol: true,
   });
-  const fit = new FitAddon();
+  const fit = new FitClass();
   term.loadAddon(fit);
   const host = $('#term-host');
   host.innerHTML = '';
