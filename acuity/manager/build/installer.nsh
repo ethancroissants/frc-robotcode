@@ -33,11 +33,10 @@
   !define MUI_UNFINISHPAGE_TITLE "Acuity Manager removed"
   !define MUI_UNFINISHPAGE_TEXT "Acuity Manager has been removed from your computer.$\r$\n$\r$\nYour Acuity devices are unaffected. Reinstall Manager any time from acuity-releases on GitHub."
 
-  ; Stretch the sidebar BMP to fill the wizard's content panel.
-  ; Without NOSTRETCH set, NSIS's MUI2 default centers a 164x314 BMP
-  ; on a 164x314 placeholder and the result is identical, but being
-  ; explicit means a future-us bumping the BMP to 200x320 won't get
-  ; quietly downscaled.
-  !define MUI_HEADERIMAGE
-  !define MUI_HEADERIMAGE_RIGHT
+  ; (Don't !define MUI_HEADERIMAGE / MUI_HEADERIMAGE_RIGHT here —
+  ; electron-builder sets both on the makensis command line when
+  ; `nsis.installerHeader` is configured in package.json. Defining
+  ; them a second time aborts makensis with
+  ;   !define: "MUI_HEADERIMAGE" already defined!
+  ; which we hit on the v0.1.14 release build before this change.)
 !macroend
