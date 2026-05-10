@@ -1,12 +1,22 @@
-// Acuity Manager — library installer.
+// Acuity Manager — robot project integration.
 //
-// Installs the Acuity client library into a robot project the user
-// already has on disk. We support three flavors:
+// Drops a single self-contained NT4 helper file into a robot project
+// the user already has on disk. Three flavors:
 //
-//   * Java (WPILib)  → drop Acuity.json into <project>/vendordeps/
-//   * C++  (WPILib)  → same JSON, same place (vendordep is shared)
-//   * Python (robotpy) → add `acuity-vision>=0.1` to
-//                        <project>/pyproject.toml [tool.robotpy].requires
+//   * Java (WPILib)  → src/main/java/frc/robot/acuity/AcuityClient.java
+//   * C++  (WPILib)  → src/main/include/acuity/AcuityClient.h
+//   * Python (robotpy) → acuity_client.py at project root
+//
+// Each helper has zero external dependencies — it only uses NT4 APIs
+// that ship with WPILib / robotpy. No vendordep, no Maven artifact,
+// no PyPI package: nothing the user has to fetch over the internet.
+// The previous version of this code wrote an Acuity.json vendordep
+// pointing at a `tech.acuity:acuity-vision` artifact that never
+// existed; teams hit that and either silently failed or burned half
+// an hour trying to figure out why "Manage Vendor Libraries" couldn't
+// resolve it. The drop-a-file approach trades polish (no in-IDE
+// "Acuity Vision" entry in the vendordep list) for "it actually
+// compiles and runs on first try", which is the right trade.
 //
 // Detection: we sniff the chosen folder for the right marker file
 // (build.gradle for Java/C++, pyproject.toml for Python) and let
@@ -16,16 +26,16 @@ const { app, dialog, ipcMain, shell } = require('electron');
 const fs    = require('fs');
 const path  = require('path');
 
-// In a packaged build, electron-builder copies the vendordep JSON
-// into `process.resourcesPath/libraries/Acuity.json` via the
-// `extraResources` config in package.json. In dev (`npm run dev`)
-// it lives next to the repo at `../../../libraries/Acuity.json`.
-// Try the packaged path first, fall back to dev.
-function vendordepPath() {
+// In a packaged build, electron-builder copies the template tree into
+// `process.resourcesPath/libraries/templates/` via the `extraResources`
+// config in package.json. In dev (`npm run dev`) it lives next to the
+// repo at `../../../libraries/templates/`. Try the packaged path
+// first, fall back to dev.
+function templatesDir() {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'libraries', 'Acuity.json');
+    return path.join(process.resourcesPath, 'libraries', 'templates');
   }
-  return path.join(__dirname, '..', '..', '..', 'libraries', 'Acuity.json');
+  return path.join(__dirname, '..', '..', '..', 'libraries', 'templates');
 }
 
 function detectProjectType(dir) {
@@ -33,99 +43,117 @@ function detectProjectType(dir) {
 
   const has = (rel) => fs.existsSync(path.join(dir, rel));
 
-  // pyproject.toml + a [tool.robotpy] section → Python robotpy.
+  // pyproject.toml + a [tool.robotpy] section → robotpy.
   if (has('pyproject.toml')) {
     const txt = fs.readFileSync(path.join(dir, 'pyproject.toml'), 'utf8');
     if (txt.includes('robotpy')) return 'python';
   }
-  // robotpy projects also sometimes use robotpy.toml or robot.py at the root.
+  // robotpy projects also sometimes use robot.py at the root.
   if (has('robot.py') && has('pyproject.toml')) return 'python';
 
-  // WPILib Java/C++ projects ship build.gradle. We distinguish by the
-  // presence of a `src/main/cpp/` tree vs `src/main/java/`.
+  // WPILib Java/C++ projects ship build.gradle. Distinguish by which
+  // source tree is present.
   if (has('build.gradle')) {
     if (has(path.join('src', 'main', 'cpp')))  return 'cpp';
     if (has(path.join('src', 'main', 'java'))) return 'java';
-    return 'java';  // fall through — Java is the more common default
+    return 'java';  // sane default — Java is the more common WPILib path
   }
   return null;
 }
 
-function installVendordep(projectDir) {
-  const dest = path.join(projectDir, 'vendordeps', 'Acuity.json');
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.copyFileSync(vendordepPath(), dest);
-  return dest;
+// Where each helper file lands inside the user's project. Returned as
+// an absolute path. We mkdir -p the parent for them.
+function destPathFor(projectDir, lang) {
+  switch (lang) {
+    case 'java':
+      return path.join(projectDir,
+        'src', 'main', 'java', 'frc', 'robot', 'acuity', 'AcuityClient.java');
+    case 'cpp':
+      return path.join(projectDir,
+        'src', 'main', 'include', 'acuity', 'AcuityClient.h');
+    case 'python':
+      return path.join(projectDir, 'acuity_client.py');
+    default:
+      throw new Error(`unknown language: ${lang}`);
+  }
 }
 
-function installPythonDep(projectDir) {
-  // Idempotent edit of pyproject.toml's [tool.robotpy] requires list.
-  // We don't pull in a TOML parser — the section we touch is a simple
-  // line-level array literal in 99% of robotpy projects, and a
-  // text-level edit is the smallest change that works.
-  const tomlPath = path.join(projectDir, 'pyproject.toml');
-  let txt = fs.readFileSync(tomlPath, 'utf8');
-  if (txt.includes('"acuity-vision')) {
-    return { tomlPath, alreadyInstalled: true };
+function templatePathFor(lang) {
+  const root = templatesDir();
+  switch (lang) {
+    case 'java':   return path.join(root, 'AcuityClient.java');
+    case 'cpp':    return path.join(root, 'AcuityClient.h');
+    case 'python': return path.join(root, 'acuity_client.py');
+    default: throw new Error(`unknown language: ${lang}`);
   }
+}
 
-  // Find an existing `requires = [` array under `[tool.robotpy]`.
-  const reqRe = /(\[tool\.robotpy\][\s\S]*?requires\s*=\s*\[)([\s\S]*?)(\])/m;
-  const m = txt.match(reqRe);
-  if (m) {
-    const newList = m[2].replace(/\s*$/, '') +
-      (m[2].trim() ? ',\n  ' : '\n  ') + '"acuity-vision>=0.1"\n';
-    txt = txt.replace(reqRe, `$1${newList}$3`);
-  } else if (/\[tool\.robotpy\]/.test(txt)) {
-    txt = txt.replace(
-      /\[tool\.robotpy\][^\n]*\n/,
-      (head) => head + 'requires = [\n  "acuity-vision>=0.1"\n]\n'
+function installHelper(projectDir, lang) {
+  const src  = templatePathFor(lang);
+  const dest = destPathFor(projectDir, lang);
+  if (!fs.existsSync(src)) {
+    throw new Error(
+      `template missing on disk: ${src}. ` +
+      'If this is a packaged Manager build, the libraries/templates/ ' +
+      'tree was not bundled — file a bug.'
     );
-  } else {
-    txt += '\n[tool.robotpy]\nrequires = [\n  "acuity-vision>=0.1"\n]\n';
   }
-  fs.writeFileSync(tomlPath, txt);
-  return { tomlPath, alreadyInstalled: false };
+  // Don't trip people up by silently overwriting a file they hand-edited.
+  // If the destination already exists we keep a `.bak` so they can recover.
+  let alreadyInstalled = false;
+  if (fs.existsSync(dest)) {
+    const before = fs.readFileSync(dest);
+    const after  = fs.readFileSync(src);
+    if (before.equals(after)) {
+      alreadyInstalled = true;
+    } else {
+      fs.copyFileSync(dest, dest + '.bak');
+    }
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
+  return { dest, alreadyInstalled };
 }
 
 function snippetForLang(lang) {
   if (lang === 'java') {
     return `// In Robot.java
-import tech.acuity.AcuityVision;
+import frc.robot.acuity.AcuityClient;
 
-private final AcuityVision vision = AcuityVision.getInstance();
+private final AcuityClient acuity = AcuityClient.getInstance();
 
 @Override
-public void robotPeriodic() {
-  vision.getBestTag().ifPresent(tag -> {
-    SmartDashboard.putNumber("acuity/id",         tag.id);
-    SmartDashboard.putNumber("acuity/distance_m", tag.distanceMeters);
-    SmartDashboard.putNumber("acuity/yaw_deg",    tag.yawDeg);
+public void teleopPeriodic() {
+  acuity.getBestTag().ifPresent(tag -> {
+    SmartDashboard.putNumber("acuity/id",         tag.id());
+    SmartDashboard.putNumber("acuity/distance_m", tag.distanceMeters());
+    SmartDashboard.putNumber("acuity/yaw_deg",    tag.yawDeg());
   });
 }`;
   }
   if (lang === 'cpp') {
     return `// In Robot.cpp
-#include <acuity/AcuityVision.h>
+#include "acuity/AcuityClient.h"
 
-void Robot::RobotPeriodic() {
-  if (auto tag = acuity::AcuityVision::GetInstance().GetBestTag()) {
+acuity::AcuityClient acuity{};
+
+void Robot::TeleopPeriodic() {
+  if (auto tag = acuity.GetBestTag()) {
     frc::SmartDashboard::PutNumber("acuity/id",         tag->id);
     frc::SmartDashboard::PutNumber("acuity/distance_m", tag->distanceMeters);
     frc::SmartDashboard::PutNumber("acuity/yaw_deg",    tag->yawDeg);
   }
 }`;
   }
-  // python
   return `# In robot.py
-import acuity_vision
+from acuity_client import AcuityClient
 
 class MyRobot(wpilib.TimedRobot):
     def robotInit(self):
-        self.vision = acuity_vision.AcuityVision()
+        self.acuity = AcuityClient()
 
-    def robotPeriodic(self):
-        tag = self.vision.get_best_tag()
+    def teleopPeriodic(self):
+        tag = self.acuity.get_best_tag()
         if tag is not None:
             wpilib.SmartDashboard.putNumber("acuity/id",         tag.id)
             wpilib.SmartDashboard.putNumber("acuity/distance_m", tag.distance_m)
@@ -151,19 +179,15 @@ function register(ipcMain) {
       if (!fs.existsSync(dir)) {
         return { ok: false, error: 'folder no longer exists' };
       }
-      if (lang === 'java' || lang === 'cpp') {
-        const dest = installVendordep(dir);
-        return { ok: true, action: 'wrote-vendordep', destPath: dest };
+      if (!['java', 'cpp', 'python'].includes(lang)) {
+        return { ok: false, error: `unknown language: ${lang}` };
       }
-      if (lang === 'python') {
-        const r = installPythonDep(dir);
-        return {
-          ok: true,
-          action: r.alreadyInstalled ? 'already-installed' : 'updated-pyproject',
-          tomlPath: r.tomlPath,
-        };
-      }
-      return { ok: false, error: `unknown language: ${lang}` };
+      const r = installHelper(dir, lang);
+      return {
+        ok:        true,
+        action:    r.alreadyInstalled ? 'already-installed' : 'wrote-helper',
+        destPath:  r.dest,
+      };
     } catch (e) {
       return { ok: false, error: e.message };
     }

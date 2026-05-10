@@ -44,8 +44,8 @@
     ],
     "extraResources": [
       {
-        "from": "../libraries/Acuity.json",
-        "to":   "libraries/Acuity.json"
+        "from": "../libraries/templates",
+        "to":   "libraries/templates"
       }
     ],
     "publish": [

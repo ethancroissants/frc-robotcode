@@ -48,7 +48,7 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -152,6 +152,44 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # "any tag is fair game").
     "selected_tag_id":   -1,
     "preferred_tag_ids": [],
+
+    # Crosshair calibration. The robot may have its launcher / arm
+    # mounted off-axis from the camera; teams calibrate by aiming at
+    # a tag, marking where the projectile actually lands relative to
+    # the image center, and saving those normalized pixel offsets
+    # here. Once set, the published yaw_deg / pitch_deg are offsets
+    # from the CROSSHAIR, not from the optical center — so robot code
+    # can run a heading PID straight off the topic and hit the spot
+    # the human calibrated. Range [-1, 1] (full frame). Defaults to
+    # the optical center.
+    "crosshair_x":        0.0,
+    "crosshair_y":        0.0,
+
+    # ----- Color-blob (game-piece) pipeline -----
+    #
+    # Optional second detector that runs in the same thread, on the
+    # same frame, after AprilTag detection finishes. Off by default
+    # because most teams just want tags; flip on via the dashboard
+    # Settings tab or `POST /api/settings {"enable_objects": true}`.
+    #
+    # CPU cost on a Pi Zero 2 W at default settings: ~5 ms/frame for
+    # a 320x240 mask. Comfortably within budget alongside AprilTag.
+    "enable_objects":     False,
+    # HSV thresholds (OpenCV ranges: H 0-179, S 0-255, V 0-255). The
+    # defaults match a saturated red game piece — tune via the
+    # dashboard's Settings tab, watching the live mask preview.
+    "hsv_lower":          [0,   100, 100],
+    "hsv_upper":          [10,  255, 255],
+    # Drop blobs smaller than this (in PIXELS, post-downscale). Stops
+    # the detector from latching onto noise.
+    "min_object_area_px": 200,
+    # Hard cap on results per frame so a noisy mask can't OOM the
+    # NT all-objects payload.
+    "max_objects":        5,
+    # Run the mask at original / N resolution. 2 is a good speed/
+    # accuracy trade for a Pi Zero 2 W; bump to 1 if you have CPU
+    # headroom and want sub-pixel object centers.
+    "object_downscale":   2,
 }
 
 
@@ -361,15 +399,34 @@ class TagDetectorThread(threading.Thread):
             s = self._settings()
             tags = self._detect(mono, w, h, s)
             best = self._pick_best(tags, s)
+
+            # Optional color-blob pass on the same BGR frame. Off by
+            # default; toggled per-frame via settings so the operator
+            # can A/B test without restarting.
+            objects: list[dict[str, Any]] = []
+            best_object: Optional[dict[str, Any]] = None
+            if bool(s.get("enable_objects", False)):
+                objects = self._detect_objects(bgr, w, h, s)
+                if objects:
+                    best_object = max(objects, key=lambda o: o["area"])
+
+            wall_now = time.time()
             self._on_snapshot({
-                "tags":       tags,
-                "best":       best,
-                "frame_ts":   ts,
-                "width":      w,
-                "height":     h,
-                "fps":        self._camera.fps,
-                "connected":  self._camera.connected,
-                "wall_ts":    time.time(),
+                "tags":         tags,
+                "best":         best,
+                "objects":      objects,
+                "best_object":  best_object,
+                "frame_ts":     ts,
+                # Latency from frame capture to publication. Robot
+                # code subtracts this from FPGA "now" to get the
+                # capture instant. Limelight's `tl` field (with their
+                # other latency offset folded in).
+                "latency_ms":   max(0.0, (wall_now - ts) * 1000.0),
+                "width":        w,
+                "height":       h,
+                "fps":          self._camera.fps,
+                "connected":    self._camera.connected,
+                "wall_ts":      wall_now,
             })
 
     def _ensure_detector(self, s: dict[str, Any]):
@@ -475,6 +532,18 @@ class TagDetectorThread(threading.Thread):
         min_dm = float(s["min_decision_margin"])
         frame_area = max(1.0, float(w * h))
 
+        # Crosshair offset, in pixels. Lets robot code treat
+        # yaw_deg / pitch_deg as offsets FROM THE CROSSHAIR, not
+        # from the optical center, which lets a team calibrate out a
+        # camera that's mounted off-axis from their launcher. Default
+        # crosshair is (0, 0) → center → no change.
+        cx_offset_norm = float(s.get("crosshair_x", 0.0))
+        cy_offset_norm = float(s.get("crosshair_y", 0.0))
+        cross_px_x = cx_p + cx_offset_norm * cx_p
+        cross_px_y = cy_p + cy_offset_norm * cy_p
+        cross_yaw_deg   = math.degrees(math.atan2(cross_px_x - cx_p, focal_x))
+        cross_pitch_deg = math.degrees(math.atan2(cy_p - cross_px_y, focal_y))
+
         for r in results:
             if getattr(r, "decision_margin", 0.0) < min_dm:
                 continue
@@ -485,14 +554,14 @@ class TagDetectorThread(threading.Thread):
             cx_px = float(corners[:, 0].mean())
             cy_px = float(corners[:, 1].mean())
 
-            # Bearing (yaw) from pixel offset. Positive = right of
-            # the optical axis. CCW-positive when the camera is
-            # mounted with +x to the right of the robot.
-            yaw_deg   = math.degrees(math.atan2(cx_px - cx_p, focal_x))
+            # Bearing (yaw) from pixel offset, then crosshair-adjusted
+            # so 0° means "aim spot is on the calibrated crosshair."
+            # Positive = right of the crosshair. CCW-positive when the
+            # camera is mounted with +x to the right of the robot.
+            yaw_deg   = math.degrees(math.atan2(cx_px - cx_p, focal_x)) - cross_yaw_deg
             # Pitch — same formula on the y axis, sign-flipped so
-            # "up" is positive. Mostly a curiosity for tag-tracking
-            # use cases but cheap to compute.
-            pitch_deg = math.degrees(math.atan2(cy_p - cy_px, focal_y))
+            # "up" is positive. Crosshair-adjusted to match yaw.
+            pitch_deg = math.degrees(math.atan2(cy_p - cy_px, focal_y)) - cross_pitch_deg
 
             # Distance via cv2.solvePnP. SOLVEPNP_IPPE_SQUARE is the
             # OpenCV-recommended algorithm for square markers.
@@ -513,9 +582,12 @@ class TagDetectorThread(threading.Thread):
                 # up the whole detection cycle.
                 distance_m = 0.0
 
-            # Normalized pixel offsets from frame center, [-1, 1].
-            tx = (cx_px - cx_p) / cx_p
-            ty = (cy_px - cy_p) / cy_p
+            # Normalized pixel offsets from the CROSSHAIR, [-1, 1].
+            # Robot code that drives a heading PID reads tx straight
+            # off the topic; 0 means "aim is on the calibrated
+            # crosshair," not "tag is on the optical axis."
+            tx = (cx_px - cross_px_x) / cx_p
+            ty = (cy_px - cross_px_y) / cy_p
 
             area = abs(_polygon_area(corners)) / frame_area
 
@@ -561,6 +633,101 @@ class TagDetectorThread(threading.Thread):
         # Tier 3: largest visible tag wins — proxies for closest.
         return max(tags, key=lambda t: t["area"])
 
+    def _detect_objects(self, bgr: np.ndarray, w: int, h: int,
+                        s: dict[str, Any]) -> list[dict[str, Any]]:
+        """Color-blob (game-piece) detector.
+
+        HSV threshold + connected-components on a downscaled copy of
+        the BGR frame. Cheap on the Pi Zero 2 W (~5 ms at 320x240,
+        the default), opt-in via `enable_objects`. Output schema is
+        deliberately the same shape as a tag detection minus the
+        AprilTag-specific fields, so robot code can treat the two
+        almost interchangeably.
+
+        Returns at most `max_objects` blobs, each:
+          { id, cx, cy, area, yaw_deg, pitch_deg, tx, ty,
+            width_px, height_px, timestamp }
+
+        `id` is just an index in the per-frame list — colors don't
+        have stable identifiers across frames and we don't try to
+        track them; that's robot-side state.
+        """
+        try:
+            ds = max(1, int(s.get("object_downscale", 2)))
+            lower = np.asarray(s.get("hsv_lower", [0, 100, 100]),
+                              dtype=np.uint8)
+            upper = np.asarray(s.get("hsv_upper", [10, 255, 255]),
+                              dtype=np.uint8)
+            min_area = max(1, int(s.get("min_object_area_px", 200)))
+            max_n    = max(1, int(s.get("max_objects", 5)))
+        except (ValueError, TypeError):
+            return []
+
+        # Downscale, convert to HSV, threshold, clean up speckle. The
+        # MORPH_OPEN pass costs ~1 ms on the Pi Zero 2 W and saves us
+        # from chasing single-pixel noise blobs on the way out.
+        if ds > 1:
+            small = cv2.resize(bgr, (w // ds, h // ds),
+                              interpolation=cv2.INTER_AREA)
+        else:
+            small = bgr
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return []
+
+        # Scale-back factor so coordinates are reported in the original
+        # frame's pixel space — robot code shouldn't have to know about
+        # the downscale.
+        sf = float(ds)
+        hfov_deg = float(s.get("camera_hfov_deg", 60.0))
+        focal_x = (w / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+        focal_y = focal_x
+        cx_p = w / 2.0
+        cy_p = h / 2.0
+        cross_px_x = cx_p + float(s.get("crosshair_x", 0.0)) * cx_p
+        cross_px_y = cy_p + float(s.get("crosshair_y", 0.0)) * cy_p
+        cross_yaw_deg   = math.degrees(math.atan2(cross_px_x - cx_p, focal_x))
+        cross_pitch_deg = math.degrees(math.atan2(cy_p - cross_px_y, focal_y))
+        frame_area = max(1.0, float(w * h))
+
+        out: list[dict[str, Any]] = []
+        for c in contours:
+            # Mask area is in downscaled pixels; rescale to original.
+            area_px = float(cv2.contourArea(c)) * (sf * sf)
+            if area_px < min_area:
+                continue
+            x, y, ww, hh = cv2.boundingRect(c)
+            x   *= sf;   y *= sf
+            ww  *= sf;  hh *= sf
+            cx_px = x + ww / 2.0
+            cy_px = y + hh / 2.0
+            yaw_deg   = math.degrees(math.atan2(cx_px - cx_p, focal_x)) - cross_yaw_deg
+            pitch_deg = math.degrees(math.atan2(cy_p - cy_px, focal_y)) - cross_pitch_deg
+            out.append({
+                "id":         len(out),
+                "cx":         cx_px,
+                "cy":         cy_px,
+                "yaw_deg":    yaw_deg,
+                "pitch_deg":  pitch_deg,
+                "tx":         (cx_px - cross_px_x) / cx_p,
+                "ty":         (cy_px - cross_px_y) / cy_p,
+                "area":       area_px / frame_area,
+                "width_px":   int(ww),
+                "height_px":  int(hh),
+                "timestamp":  self._last_processed_ts,
+            })
+            if len(out) >= max_n:
+                break
+        # Largest first so robot code reading [0] gets "the obvious one".
+        out.sort(key=lambda o: o["area"], reverse=True)
+        return out
+
 
 def _polygon_area(pts: np.ndarray) -> float:
     """Shoelace formula for signed polygon area."""
@@ -590,6 +757,7 @@ class NTPublisher:
         "acuity/version":               "int",
         "acuity/build":                 "string",
         "acuity/heartbeat":             "int",
+        "acuity/latency_ms":            "double",
         "acuity/camera/connected":      "boolean",
         "acuity/camera/fps":            "double",
         "acuity/camera/resolution":     "string",
@@ -604,6 +772,19 @@ class NTPublisher:
         "acuity/tags/best/decision_margin": "double",
         "acuity/tags/count":            "int",
         "acuity/tags/all":              "string",
+        # Color-blob (game-piece) topics. Only get values when
+        # enable_objects is on; subscribers see the defaults
+        # otherwise (id=-1, area=0).
+        "acuity/objects/best/id":       "int",
+        "acuity/objects/best/yaw_deg":  "double",
+        "acuity/objects/best/pitch_deg":"double",
+        "acuity/objects/best/tx":       "double",
+        "acuity/objects/best/ty":       "double",
+        "acuity/objects/best/area":     "double",
+        "acuity/objects/best/width_px": "int",
+        "acuity/objects/best/height_px":"int",
+        "acuity/objects/count":         "int",
+        "acuity/objects/all":           "string",
         "acuity/health/cpu_pct":        "double",
         "acuity/health/temp_c":         "double",
         "acuity/health/uptime_s":       "int",
@@ -673,6 +854,7 @@ class NTPublisher:
             _set("acuity/version",            int(SCHEMA_VERSION))
             _set("acuity/build",              str(BUILD_ID))
             _set("acuity/heartbeat",          int(self._heartbeat))
+            _set("acuity/latency_ms",         float(snapshot.get("latency_ms", 0.0)))
             _set("acuity/camera/connected",   bool(snapshot["connected"]))
             _set("acuity/camera/fps",         float(snapshot["fps"]))
             _set("acuity/camera/resolution",
@@ -697,6 +879,24 @@ class NTPublisher:
                 {k: v for k, v in t.items() if k != "corners"}
                 for t in snapshot["tags"]
             ]))
+
+            # Color-blob channel.
+            best_obj = snapshot.get("best_object")
+            if best_obj is None:
+                _set("acuity/objects/best/id",        -1)
+                _set("acuity/objects/best/area",      0.0)
+            else:
+                _set("acuity/objects/best/id",        int(best_obj["id"]))
+                _set("acuity/objects/best/yaw_deg",   float(best_obj["yaw_deg"]))
+                _set("acuity/objects/best/pitch_deg", float(best_obj["pitch_deg"]))
+                _set("acuity/objects/best/tx",        float(best_obj["tx"]))
+                _set("acuity/objects/best/ty",        float(best_obj["ty"]))
+                _set("acuity/objects/best/area",      float(best_obj["area"]))
+                _set("acuity/objects/best/width_px",  int(best_obj["width_px"]))
+                _set("acuity/objects/best/height_px", int(best_obj["height_px"]))
+            objs = snapshot.get("objects") or []
+            _set("acuity/objects/count", len(objs))
+            _set("acuity/objects/all", json.dumps(objs))
 
             _set("acuity/health/cpu_pct",  _cpu_pct())
             _set("acuity/health/temp_c",   _temp_c())
@@ -738,29 +938,61 @@ def _temp_c() -> float:
 # "Forget WiFi" / "Reboot" buttons without making the user SSH in.
 # ---------------------------------------------------------------------
 
+def _iface_ipv4(name: str) -> str:
+    """First IPv4 address bound to <name>, or '' if the iface is down or
+    has no v4. Uses iproute2 because nmcli isn't always usable from a
+    non-root context."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "-br", "addr", "show", name],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+    # `wlan0  UP  10.12.79.11/24  fe80::...`
+    parts = out.split()
+    for p in parts[2:]:
+        if "." in p and "/" in p:
+            return p.split("/", 1)[0]
+    return ""
+
+
 def _net_state() -> dict[str, Any]:
-    """Read current WiFi mode + IP + hostname for the status pane."""
+    """Network state for the status pane / Manager.
+
+    We support three deploy patterns:
+      - WiFi only (driven by acuity-firstboot.sh's STA path)
+      - wired only (FRC competition: device on the radio over eth0)
+      - AP-mode setup (no SSID and no ethernet — open AP up at .50.1)
+
+    The `mode` field collapses those into a single tag the UI can
+    branch on. `ip` mirrors whichever interface is currently the
+    primary path back to the laptop (preferring ethernet when both
+    are up — that's the radio side at competition).
+    """
     try:
         host = subprocess.check_output(["hostname"], text=True).strip()
     except Exception:
         host = ""
-    addr = ""
-    try:
-        out = subprocess.check_output(
-            ["ip", "-br", "addr", "show", "wlan0"], text=True).strip()
-        # `wlan0  UP  10.12.79.11/24  fe80::...`
-        parts = out.split()
-        for p in parts[2:]:
-            if "." in p and "/" in p:
-                addr = p.split("/", 1)[0]
-                break
-    except Exception:
-        pass
-    in_ap = addr == "192.168.50.1"
+    eth_ip  = _iface_ipv4("eth0")
+    wlan_ip = _iface_ipv4("wlan0")
+    in_ap   = wlan_ip == "192.168.50.1"
+
+    if eth_ip:
+        primary, mode = eth_ip, "wired"
+    elif in_ap:
+        primary, mode = wlan_ip, "ap"
+    elif wlan_ip:
+        primary, mode = wlan_ip, "sta"
+    else:
+        primary, mode = "", "down"
+
     return {
         "hostname":   host,
-        "ip":         addr,
-        "mode":       "ap" if in_ap else "sta" if addr else "down",
+        "ip":         primary,
+        "eth_ip":     eth_ip,
+        "wlan_ip":    wlan_ip,
+        "mode":       mode,
         "conf_set":   ACUITY_CONF.exists(),
     }
 
@@ -814,15 +1046,18 @@ def _broadcast_snapshot() -> None:
     # corners for the *currently-rendered* set, which the browser
     # can request separately if it ever wants high-fidelity overlays.
     payload = json.dumps({
-        "best":      snap.get("best"),
-        "tags":      [{k: v for k, v in t.items() if k != "corners"}
-                      for t in snap.get("tags", [])],
-        "tags_full": snap.get("tags", []),
-        "fps":       snap.get("fps"),
-        "width":     snap.get("width"),
-        "height":    snap.get("height"),
-        "connected": snap.get("connected"),
-        "wall_ts":   snap.get("wall_ts"),
+        "best":         snap.get("best"),
+        "tags":         [{k: v for k, v in t.items() if k != "corners"}
+                         for t in snap.get("tags", [])],
+        "tags_full":    snap.get("tags", []),
+        "best_object":  snap.get("best_object"),
+        "objects":      snap.get("objects", []),
+        "latency_ms":   snap.get("latency_ms"),
+        "fps":          snap.get("fps"),
+        "width":        snap.get("width"),
+        "height":       snap.get("height"),
+        "connected":    snap.get("connected"),
+        "wall_ts":      snap.get("wall_ts"),
     })
     dead = []
     for ws in ws_clients:
@@ -985,14 +1220,38 @@ async def detections() -> JSONResponse:
     with latest_lock:
         snap = dict(latest_snapshot)
     return JSONResponse({
-        "best":  snap.get("best"),
-        "tags":  snap.get("tags", []),
-        "fps":   snap.get("fps"),
-        "width": snap.get("width"),
-        "height": snap.get("height"),
-        "connected": snap.get("connected", False),
-        "wall_ts":   snap.get("wall_ts", 0),
+        "best":         snap.get("best"),
+        "tags":         snap.get("tags", []),
+        "best_object":  snap.get("best_object"),
+        "objects":      snap.get("objects", []),
+        "latency_ms":   snap.get("latency_ms", 0.0),
+        "fps":          snap.get("fps"),
+        "width":        snap.get("width"),
+        "height":       snap.get("height"),
+        "connected":    snap.get("connected", False),
+        "wall_ts":      snap.get("wall_ts", 0),
     })
+
+
+@app.get("/api/snapshot")
+async def api_snapshot() -> Any:
+    """Single JPEG of whatever the camera most recently produced.
+
+    Cheap: we hand back the JPEG buffer the MJPEG streamer already
+    has cached, so there's no extra encode pass. Good for screenshot
+    buttons in robot dashboards / Slack bots / event-triggered
+    capture from a script in /api/scripts."""
+    with camera._lock:
+        jpeg = camera.latest_jpeg
+        ts   = camera.latest_ts
+    if jpeg is None:
+        raise HTTPException(503, "camera has not produced a frame yet")
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Acuity-Frame-Ts": f"{ts:.6f}",
+    }
+    return Response(content=bytes(jpeg), media_type="image/jpeg",
+                    headers=headers)
 
 
 # ----- API: settings -----
@@ -1092,3 +1351,689 @@ async def api_logs(lines: int = 200) -> PlainTextResponse:
 @app.get("/api/healthz")
 async def healthz() -> PlainTextResponse:
     return PlainTextResponse("ok")
+
+
+# ---------------------------------------------------------------------
+# Coprocessor endpoints
+#
+# Acuity is sold as "the vision coprocessor" but a Pi Zero 2 W can do
+# more than vision — it sits on the robot's network, runs Linux, has
+# CPU + a Python runtime nobody else on the bus has. The endpoints
+# below let robot code (or a human via Manager) lean on it as a
+# general-purpose helper:
+#
+#   /api/system               full system snapshot
+#   /api/services             list controllable units + their state
+#   /api/services/{name}      restart/start/stop a whitelisted unit
+#   /api/scripts              list user scripts in ACUITY_SCRIPTS_DIR
+#   /api/scripts/{name}/run   start a script in the background
+#   /api/scripts/runs/{id}    poll output + exit code of a run
+#   /api/scripts/runs/{id}/stop  kill a running script
+#   /api/nt/publish           publish a one-off value to NT4
+#
+# We deliberately do NOT expose arbitrary shell exec — only files
+# already on disk in the scripts directory are runnable. A human can
+# put scripts there over SSH; the endpoint just runs them.
+# ---------------------------------------------------------------------
+
+# Where users drop scripts. /var/lib/acuity already exists for
+# settings.json and is writable by the acuity service user — using it
+# avoids a second sudoers grant and survives package upgrades.
+SCRIPTS_DIR = Path(os.environ.get(
+    "ACUITY_SCRIPTS_DIR", "/var/lib/acuity/scripts"))
+
+# Services we expose to the network. Keep tight — anything systemctl
+# can reach is a foot-cannon, and we only need a few for normal ops.
+# 'acuity-dashboard' restarts THIS process; that one's a useful nuke
+# button when you've poked something into a bad state via /api/settings.
+_CONTROLLABLE_SERVICES = (
+    "acuity-dashboard.service",
+    "avahi-daemon.service",
+)
+_SERVICE_ACTIONS = ("start", "stop", "restart", "status")
+
+
+def _read_meminfo_pct() -> float:
+    """RAM in-use / total, as a 0..100 float. /proc/meminfo lookup
+    avoids pulling psutil in just for one number."""
+    try:
+        info: dict[str, int] = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                tok = rest.strip().split()
+                if tok:
+                    try:
+                        info[k.strip()] = int(tok[0])
+                    except ValueError:
+                        pass
+        total = info.get("MemTotal", 0)
+        avail = info.get("MemAvailable", info.get("MemFree", 0))
+        if total <= 0:
+            return 0.0
+        return max(0.0, min(100.0, (1.0 - avail / total) * 100.0))
+    except Exception:
+        return 0.0
+
+
+def _read_disk_pct(path: str = "/") -> float:
+    """Used / total for the partition holding <path>, 0..100."""
+    try:
+        st = os.statvfs(path)
+        total = st.f_blocks * st.f_frsize
+        free  = st.f_bavail * st.f_frsize
+        if total <= 0:
+            return 0.0
+        return max(0.0, min(100.0, (1.0 - free / total) * 100.0))
+    except Exception:
+        return 0.0
+
+
+def _read_uptime_s() -> int:
+    """System uptime — independent of when our process started.
+    /proc/uptime is two floats: total_secs idle_secs."""
+    try:
+        with open("/proc/uptime") as f:
+            return int(float(f.read().split()[0]))
+    except Exception:
+        return 0
+
+
+def _read_pi_model() -> str:
+    """Best-effort Pi model string for the UI ("Raspberry Pi Zero 2 W")."""
+    p = Path("/sys/firmware/devicetree/base/model")
+    try:
+        # The DT model string is null-terminated.
+        return p.read_text().rstrip("\x00").strip()
+    except Exception:
+        return platform.machine() or "unknown"
+
+
+def _systemctl_state(unit: str) -> str:
+    """`systemctl is-active` shorthand. Returns 'active', 'inactive',
+    'failed', etc., or 'unknown' if systemctl isn't there."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=3,
+        )
+        # is-active prints state on stdout regardless of exit code
+        # ('inactive' is non-zero), so trust the line over rc.
+        return (out.stdout or "").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+@app.get("/api/system")
+async def api_system() -> JSONResponse:
+    """Single fat snapshot for Manager's device panel + scripts that
+    want to ask 'is this Pi healthy?'. Cheap (<10 ms) — built from
+    /proc + /sys reads. Anything that needs sustained polling should
+    subscribe to NT4's /acuity/health/* topics instead."""
+    return JSONResponse({
+        "build":        BUILD_ID,
+        "schema":       SCHEMA_VERSION,
+        "model":        _read_pi_model(),
+        "kernel":       platform.release(),
+        "platform":     platform.platform(),
+        "cpu_pct":      _cpu_pct(),
+        "mem_pct":      _read_meminfo_pct(),
+        "disk_pct":     _read_disk_pct("/"),
+        "temp_c":       _temp_c(),
+        "uptime_s":     _read_uptime_s(),
+        "have_pyapriltags": _HAVE_PA,
+        "camera": {
+            "connected":  camera.connected,
+            "fps":        camera.fps,
+            "resolution": f"{camera.resolution[0]}x{camera.resolution[1]}",
+        },
+        "net":          _net_state(),
+        "scripts_dir":  str(SCRIPTS_DIR),
+    })
+
+
+@app.get("/api/services")
+async def api_services() -> JSONResponse:
+    """List controllable services + their current state."""
+    return JSONResponse({
+        "services": [
+            {"name": unit, "state": _systemctl_state(unit)}
+            for unit in _CONTROLLABLE_SERVICES
+        ],
+        "actions": list(_SERVICE_ACTIONS),
+    })
+
+
+@app.post("/api/services/{name}")
+async def api_services_action(name: str, req: Request) -> JSONResponse:
+    """`{"action": "restart"}` against a whitelisted service.
+
+    'status' just refreshes the cached state; for the others we shell
+    out to systemctl. Note: restarting acuity-dashboard kills THIS
+    process — the response will not reach the client. That's the
+    documented behavior; Manager handles the dropped connection."""
+    if name not in _CONTROLLABLE_SERVICES:
+        raise HTTPException(404, f"unknown service: {name}")
+    body = {}
+    try:
+        body = await req.json()
+    except Exception:
+        pass
+    action = (body.get("action") or "status").strip()
+    if action not in _SERVICE_ACTIONS:
+        raise HTTPException(400, f"unknown action: {action}")
+
+    if action == "status":
+        return JSONResponse({"name": name, "state": _systemctl_state(name)})
+
+    try:
+        subprocess.run(
+            ["sudo", "systemctl", action, name],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(500,
+            f"systemctl {action} {name} failed: {e.stderr.strip() or e}")
+    except Exception as e:
+        raise HTTPException(500, f"systemctl {action} {name}: {e}")
+    return JSONResponse({
+        "name":  name,
+        "state": _systemctl_state(name),
+        "action": action,
+    })
+
+
+# ----- Script runner -----
+#
+# Lets users drop arbitrary Python (or any executable) into
+# /var/lib/acuity/scripts/ and run it from the dashboard / Manager.
+# Each run is a Popen with stdout+stderr merged into a bounded
+# in-memory ring buffer keyed by run_id. State machine:
+#
+#   created → running → exited(code) | killed
+#
+# Runs persist for the lifetime of the dashboard process so users can
+# poll /api/scripts/runs/<id> after the script finishes. We cap the
+# in-memory transcript at MAX_RUN_BYTES per run so a runaway script
+# can't OOM the Pi; older bytes get truncated.
+
+MAX_RUN_BYTES = 256 * 1024  # 256 KB per run — plenty for status output
+
+_runs_lock = threading.Lock()
+_runs: dict[str, dict[str, Any]] = {}
+_run_seq = 0
+
+
+def _list_scripts() -> list[dict[str, Any]]:
+    SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    out: list[dict[str, Any]] = []
+    for p in sorted(SCRIPTS_DIR.iterdir()):
+        if p.is_file() and not p.name.startswith("."):
+            try:
+                st = p.stat()
+                out.append({
+                    "name":         p.name,
+                    "size":         st.st_size,
+                    "modified":     int(st.st_mtime),
+                    "executable":   bool(st.st_mode & 0o111),
+                })
+            except Exception:
+                continue
+    return out
+
+
+def _start_run(name: str, args: list[str]) -> dict[str, Any]:
+    """Spawn the script with stdout/stderr merged into our buffer."""
+    global _run_seq
+    script_path = (SCRIPTS_DIR / name).resolve()
+    # Confine to SCRIPTS_DIR — `..` traversal would otherwise let
+    # POST /api/scripts/..%2F..%2Fbin%2Fsh/run smuggle execution.
+    try:
+        script_path.relative_to(SCRIPTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "script must live inside the scripts dir")
+    if not script_path.is_file():
+        raise HTTPException(404, f"no such script: {name}")
+
+    # Pick how to launch: Python by extension, otherwise exec the file
+    # directly (it must be chmod +x'd by the user). We don't auto-chmod
+    # — that hides "I forgot to mark it runnable" failures.
+    if script_path.suffix == ".py":
+        argv = ["python3", str(script_path), *args]
+    else:
+        if not os.access(script_path, os.X_OK):
+            raise HTTPException(400,
+                f"{name} is not executable. `chmod +x` it first or rename to .py.")
+        argv = [str(script_path), *args]
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(SCRIPTS_DIR),
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+    except Exception as e:
+        raise HTTPException(500, f"could not start {name}: {e}")
+
+    with _runs_lock:
+        _run_seq += 1
+        run_id = f"r{_run_seq}"
+        run = {
+            "id":         run_id,
+            "name":       name,
+            "argv":       argv,
+            "pid":        proc.pid,
+            "started":    time.time(),
+            "ended":      None,
+            "exit_code":  None,
+            "state":      "running",
+            "buf":        bytearray(),
+            "truncated":  False,
+            "_proc":      proc,
+        }
+        _runs[run_id] = run
+
+    def _drain():
+        # Read stdout in small chunks. Cap at MAX_RUN_BYTES — drop the
+        # tail (we'd rather lose the end of a chatty script than the
+        # start, which is where the useful "starting up…" lines are).
+        try:
+            assert proc.stdout is not None
+            for chunk in iter(lambda: proc.stdout.read(4096), b""):
+                with _runs_lock:
+                    if len(run["buf"]) + len(chunk) > MAX_RUN_BYTES:
+                        room = max(0, MAX_RUN_BYTES - len(run["buf"]))
+                        if room:
+                            run["buf"].extend(chunk[:room])
+                        run["truncated"] = True
+                    else:
+                        run["buf"].extend(chunk)
+        except Exception:
+            pass
+        finally:
+            try: proc.stdout.close()
+            except Exception: pass
+            code = proc.wait()
+            with _runs_lock:
+                run["exit_code"] = code
+                run["ended"]     = time.time()
+                run["state"]     = (
+                    "killed" if code is not None and code < 0 else "exited"
+                )
+
+    threading.Thread(target=_drain, daemon=True).start()
+    return run
+
+
+def _run_view(run: dict[str, Any]) -> dict[str, Any]:
+    """Public projection — strips the internal Popen handle."""
+    return {
+        "id":         run["id"],
+        "name":       run["name"],
+        "pid":        run["pid"],
+        "started":    run["started"],
+        "ended":      run["ended"],
+        "exit_code":  run["exit_code"],
+        "state":      run["state"],
+        "truncated":  run["truncated"],
+        "output":     bytes(run["buf"]).decode("utf-8", errors="replace"),
+    }
+
+
+@app.get("/api/scripts")
+async def api_scripts_list() -> JSONResponse:
+    return JSONResponse({
+        "dir":     str(SCRIPTS_DIR),
+        "scripts": _list_scripts(),
+    })
+
+
+@app.post("/api/scripts/{name}/run")
+async def api_scripts_run(name: str, req: Request) -> JSONResponse:
+    body = {}
+    try:
+        body = await req.json()
+    except Exception:
+        pass
+    args = body.get("args") or []
+    if not isinstance(args, list) or not all(isinstance(a, (str, int, float)) for a in args):
+        raise HTTPException(400, "args must be a list of strings/numbers")
+    args = [str(a) for a in args]
+    run = _start_run(name, args)
+    return JSONResponse(_run_view(run))
+
+
+@app.get("/api/scripts/runs")
+async def api_scripts_runs() -> JSONResponse:
+    """List all known runs from this dashboard process. Resets when
+    the dashboard restarts — runs aren't persisted to disk."""
+    with _runs_lock:
+        return JSONResponse({"runs": [_run_view(r) for r in _runs.values()]})
+
+
+@app.get("/api/scripts/runs/{run_id}")
+async def api_scripts_run_state(run_id: str) -> JSONResponse:
+    with _runs_lock:
+        run = _runs.get(run_id)
+    if run is None:
+        raise HTTPException(404, f"no such run: {run_id}")
+    return JSONResponse(_run_view(run))
+
+
+@app.post("/api/scripts/runs/{run_id}/stop")
+async def api_scripts_run_stop(run_id: str) -> JSONResponse:
+    with _runs_lock:
+        run = _runs.get(run_id)
+    if run is None:
+        raise HTTPException(404, f"no such run: {run_id}")
+    proc = run.get("_proc")
+    if proc is not None and proc.poll() is None:
+        try: proc.terminate()
+        except Exception: pass
+    return JSONResponse(_run_view(run))
+
+
+# ----- NT4 publish passthrough -----
+#
+# Robot code can subscribe to arbitrary topics under /acuity/user/...
+# and have the dashboard publish to them. Useful for testing or for
+# robot code that wants to hand a value off to a debug tool quickly
+# without standing up its own NT4 publisher.
+#
+# We sandbox to the /acuity/user/ subtree so this can't stomp on the
+# canonical /acuity/tags/* topics the camera thread owns.
+_user_pubs: dict[str, Any] = {}
+_user_pubs_lock = threading.Lock()
+
+
+@app.post("/api/nt/publish")
+async def api_nt_publish(req: Request) -> JSONResponse:
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected JSON object")
+    path  = str(body.get("path") or "").strip()
+    type_ = str(body.get("type") or "string").strip()
+    value = body.get("value")
+    if not path or path.startswith("/"):
+        raise HTTPException(400, "path must be relative (e.g. 'user/foo')")
+    if not path.startswith("acuity/user/") and not path.startswith("user/"):
+        # Be tolerant of missing 'acuity/' — auto-prepend.
+        path = "acuity/user/" + path.lstrip("/").removeprefix("user/")
+    if type_ not in ("int", "double", "boolean", "string"):
+        raise HTTPException(400, "type must be int|double|boolean|string")
+
+    client = publisher._ensure_client()  # lean on the existing one
+    if client is None:
+        raise HTTPException(503,
+            "NT4 client not connected — set nt_team or nt_server_host first")
+
+    with _user_pubs_lock:
+        pub = _user_pubs.get(path)
+        if pub is None:
+            pub = client.publish(path, type_)
+            _user_pubs[path] = pub
+    try:
+        if type_ == "int":     pub.set(int(value))
+        elif type_ == "double": pub.set(float(value))
+        elif type_ == "boolean": pub.set(bool(value))
+        else:                   pub.set(str(value))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, f"value didn't fit type {type_}: {e}")
+    return JSONResponse({"ok": True, "path": path, "type": type_})
+
+
+# ---------------------------------------------------------------------
+# Pipelines — named settings snapshots
+#
+# The classic Limelight idiom: a robot wants different vision configs
+# for different jobs (long-range AprilTags, near-field game pieces,
+# off-during-driving), and switching them is a single call from robot
+# code. We model a "pipeline" as a partial settings dict you save under
+# a name; applying it merges those overrides on top of whatever's
+# currently active. Snapshots live in their own JSON file so the active
+# `settings.json` is still the single source of truth for the running
+# camera + detector threads.
+#
+# Robot code switches via `POST /api/pipelines/<name>/apply`. Cheap (a
+# settings update is a dict swap; the camera thread re-reads on its
+# next loop iteration, ~30 Hz). Common pattern: bind it to a button on
+# the operator controller so the human can flip modes mid-match.
+# ---------------------------------------------------------------------
+
+PIPELINES_PATH = Path(os.environ.get(
+    "ACUITY_PIPELINES", "/var/lib/acuity/pipelines.json"))
+
+
+def _load_pipelines() -> dict[str, dict[str, Any]]:
+    if not PIPELINES_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PIPELINES_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_pipelines(p: dict[str, Any]) -> None:
+    PIPELINES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PIPELINES_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(p, indent=2))
+    os.replace(tmp, PIPELINES_PATH)
+
+
+_pipelines_lock = threading.Lock()
+_pipelines = _load_pipelines()
+# Track active pipeline so robot code / dashboard can reflect it. We
+# store this OUTSIDE settings.json because it's a status field, not a
+# user-tunable knob.
+_active_pipeline: str = _pipelines.get("_current", "")
+
+
+def _list_pipelines() -> list[str]:
+    return sorted(k for k in _pipelines.keys() if not k.startswith("_"))
+
+
+@app.get("/api/pipelines")
+async def api_pipelines_list() -> JSONResponse:
+    with _pipelines_lock:
+        return JSONResponse({
+            "current":   _active_pipeline,
+            "pipelines": _list_pipelines(),
+        })
+
+
+@app.post("/api/pipelines/{name}/save")
+async def api_pipelines_save(name: str) -> JSONResponse:
+    """Snapshot the current settings under <name>. Overwrites if it
+    already exists. Pipeline name must be a single component — no
+    slashes — so URLs stay sensible."""
+    if "/" in name or name.startswith("_") or not name:
+        raise HTTPException(400, "bad pipeline name")
+    with _pipelines_lock, _settings_lock:
+        # Take a copy of the live settings sans meta keys (we don't
+        # serialize the pipelines list inside a pipeline).
+        snapshot = {k: v for k, v in _settings.items()
+                    if k in DEFAULT_SETTINGS}
+        _pipelines[name] = snapshot
+        _save_pipelines(_pipelines)
+    return JSONResponse({"ok": True, "name": name, "saved_keys": len(snapshot)})
+
+
+@app.post("/api/pipelines/{name}/apply")
+async def api_pipelines_apply(name: str) -> JSONResponse:
+    """Merge <name>'s saved overrides into the live settings. Robot
+    code calls this to switch modes."""
+    global _active_pipeline
+    with _pipelines_lock:
+        if name not in _pipelines:
+            raise HTTPException(404, f"unknown pipeline: {name}")
+        overrides = _pipelines[name]
+    applied: dict[str, Any] = {}
+    with _settings_lock:
+        for k, v in overrides.items():
+            if k in DEFAULT_SETTINGS:
+                _settings[k] = v
+                applied[k] = v
+        _save_settings(_settings)
+    with _pipelines_lock:
+        _active_pipeline = name
+        _pipelines["_current"] = name
+        _save_pipelines(_pipelines)
+    return JSONResponse({"ok": True, "name": name, "applied": applied})
+
+
+@app.delete("/api/pipelines/{name}")
+async def api_pipelines_delete(name: str) -> JSONResponse:
+    global _active_pipeline
+    with _pipelines_lock:
+        if name not in _pipelines or name.startswith("_"):
+            raise HTTPException(404, f"unknown pipeline: {name}")
+        del _pipelines[name]
+        if _active_pipeline == name:
+            _active_pipeline = ""
+            _pipelines["_current"] = ""
+        _save_pipelines(_pipelines)
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------
+# Telemetry log — append-only JSONL data sink
+#
+# Robot code POSTs structured records (any subsystem can log: shooter
+# RPM, intake current, pose estimate, command name). Acuity stamps
+# them with wall-clock + monotonic time and appends to a single
+# rotating JSONL file on disk. Designed to be cheap enough to call
+# at 50 Hz from every subsystem on the bus — each write is a single
+# `f.write(json.dumps(...) + "\n")`.
+#
+# Why JSONL not WPILog: WPILog is the canonical FRC format but parsing
+# / writing it from a Python dashboard adds dependencies we don't have
+# headroom for on a Pi Zero. JSONL is greppable from a laptop, easy to
+# parse with `pandas.read_json(lines=True)`, and survives partial
+# writes (each record is its own line).
+# ---------------------------------------------------------------------
+
+LOGS_DIR = Path(os.environ.get("ACUITY_LOGS_DIR", "/var/lib/acuity/logs"))
+LOG_FILE = LOGS_DIR / "data.jsonl"
+LOG_ROTATE_BYTES = 10 * 1024 * 1024     # 10 MB before we rotate
+LOG_KEEP = 4                            # data.jsonl + 4 archives = ~50 MB cap
+
+_log_lock = threading.Lock()
+_log_fh: Optional[Any] = None
+
+
+def _ensure_log_fh():
+    """Open the log file lazily. Cheaper than re-opening per record,
+    safe across rotations because we always reopen after rename."""
+    global _log_fh
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    if _log_fh is None:
+        _log_fh = open(LOG_FILE, "a", buffering=1, encoding="utf-8")
+    return _log_fh
+
+
+def _maybe_rotate_log():
+    """Rotate when the live file crosses LOG_ROTATE_BYTES. Keeps
+    LOG_KEEP archives, dropping the oldest."""
+    global _log_fh
+    try:
+        size = LOG_FILE.stat().st_size
+    except FileNotFoundError:
+        return
+    if size < LOG_ROTATE_BYTES:
+        return
+    if _log_fh is not None:
+        try: _log_fh.close()
+        except Exception: pass
+        _log_fh = None
+    # Shift archives: data.jsonl.3 → .4 → discarded
+    for i in range(LOG_KEEP, 0, -1):
+        src = LOGS_DIR / f"data.jsonl.{i}"
+        dst = LOGS_DIR / f"data.jsonl.{i + 1}"
+        if i == LOG_KEEP and src.exists():
+            try: src.unlink()
+            except Exception: pass
+        elif src.exists():
+            try: src.replace(dst)
+            except Exception: pass
+    try: LOG_FILE.replace(LOGS_DIR / "data.jsonl.1")
+    except Exception: pass
+
+
+@app.post("/api/log")
+async def api_log_write(req: Request) -> JSONResponse:
+    """Append one record. Body shape:
+       { "key": "shooter_rpm", "value": 4350, "tags": { "match": "Q12" } }
+    All three fields are optional except `key`."""
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected JSON object")
+    key = body.get("key")
+    if not isinstance(key, str) or not key:
+        raise HTTPException(400, "'key' (string) is required")
+    record = {
+        "ts":    time.time(),
+        "mono":  round(time.monotonic(), 6),
+        "key":   key,
+        "value": body.get("value"),
+        "tags":  body.get("tags") or {},
+    }
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with _log_lock:
+        _maybe_rotate_log()
+        fh = _ensure_log_fh()
+        fh.write(line)
+    return JSONResponse({"ok": True, "ts": record["ts"]})
+
+
+@app.get("/api/log")
+async def api_log_tail(lines: int = 200) -> PlainTextResponse:
+    """Tail the live log. Cheap because we only seek to a position
+    near the end — no full read."""
+    n = max(1, min(int(lines), 5000))
+    if not LOG_FILE.exists():
+        return PlainTextResponse("")
+    # Read backwards in small chunks until we have N newlines or hit BOF.
+    chunks: list[bytes] = []
+    found = 0
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.seek(0, 2)
+            pos = f.tell()
+            block = 8192
+            while pos > 0 and found <= n:
+                size = min(block, pos)
+                pos -= size
+                f.seek(pos)
+                buf = f.read(size)
+                chunks.append(buf)
+                found += buf.count(b"\n")
+    except Exception as e:
+        return PlainTextResponse(f"# read error: {e}", status_code=500)
+    chunks.reverse()
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    tail = "\n".join(text.splitlines()[-n:])
+    return PlainTextResponse(tail)
+
+
+@app.get("/api/log/download")
+async def api_log_download() -> FileResponse:
+    if not LOG_FILE.exists():
+        raise HTTPException(404, "no log file yet")
+    return FileResponse(LOG_FILE, media_type="application/x-ndjson",
+                        filename="acuity-data.jsonl")
+
+
+@app.post("/api/log/clear")
+async def api_log_clear() -> JSONResponse:
+    """Truncate the live log. Keeps existing archives."""
+    global _log_fh
+    with _log_lock:
+        if _log_fh is not None:
+            try: _log_fh.close()
+            except Exception: pass
+            _log_fh = None
+        if LOG_FILE.exists():
+            LOG_FILE.unlink()
+    return JSONResponse({"ok": True})

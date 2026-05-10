@@ -113,23 +113,26 @@
     <!-- ============== Libraries tab ============== -->
     <section class="page" data-page="libraries">
       <div class="libraries-wrapper">
-        <h2>Install the Acuity vision library</h2>
+        <h2>Add the Acuity helper to your robot code</h2>
         <p class="lead">
-          Pick the language your robot code uses. Manager will detect
-          your robot project and add the dependency for you.
+          Pick the language your robot code uses. Manager drops a
+          single self-contained <code>AcuityClient</code> file into
+          your project — no vendordep to install, no pip dependency
+          to download. The helper uses only NetworkTables APIs that
+          ship with WPILib / robotpy.
         </p>
         <div class="lang-grid">
           <button class="lang-card" data-lang="java">
             <span class="lang-name">Java</span>
-            <span class="lang-sub">WPILib vendordep</span>
+            <span class="lang-sub">AcuityClient.java</span>
           </button>
           <button class="lang-card" data-lang="python">
             <span class="lang-name">Python</span>
-            <span class="lang-sub">robotpy package</span>
+            <span class="lang-sub">acuity_client.py</span>
           </button>
           <button class="lang-card" data-lang="cpp">
             <span class="lang-name">C++</span>
-            <span class="lang-sub">WPILib vendordep</span>
+            <span class="lang-sub">AcuityClient.h</span>
           </button>
         </div>
       </div>
@@ -219,9 +222,25 @@
           <a href="#docs-cpp"    class="docs-link">C++ (WPILib)</a>
         </div>
         <div class="docs-nav-section">
+          <h3>Vision</h3>
+          <a href="#docs-color-blob" class="docs-link">Color-blob detector</a>
+          <a href="#docs-crosshair"  class="docs-link">Crosshair calibration</a>
+          <a href="#docs-snapshot"   class="docs-link">Snapshot capture</a>
+          <a href="#docs-latency"    class="docs-link">Latency reporting</a>
+        </div>
+        <div class="docs-nav-section">
+          <h3>Coprocessor</h3>
+          <a href="#docs-commands"   class="docs-link">Sending commands</a>
+          <a href="#docs-pipelines"  class="docs-link">Pipelines</a>
+          <a href="#docs-telemetry"  class="docs-link">Telemetry log</a>
+          <a href="#docs-fusion"     class="docs-link">Sensor fusion</a>
+          <a href="#docs-extending"  class="docs-link">Extending Acuity</a>
+        </div>
+        <div class="docs-nav-section">
           <h3>Reference</h3>
           <a href="#docs-nt4"      class="docs-link">NetworkTables schema</a>
           <a href="#docs-rest"     class="docs-link">REST endpoints</a>
+          <a href="#docs-coproc"   class="docs-link">Coprocessor endpoints</a>
           <a href="#docs-config"   class="docs-link">acuity.conf options</a>
           <a href="#docs-trouble"  class="docs-link">Troubleshooting</a>
         </div>
@@ -236,21 +255,26 @@
             poses in about ten minutes.
           </p>
           <ol>
-            <li>Plug Acuity into the RoboRIO's USB-A port. Power on.</li>
-            <li>On a phone, connect to the open WiFi
-                <code>Acuity-Setup-XXXX</code>. The captive portal
-                will pop a setup form (or browse to
-                <code>http://192.168.50.1/</code> if it doesn't).</li>
-            <li>Fill in your team number, robot WiFi SSID, and
-                password. Save. The device reboots and joins the
-                team radio at <code>10.TE.AM.11</code>.</li>
+            <li>Power Acuity (USB-A from the RoboRIO is fine, or any
+                5 V / 1 A source).</li>
+            <li><strong>Wired to the radio (competition):</strong>
+                plug eth0 into the radio, power on. Acuity reads its
+                own team number off the DHCP lease and shows up in
+                Manager automatically — no captive portal needed.
+                <br>
+                <strong>Wireless setup:</strong> connect a phone to
+                the open WiFi <code>Acuity-Setup-XXXX</code>, then
+                hit the captive portal (or browse to
+                <code>http://192.168.50.1/</code>). Fill in team
+                number + robot WiFi SSID + password.</li>
             <li>Open this Manager — your device shows up in the
                 <strong>Devices</strong> tab automatically (mDNS
-                discovery).</li>
+                discovery, IP-agnostic).</li>
             <li>Open the <strong>Libraries</strong> tab, pick your
-                team's language, and point the picker at your
-                robot project folder. Manager drops the vendordep
-                JSON or pip dep into place.</li>
+                team's language, and point the picker at your robot
+                project folder. Manager drops a single
+                <code>AcuityClient</code> helper file into your
+                project — no vendordep, no pip dep.</li>
             <li>Add 3 lines to your robot code (see your language's
                 section below) and you're reading AprilTag data.</li>
           </ol>
@@ -260,9 +284,8 @@
         <section class="docs-section" id="docs-architecture">
           <h1>How it fits together</h1>
           <p>
-            Acuity is a Pi Zero 2 W running a vision pipeline that
-            publishes AprilTag detections to NetworkTables 4. Three
-            pieces:
+            An Acuity device runs a vision pipeline that publishes
+            AprilTag detections to NetworkTables 4. Three pieces:
           </p>
           <dl class="docs-defs">
             <dt>The device</dt>
@@ -270,29 +293,34 @@
               Camera → OpenCV capture → pyapriltags →
               <code>/acuity/*</code> NT4 topics. Also serves a web
               dashboard at <code>:8080</code> (live feed, settings,
-              network controls). Mounts via USB-A on the RoboRIO.
+              network controls, system + scripts API). Mounts via
+              USB-A on the RoboRIO.
             </dd>
-            <dt>The robot library (Java / Python / C++)</dt>
+            <dt>The <code>AcuityClient</code> helper file</dt>
             <dd>
-              Tiny wrapper around NT4 that handles connection state,
-              staleness, JSON parsing of the all-tags array, and
-              gives you a typed API (<code>getBestTag()</code> →
-              <code>Optional&lt;TagDetection&gt;</code> with
-              <code>distanceMeters</code> / <code>yawDeg</code> /
-              <code>pitchDeg</code> fields).
+              Single self-contained file Manager drops into your
+              robot project. Wraps NT4 with a typed
+              <code>getBestTag()</code> →
+              <code>Optional&lt;TagDetection&gt;</code> API and
+              tracks heartbeat staleness so you can tell "no tag in
+              view" from "device offline". Zero external
+              dependencies — no vendordep, no Maven artifact, no
+              PyPI package. Just a file in your source tree.
             </dd>
             <dt>This Manager</dt>
             <dd>
               Driver-station companion. Discovers devices,
               one-clicks firmware updates, opens an in-app SSH
-              terminal, installs the robot library into your
-              project, and embeds the camera feed (Camera tab).
+              terminal, drops the helper file into your project,
+              and embeds the camera feed (Camera tab).
             </dd>
           </dl>
           <p class="docs-callout">
-            All three speak NT4 over the team radio. The robot
-            never opens an HTTP socket to Acuity — it reads NT4
-            topics like every other component.
+            Robot code talks to Acuity via NetworkTables 4. It
+            never opens an HTTP socket to the device — it reads
+            NT4 topics like every other component on the bus. The
+            REST endpoints below are for tools (Manager,
+            dashboard, your own scripts), not robot code.
           </p>
         </section>
 
@@ -302,37 +330,34 @@
 
           <h2>Install</h2>
           <p>
-            The Libraries tab installs the vendordep automatically.
-            For manual install:
+            Use Manager's <strong>Libraries</strong> tab → pick your
+            robot project folder. Manager drops a single file at
+            <code>src/main/java/frc/robot/acuity/AcuityClient.java</code>.
+            That's it — rebuild the project and the new class is on
+            the classpath.
           </p>
-          <ol>
-            <li>In VS Code, open your robot project.</li>
-            <li>Click the <strong>WPILib</strong> palette icon
-                → <strong>Manage Vendor Libraries</strong>
-                → <strong>Install new library (online)</strong>.</li>
-            <li>Paste:
-              <div class="code-block">
-                <pre><code>https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/libraries/Acuity.json</code></pre>
-                <button class="copy-btn" data-copy>Copy</button>
-              </div>
-            </li>
-            <li>OK to add. Rebuild the project.</li>
-          </ol>
+          <p class="hint">
+            No vendordep is involved. The helper uses only
+            <code>edu.wpi.first.networktables</code> APIs that ship
+            with WPILib, so there's nothing for the WPILib library
+            manager to fetch and nothing to break when you move to
+            next year's WPILib.
+          </p>
 
           <h2>Minimal usage</h2>
           <div class="code-block">
-            <pre><code class="lang-java">import tech.acuity.AcuityVision;
-import tech.acuity.TagDetection;
+            <pre><code class="lang-java">import frc.robot.acuity.AcuityClient;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 
 public class Robot extends TimedRobot {
-  private final AcuityVision vision = AcuityVision.getInstance();
+  private final AcuityClient acuity = AcuityClient.getInstance();
 
   @Override
-  public void robotPeriodic() {
-    vision.getBestTag().ifPresent(tag -> {
-      SmartDashboard.putNumber("acuity/id",         tag.id);
-      SmartDashboard.putNumber("acuity/distance_m", tag.distanceMeters);
-      SmartDashboard.putNumber("acuity/yaw_deg",    tag.yawDeg);
+  public void teleopPeriodic() {
+    acuity.getBestTag().ifPresent(tag -&gt; {
+      SmartDashboard.putNumber("acuity/id",         tag.id());
+      SmartDashboard.putNumber("acuity/distance_m", tag.distanceMeters());
+      SmartDashboard.putNumber("acuity/yaw_deg",    tag.yawDeg());
     });
   }
 }</code></pre>
@@ -346,59 +371,53 @@ public class Robot extends TimedRobot {
             </thead>
             <tbody>
               <tr>
-                <td><code>AcuityVision.getInstance()</code></td>
-                <td><code>AcuityVision</code></td>
-                <td>Singleton — one client per process.</td>
+                <td><code>AcuityClient.getInstance()</code></td>
+                <td><code>AcuityClient</code></td>
+                <td>Singleton — one subscriber set per process.</td>
               </tr>
               <tr>
-                <td><code>vision.getBestTag()</code></td>
+                <td><code>acuity.getBestTag()</code></td>
                 <td><code>Optional&lt;TagDetection&gt;</code></td>
-                <td>Largest tag in frame; empty when no tag or device offline.</td>
+                <td>Best target this frame; empty when no tag or device offline.</td>
               </tr>
               <tr>
-                <td><code>vision.getAllTags()</code></td>
-                <td><code>List&lt;TagDetection&gt;</code></td>
-                <td>Every tag in current frame.</td>
-              </tr>
-              <tr>
-                <td><code>vision.getBestObject()</code></td>
-                <td><code>Optional&lt;ObjectDetection&gt;</code></td>
-                <td>Object detector output (off by default).</td>
-              </tr>
-              <tr>
-                <td><code>vision.getHealth()</code></td>
-                <td><code>DeviceHealth</code></td>
+                <td><code>acuity.getHealth()</code></td>
+                <td><code>Health</code></td>
                 <td>CPU %, SoC °C, uptime seconds.</td>
               </tr>
               <tr>
-                <td><code>vision.isConnected()</code></td>
+                <td><code>acuity.isConnected()</code></td>
                 <td><code>boolean</code></td>
-                <td>Heartbeat fresh within 250 ms.</td>
+                <td>Heartbeat updated in the last 250 ms.</td>
               </tr>
             </tbody>
           </table>
 
           <h2><code>TagDetection</code> fields</h2>
+          <p>
+            <code>TagDetection</code> is a <code>record</code>, so
+            field access is parens-style (<code>tag.id()</code>,
+            <code>tag.distanceMeters()</code>).
+          </p>
           <table class="docs-api">
-            <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+            <thead><tr><th>Accessor</th><th>Type</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>id</code></td><td>int</td><td>AprilTag ID. <code>-1</code> means "no tag" (you'll never see this through <code>Optional</code>, but raw NT4 readers will).</td></tr>
-              <tr><td><code>distanceMeters</code></td><td>double</td><td>Distance from camera to tag center.</td></tr>
-              <tr><td><code>yawDeg</code></td><td>double</td><td>Camera-to-tag yaw, signed. Negative = left of center.</td></tr>
-              <tr><td><code>pitchDeg</code></td><td>double</td><td>Camera-to-tag pitch, signed.</td></tr>
-              <tr><td><code>tx</code> / <code>ty</code></td><td>double</td><td>Pixel offset from frame center, normalized to <code>[-1, 1]</code> (resolution-independent).</td></tr>
-              <tr><td><code>area</code></td><td>double</td><td>Fraction of frame the tag occupies, <code>0..1</code>.</td></tr>
-              <tr><td><code>timestamp</code></td><td>double</td><td>FPGA seconds when the source frame was captured.</td></tr>
-              <tr><td><code>decisionMargin</code></td><td>double</td><td>pyapriltags confidence — bigger = stronger detection.</td></tr>
+              <tr><td><code>id()</code></td><td>int</td><td>AprilTag ID. <code>-1</code> means "no tag" (you'll never see this through <code>Optional</code>; raw NT4 readers will).</td></tr>
+              <tr><td><code>distanceMeters()</code></td><td>double</td><td>Distance from camera to tag center.</td></tr>
+              <tr><td><code>yawDeg()</code></td><td>double</td><td>Camera-to-tag yaw, signed. Negative = left of center.</td></tr>
+              <tr><td><code>pitchDeg()</code></td><td>double</td><td>Camera-to-tag pitch, signed.</td></tr>
+              <tr><td><code>tx()</code> / <code>ty()</code></td><td>double</td><td>Pixel offset from frame center, normalized to <code>[-1, 1]</code> (resolution-independent).</td></tr>
+              <tr><td><code>area()</code></td><td>double</td><td>Fraction of frame the tag occupies, <code>0..1</code>.</td></tr>
+              <tr><td><code>timestamp()</code></td><td>double</td><td>FPGA seconds when the source frame was captured.</td></tr>
+              <tr><td><code>decisionMargin()</code></td><td>double</td><td>pyapriltags confidence — bigger = stronger detection.</td></tr>
             </tbody>
           </table>
 
           <h2>Common patterns</h2>
           <h3>Auto-aim with the best tag</h3>
           <div class="code-block">
-            <pre><code class="lang-java">vision.getBestTag().ifPresent(tag -> {
-  // Drive to face the tag (yaw_deg → heading PID setpoint).
-  double headingErrorDeg = tag.yawDeg;
+            <pre><code class="lang-java">acuity.getBestTag().ifPresent(tag -&gt; {
+  double headingErrorDeg = tag.yawDeg();
   double turnPower = -kP_HEADING * headingErrorDeg;
   drivetrain.arcadeDrive(0, turnPower);
 });</code></pre>
@@ -407,27 +426,24 @@ public class Robot extends TimedRobot {
 
           <h3>Filter to specific tag IDs</h3>
           <p>
-            Set the preferred-tag-ID list in the dashboard's
-            Settings tab — Acuity then picks "best" only from those
-            IDs. Or filter client-side:
+            Easier path: set the preferred-tag-ID list in the
+            dashboard's Settings tab — Acuity then picks "best" only
+            from those IDs and you read
+            <code>getBestTag()</code> as usual. Or read all visible
+            tags directly off NT4 if you want client-side filtering;
+            see the <a href="#docs-nt4">NT schema</a>'s
+            <code>tags/all</code> string topic.
           </p>
-          <div class="code-block">
-            <pre><code class="lang-java">var speakerTag = vision.getAllTags().stream()
-    .filter(t -&gt; t.id == 7 || t.id == 4)   // 2025 speaker tags
-    .max(Comparator.comparingDouble(t -&gt; t.area));
-speakerTag.ifPresent(tag -&gt; { /* aim */ });</code></pre>
-            <button class="copy-btn" data-copy>Copy</button>
-          </div>
 
           <h3>Handle the device dropping mid-match</h3>
           <p>
             <code>getBestTag()</code> returns empty whenever the
-            heartbeat is stale (&gt;250 ms). Check
-            <code>isConnected()</code> if you want to distinguish
-            "no tag in view" from "device unreachable":
+            heartbeat is stale (&gt;250 ms). Use
+            <code>isConnected()</code> to distinguish "no tag in
+            view" from "device unreachable":
           </p>
           <div class="code-block">
-            <pre><code class="lang-java">if (!vision.isConnected()) {
+            <pre><code class="lang-java">if (!acuity.isConnected()) {
   // Device is gone — fall back to encoders + IMU only.
   setVisionTrustWeight(0.0);
 } else {
@@ -443,32 +459,30 @@ speakerTag.ifPresent(tag -&gt; { /* aim */ });</code></pre>
 
           <h2>Install</h2>
           <p>
-            For a robotpy project, add to <code>pyproject.toml</code>:
+            Use Manager's <strong>Libraries</strong> tab and pick
+            your robot project folder. Manager drops
+            <code>acuity_client.py</code> next to your
+            <code>robot.py</code>. That's it — no
+            <code>pyproject.toml</code> edit, no
+            <code>robotpy sync</code>, no pip dep. Re-deploy with
+            <code>robotpy deploy</code> and the helper rides along.
           </p>
-          <div class="code-block">
-            <pre><code class="lang-toml">[tool.robotpy]
-requires = [
-  "acuity-vision&gt;=0.1",
-]</code></pre>
-            <button class="copy-btn" data-copy>Copy</button>
-          </div>
-          <p>
-            Or use this Manager's Libraries tab and pick your robot
-            project folder — it edits <code>pyproject.toml</code>
-            for you.
+          <p class="hint">
+            The helper imports <code>ntcore</code>, which robotpy
+            already bundles for every robot project.
           </p>
 
           <h2>Minimal usage</h2>
           <div class="code-block">
             <pre><code class="lang-python">import wpilib
-import acuity_vision
+from acuity_client import AcuityClient
 
 class MyRobot(wpilib.TimedRobot):
     def robotInit(self):
-        self.vision = acuity_vision.AcuityVision()
+        self.acuity = AcuityClient()
 
-    def robotPeriodic(self):
-        tag = self.vision.get_best_tag()
+    def teleopPeriodic(self):
+        tag = self.acuity.get_best_tag()
         if tag is not None:
             wpilib.SmartDashboard.putNumber("acuity/id",         tag.id)
             wpilib.SmartDashboard.putNumber("acuity/distance_m", tag.distance_m)
@@ -480,18 +494,19 @@ class MyRobot(wpilib.TimedRobot):
           <table class="docs-api">
             <thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead>
             <tbody>
-              <tr><td><code>AcuityVision()</code></td><td>—</td><td>Construct once per robot. Lazy-imports <code>ntcore</code> from robotpy.</td></tr>
-              <tr><td><code>get_best_tag()</code></td><td><code>TagDetection | None</code></td><td>Largest tag in frame.</td></tr>
-              <tr><td><code>get_all_tags()</code></td><td><code>list[TagDetection]</code></td><td>Every tag in current frame.</td></tr>
-              <tr><td><code>get_best_object()</code></td><td><code>ObjectDetection | None</code></td><td>Object-detector output.</td></tr>
-              <tr><td><code>get_health()</code></td><td><code>DeviceHealth</code></td><td>CPU / temp / uptime.</td></tr>
-              <tr><td><code>is_connected()</code></td><td><code>bool</code></td><td>Heartbeat fresh within 100 ms.</td></tr>
+              <tr><td><code>AcuityClient()</code></td><td>—</td><td>Construct once per robot. Reuses the default <code>NetworkTableInstance</code>.</td></tr>
+              <tr><td><code>get_best_tag()</code></td><td><code>TagDetection | None</code></td><td>Best target this frame; <code>None</code> when no tag or device offline.</td></tr>
+              <tr><td><code>get_all_tags()</code></td><td><code>list[TagDetection]</code></td><td>Every tag in current frame; parsed from the <code>tags/all</code> JSON topic.</td></tr>
+              <tr><td><code>get_health()</code></td><td><code>Health</code></td><td>CPU / temp / uptime.</td></tr>
+              <tr><td><code>is_connected()</code></td><td><code>bool</code></td><td>Heartbeat updated in the last 250 ms.</td></tr>
             </tbody>
           </table>
 
           <h2><code>TagDetection</code> fields</h2>
-          <p>Same shape as the Java <code>TagDetection</code>, with
-             snake_case field names:</p>
+          <p>
+            Frozen dataclass — fields are accessed as attributes
+            (<code>tag.id</code>, <code>tag.distance_m</code>):
+          </p>
           <table class="docs-api">
             <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
             <tbody>
@@ -509,17 +524,17 @@ class MyRobot(wpilib.TimedRobot):
           <div class="code-block">
             <pre><code class="lang-python"># Drop in commands/auto_aim.py
 import commands2
-import acuity_vision
+from acuity_client import AcuityClient
 
 class AutoAim(commands2.Command):
     def __init__(self, drivetrain):
         super().__init__()
         self.drive = drivetrain
-        self.vision = acuity_vision.AcuityVision()
+        self.acuity = AcuityClient()
         self.addRequirements(drivetrain)
 
     def execute(self):
-        tag = self.vision.get_best_tag()
+        tag = self.acuity.get_best_tag()
         if tag is None:
             self.drive.arcadeDrive(0, 0)
             return
@@ -527,7 +542,7 @@ class AutoAim(commands2.Command):
         self.drive.arcadeDrive(0, turn)
 
     def isFinished(self):
-        tag = self.vision.get_best_tag()
+        tag = self.acuity.get_best_tag()
         return tag is not None and abs(tag.yaw_deg) &lt; 1.5</code></pre>
             <button class="copy-btn" data-copy>Copy</button>
           </div>
@@ -539,30 +554,30 @@ class AutoAim(commands2.Command):
 
           <h2>Install</h2>
           <p>
-            Same vendordep URL as Java — the JSON declares
-            both <code>javaDependencies</code> and
-            <code>cppDependencies</code>:
+            Use Manager's <strong>Libraries</strong> tab → pick your
+            robot project folder. Manager drops a single header at
+            <code>src/main/include/acuity/AcuityClient.h</code>.
+            Header-only — no <code>.cpp</code> to add to your gradle
+            build, no library to link.
           </p>
-          <div class="code-block">
-            <pre><code>https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/libraries/Acuity.json</code></pre>
-            <button class="copy-btn" data-copy>Copy</button>
-          </div>
 
           <h2>Minimal usage</h2>
           <div class="code-block">
-            <pre><code class="lang-cpp">#include &lt;acuity/AcuityVision.h&gt;
+            <pre><code class="lang-cpp">#include "acuity/AcuityClient.h"
 #include &lt;frc/smartdashboard/SmartDashboard.h&gt;
 
 class Robot : public frc::TimedRobot {
  public:
-  void RobotPeriodic() override {
-    auto&amp; vision = acuity::AcuityVision::GetInstance();
-    if (auto tag = vision.GetBestTag()) {
+  void TeleopPeriodic() override {
+    if (auto tag = acuity.GetBestTag()) {
       frc::SmartDashboard::PutNumber("acuity/id",         tag-&gt;id);
       frc::SmartDashboard::PutNumber("acuity/distance_m", tag-&gt;distanceMeters);
       frc::SmartDashboard::PutNumber("acuity/yaw_deg",    tag-&gt;yawDeg);
     }
   }
+
+ private:
+  acuity::AcuityClient acuity{};
 };</code></pre>
             <button class="copy-btn" data-copy>Copy</button>
           </div>
@@ -571,18 +586,18 @@ class Robot : public frc::TimedRobot {
           <table class="docs-api">
             <thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead>
             <tbody>
-              <tr><td><code>AcuityVision::GetInstance()</code></td><td><code>AcuityVision&amp;</code></td><td>Process-wide singleton.</td></tr>
-              <tr><td><code>vision.GetBestTag()</code></td><td><code>std::optional&lt;TagDetection&gt;</code></td><td>Largest tag in frame.</td></tr>
-              <tr><td><code>vision.GetAllTags()</code></td><td><code>std::vector&lt;TagDetection&gt;</code></td><td>Every tag.</td></tr>
-              <tr><td><code>vision.GetBestObject()</code></td><td><code>std::optional&lt;ObjectDetection&gt;</code></td><td>Object detector.</td></tr>
-              <tr><td><code>vision.GetHealth()</code></td><td><code>DeviceHealth</code></td><td>CPU / temp / uptime.</td></tr>
-              <tr><td><code>vision.IsConnected()</code></td><td><code>bool</code></td><td>Heartbeat fresh.</td></tr>
+              <tr><td><code>AcuityClient()</code></td><td>—</td><td>Construct as a class member. Owns its NT subscribers.</td></tr>
+              <tr><td><code>acuity.GetBestTag()</code></td><td><code>std::optional&lt;TagDetection&gt;</code></td><td>Best target this frame.</td></tr>
+              <tr><td><code>acuity.GetHealth()</code></td><td><code>Health</code></td><td>CPU / temp / uptime.</td></tr>
+              <tr><td><code>acuity.IsConnected()</code></td><td><code>bool</code></td><td>Heartbeat fresh within 250 ms.</td></tr>
             </tbody>
           </table>
           <p class="hint">
-            Field names match the Java binding (camelCase
-            <code>distanceMeters</code> / <code>yawDeg</code> /
-            etc.).
+            <code>TagDetection</code> field access is via the arrow
+            operator on the <code>std::optional</code>:
+            <code>tag-&gt;distanceMeters</code>,
+            <code>tag-&gt;yawDeg</code>, etc. Field names match the
+            Java helper (camelCase).
           </p>
         </section>
 
@@ -665,12 +680,12 @@ class Robot : public frc::TimedRobot {
 
         <!-- ============== REST endpoints ============== -->
         <section class="docs-section" id="docs-rest">
-          <h1>REST endpoints (device)</h1>
+          <h1>REST endpoints (vision)</h1>
           <p>
-            The on-device dashboard exposes a small REST surface
-            on port 8080. You normally don't touch it from robot
-            code — Manager and the dashboard UI consume it. Useful
-            for debugging.
+            The on-device dashboard exposes a small REST surface on
+            port 8080. Robot code shouldn't touch this — read NT4
+            instead. These are for tools (Manager, the dashboard UI,
+            your own scripts) and for debugging.
           </p>
           <table class="docs-api">
             <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
@@ -679,23 +694,777 @@ class Robot : public frc::TimedRobot {
               <tr><td><code>GET /stream.mjpg</code></td><td>multipart MJPEG video.</td></tr>
               <tr><td><code>GET /api/detections</code></td><td>One-shot JSON snapshot of current tags.</td></tr>
               <tr><td><code>WS  /api/detections.ws</code></td><td>Live stream of detection snapshots, one per processed frame.</td></tr>
+              <tr><td><code>POST /api/target</code></td><td><code>{ "id": &lt;int&gt; }</code> — operator-locks the best-target selection to that tag ID. <code>-1</code> clears.</td></tr>
               <tr><td><code>GET /api/health</code></td><td>JSON: build, FPS, CPU, temp, uptime, network state.</td></tr>
               <tr><td><code>GET /api/settings</code></td><td>JSON of current camera + detection + NT4 settings.</td></tr>
               <tr><td><code>POST /api/settings</code></td><td>Update settings. Body is JSON with any subset of the keys.</td></tr>
-              <tr><td><code>POST /api/reboot</code></td><td>Reboots the Pi after a 1 s grace.</td></tr>
+              <tr><td><code>POST /api/reboot</code></td><td>Reboots the Acuity device after a 1 s grace.</td></tr>
               <tr><td><code>POST /api/forget-wifi</code></td><td>Removes <code>/boot/firmware/acuity.conf</code> and reboots → AP-mode setup.</td></tr>
               <tr><td><code>GET /api/logs?lines=N</code></td><td>Tail of the dashboard's systemd journal.</td></tr>
             </tbody>
           </table>
         </section>
 
+        <!-- ============== Coprocessor endpoints ============== -->
+        <section class="docs-section" id="docs-coproc">
+          <h1>Coprocessor endpoints</h1>
+          <p class="docs-lead">
+            Acuity is sold as a vision device, but it's a small
+            Linux board on the robot's network — i.e. the only
+            CPU + Python runtime no other component on the bus has.
+            The endpoints below let you lean on it as a general
+            coprocessor: get system stats, restart services, run
+            user scripts, publish arbitrary values to NetworkTables.
+          </p>
+
+          <h2>System info</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/system</code></td><td>Full system snapshot — model, kernel, CPU%, RAM%, disk%, SoC °C, uptime, eth0/wlan0 IPs, camera status, scripts dir.</td></tr>
+            </tbody>
+          </table>
+          <p>
+            Cheap (&lt;10 ms — built from <code>/proc</code> +
+            <code>/sys</code> reads). Anything that needs sustained
+            polling should subscribe to NT4's
+            <code>/acuity/health/*</code> topics instead.
+          </p>
+
+          <h2>Service control</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/services</code></td><td>List of controllable units + their current systemd state.</td></tr>
+              <tr><td><code>POST /api/services/&lt;name&gt;</code></td><td><code>{ "action": "restart" }</code> (also <code>start</code> / <code>stop</code> / <code>status</code>). Whitelisted units only.</td></tr>
+            </tbody>
+          </table>
+          <p class="hint">
+            Restarting <code>acuity-dashboard.service</code> kills
+            the process answering your request — the response will
+            not reach the client. Manager handles the dropped
+            connection by treating it as success.
+          </p>
+
+          <h2>Script runner</h2>
+          <p>
+            Drop any executable file (or
+            <code>.py</code>) into
+            <code>/var/lib/acuity/scripts/</code> over SSH and run
+            it from any HTTP client. Each run gets a buffered
+            stdout/stderr you can poll until exit.
+          </p>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/scripts</code></td><td>List scripts in the scripts dir (name, size, mtime, executable bit).</td></tr>
+              <tr><td><code>POST /api/scripts/&lt;name&gt;/run</code></td><td>Optional body <code>{ "args": ["..."] }</code>. Returns a <code>run_id</code>.</td></tr>
+              <tr><td><code>GET /api/scripts/runs</code></td><td>List every run from this dashboard process.</td></tr>
+              <tr><td><code>GET /api/scripts/runs/&lt;run_id&gt;</code></td><td>Run state, exit code, full captured output (capped at 256 KB).</td></tr>
+              <tr><td><code>POST /api/scripts/runs/&lt;run_id&gt;/stop</code></td><td>SIGTERM the run.</td></tr>
+            </tbody>
+          </table>
+          <p>
+            <code>.py</code> files are launched with
+            <code>python3</code> automatically. Anything else has to
+            be <code>chmod +x</code>'d first; that's deliberate so
+            "I forgot to mark it runnable" doesn't get masked. Runs
+            don't persist across dashboard restarts — there's no
+            on-disk state.
+          </p>
+
+          <h2>NT4 publish passthrough</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>POST /api/nt/publish</code></td><td><code>{ "path": "user/foo", "type": "double", "value": 1.23 }</code> — publishes under <code>/acuity/user/...</code>.</td></tr>
+            </tbody>
+          </table>
+          <p>
+            Sandboxed to the <code>/acuity/user/</code> subtree so
+            it can't stomp on the canonical <code>/acuity/tags/*</code>
+            topics the camera thread owns. Type must be one of
+            <code>int</code> / <code>double</code> /
+            <code>boolean</code> / <code>string</code>. NT4 must be
+            configured (<code>nt_team</code> or
+            <code>nt_server_host</code> set in dashboard Settings)
+            or this returns 503.
+          </p>
+
+          <h2>Auth</h2>
+          <p>
+            None. Acuity sits on a closed FRC robot radio; the
+            endpoints assume the network it's on is the trust
+            boundary. Don't expose the dashboard port to the wider
+            internet.
+          </p>
+        </section>
+
+        <!-- ============== Sending commands ============== -->
+        <section class="docs-section" id="docs-commands">
+          <h1>Sending commands from robot code</h1>
+          <p class="docs-lead">
+            Two paths, depending on how chatty you need to be.
+            <strong>NT4</strong> is what you already use for reading
+            tags — push-based, sub-frame latency, automatic
+            reconnection. <strong>HTTP</strong> is for one-shot
+            "do a thing" commands (apply a pipeline, change the
+            crosshair, log a record). Both are first-class.
+          </p>
+
+          <h2>Pattern A — NT4 only (no command surface)</h2>
+          <p>
+            The simplest possible thing. Read with
+            <code>AcuityClient.getBestTag()</code>, write with NT4
+            publishers under <code>/acuity/user/...</code>:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">// Robot.java
+private final NetworkTable userTable =
+    NetworkTableInstance.getDefault().getTable("acuity/user");
+private final DoublePublisher shooterRpmPub =
+    userTable.getDoubleTopic("shooter_rpm").publish();
+
+@Override
+public void teleopPeriodic() {
+  shooterRpmPub.set(shooter.getRPM());
+
+  acuity.getBestTag().ifPresent(tag -&gt; {
+    drivetrain.aim(tag.yawDeg());
+  });
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Anyone else on the bus (driver-station dashboards,
+            another coprocessor, your own Python script reading the
+            telemetry log) can subscribe to
+            <code>/acuity/user/shooter_rpm</code>.
+          </p>
+
+          <h2>Pattern B — HTTP from robot code</h2>
+          <p>
+            For "apply pipeline 3" / "log this event" / "publish a
+            custom NT value": use HTTP. Latency is ~5–15 ms over the
+            radio — fine for everything except the 50 Hz hot loop.
+            WPILib's bundled <code>java.net.http</code> works
+            without extra dependencies.
+          </p>
+          <h3>Java helper</h3>
+          <p>
+            Drop this next to <code>AcuityClient.java</code> if you
+            need it (Manager doesn't auto-install it; it's optional):
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">package frc.robot.acuity;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+
+public final class AcuityCommand {
+  private static final HttpClient client =
+      HttpClient.newBuilder()
+        .connectTimeout(Duration.ofMillis(500))
+        .build();
+
+  // Best to call from a non-periodic context (button binding,
+  // command initialize). Don't put this in a 50 Hz loop.
+  public static void applyPipeline(String host, String name) {
+    fireAndForget(host, "/api/pipelines/" + name + "/apply", "");
+  }
+
+  public static void setCrosshair(String host, double x, double y) {
+    fireAndForget(host, "/api/settings",
+        "{\"crosshair_x\":" + x + ",\"crosshair_y\":" + y + "}");
+  }
+
+  public static void setSelectedTag(String host, int id) {
+    fireAndForget(host, "/api/target", "{\"id\":" + id + "}");
+  }
+
+  public static void log(String host, String key, double value) {
+    fireAndForget(host, "/api/log",
+        "{\"key\":\"" + key + "\",\"value\":" + value + "}");
+  }
+
+  private static void fireAndForget(String host, String path, String body) {
+    HttpRequest req = HttpRequest.newBuilder()
+        .uri(URI.create("http://" + host + ":8080" + path))
+        .timeout(Duration.ofMillis(800))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+        .build();
+    client.sendAsync(req, HttpResponse.BodyHandlers.discarding());
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Use it like
+            <code>AcuityCommand.applyPipeline("acuity-1279.local", "near_speaker");</code>
+            on a button bind.
+          </p>
+
+          <h3>Python helper</h3>
+          <div class="code-block">
+            <pre><code class="lang-python"># commands/acuity_command.py
+from __future__ import annotations
+import json, urllib.request
+
+class AcuityCommand:
+    def __init__(self, host: str = "acuity.local"):
+        self.base = f"http://{host}:8080"
+
+    def _post(self, path: str, body: dict | None = None) -&gt; dict:
+        data = json.dumps(body or {}).encode()
+        req = urllib.request.Request(
+            self.base + path, data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=0.8) as r:
+            return json.loads(r.read())
+
+    def apply_pipeline(self, name):     self._post(f"/api/pipelines/{name}/apply")
+    def set_crosshair(self, x, y):      self._post("/api/settings",
+                                                  {"crosshair_x": x, "crosshair_y": y})
+    def set_selected_tag(self, id_):    self._post("/api/target", {"id": id_})
+    def log(self, key, value, **tags):  self._post("/api/log",
+                                                  {"key": key, "value": value, "tags": tags})</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Latency / reliability notes</h2>
+          <ul>
+            <li>HTTP commands are <strong>fire-and-forget</strong>
+                in the helpers above — don't await them. Robot
+                periodics must never block on the network.</li>
+            <li>If you need the response (e.g.
+                <code>/api/system</code>), call it from a Command's
+                <code>initialize()</code> on a separate thread, or
+                from a one-shot command not on the periodic path.</li>
+            <li>The dashboard handles ~200 reqs/sec on the Acuity
+                device without breaking a sweat. Don't try to drive
+                your robot loop through HTTP though — that's what
+                NT4 is for.</li>
+          </ul>
+        </section>
+
+        <!-- ============== Pipelines ============== -->
+        <section class="docs-section" id="docs-pipelines">
+          <h1>Pipelines</h1>
+          <p class="docs-lead">
+            A <em>pipeline</em> is a named snapshot of every setting
+            on the device — capture resolution, AprilTag size,
+            preferred-tag IDs, stream quality, NT team — saved to
+            disk and switchable in one HTTP call. The classic
+            Limelight idiom: different vision configs for different
+            jobs. Acuity has no slot limit; you can save as many as
+            you want.
+          </p>
+
+          <h2>Saving a pipeline</h2>
+          <p>
+            Tune the device the way you want it (Settings tab in the
+            dashboard, or POST <code>/api/settings</code>), then:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-bash">curl -X POST http://acuity-1279.local:8080/api/pipelines/near_speaker/save</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Switching from robot code</h2>
+          <div class="code-block">
+            <pre><code class="lang-java">// Auto-flip pipelines based on field zone
+public void teleopPeriodic() {
+  String want = drivetrain.isInOpponentZone() ? "long_range" : "near_speaker";
+  if (!want.equals(currentPipeline)) {
+    AcuityCommand.applyPipeline("acuity-1279.local", want);
+    currentPipeline = want;
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            The device persists the active pipeline name across
+            reboots in <code>/var/lib/acuity/pipelines.json</code>,
+            so a power cycle won't reset back to defaults.
+          </p>
+
+          <h2>Endpoint reference</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/pipelines</code></td><td>List pipelines + which one is currently active.</td></tr>
+              <tr><td><code>POST /api/pipelines/&lt;name&gt;/save</code></td><td>Snapshot the current settings under <code>&lt;name&gt;</code>.</td></tr>
+              <tr><td><code>POST /api/pipelines/&lt;name&gt;/apply</code></td><td>Load <code>&lt;name&gt;</code>'s settings as the active config.</td></tr>
+              <tr><td><code>DELETE /api/pipelines/&lt;name&gt;</code></td><td>Forget a pipeline.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- ============== Color-blob detector ============== -->
+        <section class="docs-section" id="docs-color-blob">
+          <h1>Color-blob (game-piece) detector</h1>
+          <p class="docs-lead">
+            Optional second pipeline that runs alongside AprilTag
+            detection. HSV threshold + connected-components on the
+            same frame the tag detector just used — so the camera
+            only captures once and the CPU touches the pixels twice.
+            Off by default; flip on per-pipeline. ~5 ms / frame on
+            the Acuity device at the default
+            <code>object_downscale=2</code>.
+          </p>
+
+          <h2>Enable + tune</h2>
+          <p>From the dashboard's Settings tab, or:</p>
+          <div class="code-block">
+            <pre><code class="lang-bash">curl -X POST http://acuity-1279.local:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enable_objects":     true,
+    "hsv_lower":          [10,  100, 100],
+    "hsv_upper":          [25,  255, 255],
+    "min_object_area_px": 200,
+    "max_objects":        5,
+    "object_downscale":   2
+  }'</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            HSV ranges follow OpenCV conventions (H 0-179, S 0-255,
+            V 0-255). Tune by aiming the camera at a game piece and
+            walking the lower/upper bounds in until only the piece
+            shows in the dashboard's mask preview.
+          </p>
+
+          <h2>Reading from robot code</h2>
+          <p>
+            Subscribe to the same NT4 namespace the helper class
+            already uses:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">var t = NetworkTableInstance.getDefault().getTable("acuity");
+DoubleSubscriber objYaw  = t.getDoubleTopic("objects/best/yaw_deg").subscribe(0.0);
+DoubleSubscriber objArea = t.getDoubleTopic("objects/best/area").subscribe(0.0);
+IntegerSubscriber objId  = t.getIntegerTopic("objects/best/id").subscribe(-1);
+
+@Override
+public void teleopPeriodic() {
+  if (objId.get() &gt;= 0 &amp;&amp; objArea.get() &gt; 0.005) {
+    drivetrain.setHeadingSetpoint(getHeading() + objYaw.get());
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>NT topics</h2>
+          <table class="docs-api">
+            <thead><tr><th>Topic</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>/acuity/objects/best/id</code></td><td>int</td><td>Per-frame index, or <code>-1</code> when nothing matched.</td></tr>
+              <tr><td><code>/acuity/objects/best/yaw_deg</code></td><td>double</td><td>Crosshair-relative yaw of the blob centroid.</td></tr>
+              <tr><td><code>/acuity/objects/best/pitch_deg</code></td><td>double</td><td>Crosshair-relative pitch.</td></tr>
+              <tr><td><code>/acuity/objects/best/tx</code> / <code>ty</code></td><td>double</td><td>Crosshair-relative pixel offsets, normalized to <code>[-1, 1]</code>.</td></tr>
+              <tr><td><code>/acuity/objects/best/area</code></td><td>double</td><td>Frame-fraction occupied, <code>0..1</code>.</td></tr>
+              <tr><td><code>/acuity/objects/best/width_px</code> / <code>height_px</code></td><td>int</td><td>Bounding box in original-frame pixels.</td></tr>
+              <tr><td><code>/acuity/objects/count</code></td><td>int</td><td>How many blobs survived filtering this frame.</td></tr>
+              <tr><td><code>/acuity/objects/all</code></td><td>string</td><td>JSON array of every blob. Largest first.</td></tr>
+            </tbody>
+          </table>
+          <p class="hint">
+            Bind a different HSV range to each named pipeline (see
+            <a href="#docs-pipelines">Pipelines</a>) — that's how you
+            switch between "track yellow notes" and "track blue
+            cubes" with one HTTP call.
+          </p>
+        </section>
+
+        <!-- ============== Crosshair calibration ============== -->
+        <section class="docs-section" id="docs-crosshair">
+          <h1>Crosshair calibration</h1>
+          <p class="docs-lead">
+            The launcher / arm / shooter on a robot is rarely
+            mechanically aligned with the camera's optical axis.
+            Acuity's crosshair lets you teach it where "aim point" is
+            in normalized image coordinates; from then on,
+            <code>yaw_deg</code> and <code>pitch_deg</code> are
+            offsets from <em>that</em> point, not from the optical
+            center. Robot code drives a heading PID straight off the
+            topic and hits where you calibrated.
+          </p>
+
+          <h2>Calibrate</h2>
+          <ol>
+            <li>Sit the robot at a known distance from a tag and
+                fire one shot.</li>
+            <li>Note where the projectile actually landed relative
+                to the image center, in normalized
+                <code>[-1, 1]</code> coords (right is positive
+                <code>x</code>, down is positive <code>y</code>).</li>
+            <li>Save those as the crosshair:</li>
+          </ol>
+          <div class="code-block">
+            <pre><code class="lang-bash">curl -X POST http://acuity-1279.local:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{ "crosshair_x": 0.05, "crosshair_y": -0.08 }'</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Affects both the AprilTag and the color-blob outputs.
+            Bake different crosshairs into different pipelines if
+            your near-shot vs. long-shot calibration differs.
+          </p>
+          <p class="hint">
+            Crosshair defaults to <code>(0, 0)</code> — the optical
+            center. If you don't calibrate, you get the same
+            behavior as before this feature existed.
+          </p>
+        </section>
+
+        <!-- ============== Snapshot capture ============== -->
+        <section class="docs-section" id="docs-snapshot">
+          <h1>Snapshot capture</h1>
+          <p class="docs-lead">
+            Single JPEG of whatever the camera most recently
+            produced. Acuity hands back the frame the MJPEG streamer
+            already cached, so no extra encode pass — cheap enough to
+            call on every disabled-to-enabled transition.
+          </p>
+          <h2>Endpoint</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/snapshot</code></td><td>Single <code>image/jpeg</code> response. Header <code>X-Acuity-Frame-Ts</code> carries the camera-thread monotonic timestamp.</td></tr>
+            </tbody>
+          </table>
+          <h2>Use cases</h2>
+          <ul>
+            <li><strong>Match-start screenshots</strong> — capture
+                from <code>autonomousInit</code> for a record of
+                what the robot saw on the line.</li>
+            <li><strong>Driver-station debug</strong> — your driver
+                station can pull a still on demand without sucking
+                MJPEG bandwidth.</li>
+            <li><strong>Triggered capture</strong> — a script in
+                <code>/var/lib/acuity/scripts/</code> can poll
+                <code>/api/detections</code> and dump
+                <code>/api/snapshot</code> to disk every time a
+                specific tag ID enters frame.</li>
+          </ul>
+          <h2>Robot-code example</h2>
+          <div class="code-block">
+            <pre><code class="lang-java">@Override
+public void autonomousInit() {
+  HttpClient.newHttpClient().sendAsync(
+      HttpRequest.newBuilder()
+          .uri(URI.create("http://acuity-1279.local:8080/api/snapshot"))
+          .build(),
+      HttpResponse.BodyHandlers.ofFile(Path.of("/tmp/acuity-auto-start.jpg")));
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== Latency reporting ============== -->
+        <section class="docs-section" id="docs-latency">
+          <h1>Latency reporting</h1>
+          <p class="docs-lead">
+            Acuity stamps every detection with the camera's frame
+            timestamp <em>and</em> publishes a single rolling
+            <code>latency_ms</code> value on NT. Robot pose
+            estimators that take a measurement timestamp (WPILib's
+            <code>SwerveDrivePoseEstimator</code>, for instance) get
+            way better fusion when fed the right time.
+          </p>
+          <h2>NT topics</h2>
+          <table class="docs-api">
+            <thead><tr><th>Topic</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>/acuity/latency_ms</code></td><td>double</td><td>Total pipeline latency: capture → detect → publish, milliseconds.</td></tr>
+              <tr><td><code>/acuity/tags/best/timestamp</code></td><td>double</td><td>Camera-thread monotonic timestamp at frame capture (FPGA seconds).</td></tr>
+            </tbody>
+          </table>
+          <h2>Use the timestamp, not "now"</h2>
+          <div class="code-block">
+            <pre><code class="lang-java">var ms = NetworkTableInstance.getDefault()
+    .getTable("acuity").getDoubleTopic("latency_ms").subscribe(0.0);
+
+acuity.getBestTag().ifPresent(tag -&gt; {
+  double captureTime = Timer.getFPGATimestamp() - (ms.get() / 1000.0);
+  estimator.addVisionMeasurement(tagToFieldPose(tag), captureTime,
+                                 stdDevsForDistance(tag.distanceMeters()));
+});</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== Telemetry log ============== -->
+        <section class="docs-section" id="docs-telemetry">
+          <h1>Telemetry log</h1>
+          <p class="docs-lead">
+            An append-only JSONL data sink on the device. Robot
+            subsystems POST records during a match; you pull the
+            file off post-match and grep / pandas it. Cheap enough
+            to call at 50 Hz from every subsystem on the bus.
+          </p>
+
+          <h2>Writing a record</h2>
+          <div class="code-block">
+            <pre><code class="lang-bash">curl -X POST http://acuity-1279.local:8080/api/log \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"shooter_rpm","value":4350,"tags":{"match":"Q12"}}'</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Acuity stamps each record with wall-clock time
+            (<code>ts</code>) and a monotonic timestamp
+            (<code>mono</code>) so you can correlate even if the
+            wall clock jumps. Records land in
+            <code>/var/lib/acuity/logs/data.jsonl</code>; rotated
+            to <code>data.jsonl.1..4</code> at 10 MB. Total disk
+            cap is ~50 MB.
+          </p>
+
+          <h2>From robot code</h2>
+          <div class="code-block">
+            <pre><code class="lang-java">// In whatever subsystem
+private final AcuityCommand acuity = new AcuityCommand();
+@Override
+public void periodic() {
+  if (Timer.getFPGATimestamp() - lastLog &gt; 0.05) {  // 20 Hz
+    AcuityCommand.log("acuity-1279.local", "shooter_rpm", getRPM());
+    lastLog = Timer.getFPGATimestamp();
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Reading it back</h2>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/log?lines=N</code></td><td>Tail the live log.</td></tr>
+              <tr><td><code>GET /api/log/download</code></td><td>Download the entire live log file.</td></tr>
+              <tr><td><code>POST /api/log/clear</code></td><td>Truncate. Keeps existing archives.</td></tr>
+            </tbody>
+          </table>
+          <p>Or pull it from your laptop:</p>
+          <div class="code-block">
+            <pre><code class="lang-bash">scp acuity-root@acuity-1279.local:/var/lib/acuity/logs/data.jsonl* ./
+python3 -c "
+import pandas as pd
+df = pd.read_json('data.jsonl', lines=True)
+print(df.groupby('key')['value'].describe())
+"</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== Sensor fusion ============== -->
+        <section class="docs-section" id="docs-fusion">
+          <h1>Sensor fusion patterns</h1>
+          <p class="docs-lead">
+            Acuity hands you a pose estimate from AprilTags. Your
+            robot has wheel odometry and an IMU. Fusing them gives
+            you a pose that's better than either alone. You do the
+            fusing on the RoboRIO (where the swerve / pose estimator
+            already lives) — Acuity's job is to publish a clean
+            measurement and a covariance hint.
+          </p>
+
+          <h2>WPILib pose estimator (drop-in)</h2>
+          <p>
+            <code>SwerveDrivePoseEstimator</code> already takes
+            vision measurements with a covariance. Wire Acuity into
+            it directly:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">import edu.wpi.first.math.estimator.SwerveDrivePoseEstimator;
+import edu.wpi.first.math.geometry.*;
+import edu.wpi.first.wpilibj.Timer;
+
+private final SwerveDrivePoseEstimator estimator = /* ... */;
+
+@Override
+public void robotPeriodic() {
+  // 1. Wheel + gyro update — every loop.
+  estimator.update(gyro.getRotation2d(), modulePositions());
+
+  // 2. Vision update — only when Acuity has a fresh tag.
+  acuity.getBestTag().ifPresent(tag -&gt; {
+    // Convert tag-relative pose to field-relative using the
+    // 2025 AprilTagFieldLayout's known tag pose.
+    Pose2d fieldPose = tagToFieldPose(tag);
+    // Distance-aware covariance: trust close-range tags more.
+    double xyStd  = 0.1 + 0.5 * tag.distanceMeters();
+    double yawStd = Math.toRadians(2 + 5 * tag.distanceMeters());
+    estimator.addVisionMeasurement(
+        fieldPose,
+        Timer.getFPGATimestamp() - 0.020,    // ~20 ms latency
+        VecBuilder.fill(xyStd, xyStd, yawStd));
+  });
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p class="hint">
+            <code>tag.timestamp()</code> from the helper is the
+            FPGA seconds at the source frame, so you can refine the
+            <code>0.020</code> latency hint if you want lower
+            measurement noise.
+          </p>
+
+          <h2>Reject bad tags before fusing</h2>
+          <p>
+            The dashboard's selection logic is conservative but you
+            should still gate on confidence client-side:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">acuity.getBestTag()
+  .filter(tag -&gt; tag.decisionMargin() &gt; 30.0)   // confident
+  .filter(tag -&gt; tag.area() &gt; 0.001)            // big enough to trust
+  .filter(tag -&gt; tag.distanceMeters() &lt; 6.0)    // long-range = noisy
+  .ifPresent(tag -&gt; estimator.addVisionMeasurement(/* ... */));</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Lead / intercept calculation</h2>
+          <p>
+            Auto-aim while moving. Pure robot-side math; Acuity just
+            reports where the target is now.
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">// Lead a moving target with a finite-speed projectile.
+acuity.getBestTag().ifPresent(tag -&gt; {
+  double dist = tag.distanceMeters();
+  double tof = dist / SHOOTER_EXIT_MPS;        // time-of-flight
+  // Robot velocity in tag frame:
+  Translation2d v = drivetrain.getChassisSpeeds()
+      .toRobotRelative()
+      .toTranslation()
+      .rotateBy(Rotation2d.fromDegrees(-tag.yawDeg()));
+  double leadDeg = Math.toDegrees(Math.atan2(v.getY() * tof, dist));
+  double aimYaw  = tag.yawDeg() + leadDeg;
+  drivetrain.setHeadingSetpoint(aimYaw);
+});</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== Extending Acuity ============== -->
+        <section class="docs-section" id="docs-extending">
+          <h1>Extending Acuity</h1>
+          <p class="docs-lead">
+            Drop a Python file on the device, run it from robot
+            code. This is the freedom Limelight doesn't give you —
+            you can put real custom compute on this device.
+          </p>
+
+          <h2>Run user scripts</h2>
+          <p>
+            Anything in <code>/var/lib/acuity/scripts/</code> is
+            runnable via <code>POST /api/scripts/&lt;name&gt;/run</code>.
+            Drop them in via SSH (Manager → Terminal) or scp:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-bash">scp shooter_calibrate.py acuity-root@acuity-1279.local:/var/lib/acuity/scripts/</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            <code>.py</code> files are launched with
+            <code>python3</code> automatically. Anything else needs
+            <code>chmod +x</code>.
+          </p>
+
+          <h2>Multi-camera</h2>
+          <p>
+            The dashboard's main pipeline uses one source at a time
+            (the integrated camera). Add USB UVC webcams for any
+            additional streams; multi-camera setups today do one of:
+          </p>
+          <ul>
+            <li><strong>Game-piece camera:</strong> drop a Python
+                script in <code>scripts/</code> that opens the USB
+                camera, runs an HSV threshold + connected-components
+                pass, and publishes results to
+                <code>/acuity/user/note_target/*</code>. Robot code
+                subscribes via NT4 like any other topic.</li>
+            <li><strong>Multiple AprilTag pipelines:</strong> point
+                a second script at the USB cam and reuse the same
+                detector code the dashboard does — see
+                <code>acuity/dashboard/server.py</code>'s
+                <code>TagDetectorThread</code> for the recipe.</li>
+          </ul>
+
+          <h2>Running a daemon at boot</h2>
+          <p>
+            Drop a systemd unit file in
+            <code>/etc/systemd/system/</code> via SSH and
+            <code>systemctl enable</code> it. Acuity runs a full
+            Linux userland — anything systemd can do, you can do
+            here.
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-ini"># /etc/systemd/system/team-thinker.service
+[Unit]
+Description=Team strategy helper
+After=acuity-dashboard.service
+
+[Service]
+ExecStart=/usr/bin/python3 /var/lib/acuity/scripts/strategy.py
+Restart=always
+User=acuity
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Then <code>sudo systemctl enable --now
+            team-thinker.service</code>. Logs come out via
+            <code>journalctl -u team-thinker</code> — also
+            accessible from Manager's Logs tab pattern.
+          </p>
+
+          <h2>Custom NT topic publishers</h2>
+          <p>
+            For data that doesn't fit anywhere else, just publish
+            from a script. Robot code reads it like any other
+            topic.
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-python"># /var/lib/acuity/scripts/note_tracker.py
+import time, cv2, ntcore
+
+inst = ntcore.NetworkTableInstance.getDefault()
+inst.startClient4("acuity-note-tracker")
+inst.setServerTeam(1279)
+
+t = inst.getTable("acuity/user/notes")
+distance_pub = t.getDoubleTopic("distance_m").publish()
+yaw_pub      = t.getDoubleTopic("yaw_deg").publish()
+
+cap = cv2.VideoCapture(1)   # USB cam
+while True:
+    ok, frame = cap.read()
+    if not ok: continue
+    # ... HSV threshold + contour analysis here ...
+    distance_pub.set(estimated_distance)
+    yaw_pub.set(estimated_yaw)
+    time.sleep(0.033)  # 30 Hz</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
         <!-- ============== acuity.conf ============== -->
         <section class="docs-section" id="docs-config">
           <h1><code>acuity.conf</code> options</h1>
           <p>
-            Per-Pi config on the FAT32 boot partition at
+            Per-device config on the FAT32 boot partition at
             <code>/boot/firmware/acuity.conf</code>. Editable from
-            any laptop without booting the Pi.
+            any laptop without booting the Acuity device.
           </p>
           <div class="code-block">
             <pre><code class="lang-ini"># Team number drives hostname (`acuity-NNNN.local`) and the
@@ -714,6 +1483,14 @@ COUNTRY=US</code></pre>
             Delete this file and reboot to re-trigger the AP-mode
             setup wizard.
           </p>
+          <p class="docs-callout">
+            <strong>Wired-only deploy?</strong> Leave SSID/PSK
+            blank (or omit them entirely). At boot the device looks
+            at eth0 — if it has a <code>10.TE.AM.x</code> DHCP lease
+            from the radio, Acuity adopts that team number and
+            skips the AP-mode wizard. You don't need
+            <code>acuity.conf</code> at all in that case.
+          </p>
         </section>
 
         <!-- ============== Troubleshooting ============== -->
@@ -725,11 +1502,11 @@ COUNTRY=US</code></pre>
               <tr>
                 <td>Manager shows no devices</td>
                 <td>Laptop on the wrong WiFi, or device hasn't booted</td>
-                <td>Confirm laptop is on the team radio. Wait 60 s after Pi boot. Hit Rescan.</td>
+                <td>Confirm laptop is on the team radio. Wait 60 s after the Acuity device boots. Hit Rescan.</td>
               </tr>
               <tr>
                 <td>Camera tab spinner never resolves</td>
-                <td>Pi camera ribbon loose, or another process owns <code>/dev/video0</code></td>
+                <td>Camera ribbon loose, or another process owns <code>/dev/video0</code></td>
                 <td>Reseat the camera ribbon. SSH in (Terminal tab) and run <code>fuser /dev/video0</code> to find a conflicting process.</td>
               </tr>
               <tr>
@@ -739,8 +1516,8 @@ COUNTRY=US</code></pre>
               </tr>
               <tr>
                 <td><code>isConnected()</code> bouncing true/false</td>
-                <td>Spotty WiFi between Pi and radio</td>
-                <td>Open dashboard Network tab — check IP. Reboot the Pi via Manager's Reboot button.</td>
+                <td>Spotty WiFi between Acuity and radio</td>
+                <td>Open dashboard Network tab — check IP. Reboot the device via Manager's Reboot button.</td>
               </tr>
               <tr>
                 <td>SmartScreen blocks Manager on first run</td>
@@ -880,22 +1657,22 @@ COUNTRY=US</code></pre>
       <section class="onb-step" data-step="2" data-onb-flow="library">
         <h1>Add Acuity to your robot project</h1>
         <p class="lead">
-          Pick the language your team uses. Manager will detect your
-          robot project and add the library for you — no manual
-          vendordep editing.
+          Pick the language your team uses. Manager will drop a
+          single self-contained <code>AcuityClient</code> helper
+          file into your project — no vendordep, no pip dep.
         </p>
         <div class="onb-lang-grid">
           <button class="onb-lang" data-onb-lang="java">
             <strong>Java</strong>
-            <span>WPILib vendordep</span>
+            <span>AcuityClient.java</span>
           </button>
           <button class="onb-lang" data-onb-lang="python">
             <strong>Python</strong>
-            <span>robotpy package</span>
+            <span>acuity_client.py</span>
           </button>
           <button class="onb-lang" data-onb-lang="cpp">
             <strong>C++</strong>
-            <span>WPILib vendordep</span>
+            <span>AcuityClient.h</span>
           </button>
         </div>
         <div class="onb-actions">
@@ -912,7 +1689,7 @@ COUNTRY=US</code></pre>
           terminal / forget-WiFi controls.
         </p>
         <p class="lead">
-          The Libraries tab installs the vision client into your
+          The Libraries tab drops the AcuityClient helper into your
           robot project. The Logs tab tails everything Manager
           does.
         </p>

@@ -315,7 +315,7 @@ function promptSshCreds({ reason, err } = {}) {
       ? 'SSH login failed'
       : 'SSH credentials';
     const body = reason === 'auth-failed'
-      ? "The Pi rejected the saved password. Try again with corrected credentials, or uncheck \"Save\" to log in as a different user just for this run."
+      ? "The Acuity device rejected the saved password. Try again with corrected credentials, or uncheck \"Save\" to log in as a different user just for this run."
       : 'Saved SSH credentials. Reused for every Acuity device.';
     overlay.innerHTML = `
       <div class="modal-card">
@@ -536,13 +536,12 @@ function showInstallSuccessModal({ lang, action, destPath, snippet }) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const actionText = {
-    'wrote-vendordep':    'Vendordep installed.',
-    'updated-pyproject':  'pyproject.toml updated.',
+    'wrote-helper':       'Helper file added.',
     'already-installed':  'Already installed — no changes needed.',
-  }[action] || 'Library installed.';
+  }[action] || 'Helper file added.';
   const followup = lang === 'python'
-    ? 'Run <code>pip install -e .</code> in the project to pull the new dep.'
-    : 'In VS Code: <strong>WPILib → Manage Vendor Libraries → Install new library (offline)</strong>.';
+    ? 'Import it from <code>robot.py</code>: <code>from acuity_client import AcuityClient</code>. Re-deploy with <code>robotpy deploy</code>.'
+    : 'Rebuild your robot project (<strong>WPILib → Build Robot Code</strong>) and the new class will be on the classpath.';
   overlay.innerHTML = `
     <div class="modal-card">
       <header>

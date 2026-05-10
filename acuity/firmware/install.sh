@@ -344,6 +344,16 @@ install -d -m 755 /etc/acuity
 cp_etc "$PI_IMAGE_DIR/files/etc/acuity/hostapd-acuity.conf.template"
 cp_etc "$PI_IMAGE_DIR/files/etc/acuity/dnsmasq-acuity.conf.template"
 
+# Persistent state dir for the dashboard service:
+#   settings.json     — DEFAULT_SETTINGS overrides
+#   pipelines.json    — named pipeline snapshots
+#   scripts/          — user-droppable executables for /api/scripts
+#   logs/             — JSONL telemetry log + rotated archives
+# All owned by `acuity` so the service can write without sudo.
+install -d -m 755 -o acuity -g acuity /var/lib/acuity
+install -d -m 755 -o acuity -g acuity /var/lib/acuity/scripts
+install -d -m 755 -o acuity -g acuity /var/lib/acuity/logs
+
 # Verify the files actually landed with content. If `install` wrote
 # zero bytes (which is the symptom we just defended against), fail
 # loudly here instead of letting the Pi reboot into a broken state.
@@ -399,12 +409,25 @@ rm -f /usr/local/bin/cfsight-firstboot.sh \
 log "installing sudoers drop-in for acuity user"
 cat > /etc/sudoers.d/acuity-dashboard <<'EOF'
 # Acuity dashboard control hooks. Tightly scoped — anything else still
-# requires the password.
+# requires the password. Each rule names the *exact* command + args the
+# dashboard needs, so a compromised dashboard can't pivot to e.g.
+# `systemctl restart sshd` or `rm -f /etc/passwd`.
 acuity ALL=(root) NOPASSWD: /sbin/reboot
 acuity ALL=(root) NOPASSWD: /usr/sbin/reboot
 acuity ALL=(root) NOPASSWD: /bin/systemctl reboot
 acuity ALL=(root) NOPASSWD: /bin/rm -f /boot/firmware/acuity.conf
 acuity ALL=(root) NOPASSWD: /usr/bin/journalctl
+# /api/services/<unit> — start|stop|restart|status against the
+# whitelist baked into server.py's _CONTROLLABLE_SERVICES tuple.
+# Restarting the dashboard from within the dashboard is fine; the
+# response just won't make it back. Restarting avahi is the manual
+# fix-it button when a device drops off mDNS after a network blip.
+acuity ALL=(root) NOPASSWD: /bin/systemctl start acuity-dashboard.service
+acuity ALL=(root) NOPASSWD: /bin/systemctl stop acuity-dashboard.service
+acuity ALL=(root) NOPASSWD: /bin/systemctl restart acuity-dashboard.service
+acuity ALL=(root) NOPASSWD: /bin/systemctl start avahi-daemon.service
+acuity ALL=(root) NOPASSWD: /bin/systemctl stop avahi-daemon.service
+acuity ALL=(root) NOPASSWD: /bin/systemctl restart avahi-daemon.service
 EOF
 chmod 0440 /etc/sudoers.d/acuity-dashboard
 # Lint, abort the install if it's broken (otherwise we'd ship a card
