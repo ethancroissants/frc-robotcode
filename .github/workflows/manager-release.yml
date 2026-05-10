@@ -32,7 +32,7 @@ on:
       publish:
         description: 'Publish to GitHub Releases?'
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write   # needed to create releases + upload assets
@@ -135,25 +135,46 @@ jobs:
           }
         shell: pwsh
 
-      - name: Sync version from tag
-        # When triggered by a `manager-vX.Y.Z` tag, force-set
-        # package.json's version to X.Y.Z so:
-        #   1. the installer filename matches the tag
-        #   2. electron-builder publishes to a Release whose tag the
-        #      currently-installed binary's app.getVersion() can match
-        #      against (electron-updater compares semver).
-        # Skipped on workflow_dispatch — keep whatever's in source.
-        if: github.ref_type == 'tag'
+      - name: Compute + write release version
+        id: compute-version
+        # Two trigger paths:
+        #
+        #   1. Tag push (`manager-vX.Y.Z`)  → version is X.Y.Z
+        #   2. workflow_dispatch (publish)  → version is auto-derived
+        #      as <package.json major.minor>.<workflow run number>.
+        #      Example: package.json says "0.1.0", workflow run #5 →
+        #      we publish as 0.1.5; run #6 → 0.1.6; etc. Each run is
+        #      a strictly higher semver than the previous, which is
+        #      exactly what electron-updater needs to surface "Update
+        #      available" to installed clients.
+        #
+        # When publish is unchecked on a manual dispatch, we don't
+        # bump anything — package.json keeps its source version and
+        # nothing reaches Releases.
         run: |
-          $tag = '${{ github.ref_name }}'
-          $version = $tag -replace '^manager-v', ''
-          Write-Host "tag $tag → version $version"
+          $publish = ('${{ github.ref_type }}' -eq 'tag') -or ('${{ inputs.publish }}' -eq 'true')
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not $publish) {
+            Write-Host "build-only run — keeping package.json version as-is ($($pkg.version))"
+            "version=$($pkg.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tag     = '${{ github.ref_name }}'
+            $version = $tag -replace '^manager-v', ''
+            Write-Host "tag $tag → version $version"
+          } else {
+            # Strip the patch-and-anything-after so we get major.minor.
+            $base    = $pkg.version -replace '\.\d+(?:[-+].*)?$', ''
+            $version = "$base.${{ github.run_number }}"
+            Write-Host "manual dispatch run #${{ github.run_number }} → version $version"
+          }
           $pkg.version = $version
           # ConvertTo-Json's default depth (2) truncates electron-builder's
-          # nested `build` config; bump it to keep everything intact.
+          # nested `build` config; bump it to keep the structure intact.
           $pkg | ConvertTo-Json -Depth 32 | Set-Content -NoNewline package.json
-          Write-Host "package.json version is now $((Get-Content package.json -Raw | ConvertFrom-Json).version)"
+          Write-Host "package.json version is now $version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
         shell: pwsh
 
       - name: Build (and publish on tags)
@@ -191,3 +212,39 @@ jobs:
             acuity/manager/dist/*.exe.blockmap
             acuity/manager/dist/latest.yml
           if-no-files-found: error
+
+      - name: Release summary
+        # Renders to the run's Summary tab and the bottom of the
+        # job output. Makes "where did my release go?" a one-click
+        # answer instead of a Releases-tab scavenger hunt.
+        run: |
+          $version = '${{ steps.compute-version.outputs.version }}'
+          $publish = ('${{ github.ref_type }}' -eq 'tag') -or ('${{ inputs.publish }}' -eq 'true')
+          $repo    = '${{ github.repository }}'
+          if ($publish) {
+            $tag = "v$version"
+            $url = "https://github.com/$repo/releases/tag/$tag"
+            $md = @"
+          ## Acuity Manager $version published
+
+          - **Version:** ``$version``
+          - **Release tag:** ``$tag``
+          - **Release URL:** $url
+          - **Installer:** ``Acuity Manager Setup $version.exe``
+          - **Portable:** ``Acuity Manager $version.exe``
+
+          The auto-updater on installed clients will detect this
+          version on their next launch and offer the update.
+          "@
+          } else {
+            $md = @"
+          ## Acuity Manager $version built (no publish)
+
+          Build-only run — nothing was uploaded to Releases.
+          The artifact above (``acuity-manager-windows``) is downloadable
+          from this run page for ~90 days.
+          "@
+          }
+          $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          Write-Host $md
+        shell: pwsh

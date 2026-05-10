@@ -535,3 +535,302 @@ $$('[data-onb-lang]').forEach((b) => b.addEventListener('click', async () => {
 
 // Skip button.
 $('#onb-skip').addEventListener('click', () => finishOnboarding());
+
+// ============== Camera tab ==============
+//
+// Embeds the device's MJPEG stream + AprilTag overlay right in
+// Manager. Same visual language as the device dashboard's Live
+// tab — tag boxes drawn as SVG, best-target panel + detection list
+// off to the side. We drive the device picker from the discovered
+// devices list so users don't have to type IPs.
+
+const camDevicePick = $('#cam-device-pick');
+const camFrame      = $('#cam-frame');
+const camImg        = $('#cam-img');
+const camOverlay    = $('#cam-overlay');
+const camLoadingTxt = $('#cam-loading-text');
+const camLinkPill   = $('#cam-link-pill');
+const camFpsPill    = $('#cam-fps-pill');
+const camMetaRes    = $('#cam-meta-res');
+const camMetaTags   = $('#cam-meta-tags');
+const camMetaFps    = $('#cam-meta-fps');
+const camDetList    = $('#cam-det-list');
+const camDetCount   = $('#cam-det-count');
+const camOpenDash   = $('#cam-open-dashboard');
+
+let camWs        = null;
+let camWsBackoff = 250;
+let camDevice    = null;
+let camFrameSize = { w: 0, h: 0 };
+
+function camOptionLabel(d) {
+  return `${d.name}  —  ${d.ip}`;
+}
+
+function refreshCamDeviceList() {
+  // Preserve the current selection if the device is still around.
+  const prev = camDevicePick.value;
+  camDevicePick.innerHTML = '<option value="">— select a device —</option>';
+  for (const d of devices) {
+    const opt = document.createElement('option');
+    opt.value = d.host;
+    opt.textContent = camOptionLabel(d);
+    camDevicePick.appendChild(opt);
+  }
+  if (devices.find((d) => d.host === prev)) {
+    camDevicePick.value = prev;
+  } else if (devices.length === 1) {
+    // Auto-pick when there's exactly one device — saves a click in
+    // the common single-coprocessor case.
+    camDevicePick.value = devices[0].host;
+    onCamDeviceChange();
+  }
+}
+
+function onCamDeviceChange() {
+  const host = camDevicePick.value;
+  const dev = devices.find((d) => d.host === host) || null;
+  setCamDevice(dev);
+}
+
+function setCamDevice(d) {
+  if (camWs) { try { camWs.close(); } catch (e) {} camWs = null; }
+  camDevice = d;
+  if (!d) {
+    camImg.src = '';
+    camFrame.classList.add('connecting');
+    camLoadingTxt.textContent = 'Pick a device to start streaming';
+    camLinkPill.hidden = true;
+    camFpsPill.hidden  = true;
+    camOpenDash.removeAttribute('href');
+    setCamBest(null);
+    setCamDetList([], null);
+    return;
+  }
+
+  // MJPEG stream — straight <img src> hookup.
+  const base = `http://${d.ip}:${d.port || 8080}`;
+  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+  camOpenDash.href = `${base}/`;
+  camFrame.classList.add('connecting');
+  camLoadingTxt.textContent = `Connecting to ${d.name}…`;
+  camLinkPill.hidden = false; camLinkPill.textContent = 'connecting';
+  camLinkPill.classList.remove('good', 'bad');
+  camFpsPill.hidden  = true;
+
+  // WebSocket for live detections.
+  connectCamWs(d);
+}
+
+function connectCamWs(d) {
+  const url = `ws://${d.ip}:${d.port || 8080}/api/detections.ws`;
+  try {
+    camWs = new WebSocket(url);
+  } catch (e) {
+    camLinkPill.textContent = 'no link'; camLinkPill.classList.add('bad');
+    return;
+  }
+  camWs.onopen = () => { camWsBackoff = 250; };
+  camWs.onmessage = (ev) => {
+    try { applyCamSnapshot(JSON.parse(ev.data)); } catch (e) {}
+  };
+  camWs.onclose = () => {
+    camLinkPill.textContent = 'no link';
+    camLinkPill.classList.remove('good'); camLinkPill.classList.add('bad');
+    if (camDevice && camDevice.host === d.host) {
+      setTimeout(() => connectCamWs(d), camWsBackoff);
+      camWsBackoff = Math.min(camWsBackoff * 2, 4000);
+    }
+  };
+  camWs.onerror = () => { try { camWs.close(); } catch (e) {} };
+}
+
+function camSvg(tag, attrs = {}, text = null) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function updateCamOverlaySize() {
+  if (!camFrameSize.w || !camFrameSize.h) return;
+  camOverlay.setAttribute('viewBox', `0 0 ${camFrameSize.w} ${camFrameSize.h}`);
+  const imgRect = camImg.getBoundingClientRect();
+  const fr = camFrame.getBoundingClientRect();
+  camOverlay.style.width  = imgRect.width + 'px';
+  camOverlay.style.height = imgRect.height + 'px';
+  camOverlay.style.left   = (imgRect.left - fr.left) + 'px';
+  camOverlay.style.top    = (imgRect.top  - fr.top)  + 'px';
+}
+new ResizeObserver(updateCamOverlaySize).observe(camFrame);
+window.addEventListener('resize', updateCamOverlaySize);
+
+function renderCamOverlay(tags, bestId) {
+  camOverlay.innerHTML = '';
+  if (!tags) return;
+  for (const t of tags) {
+    if (!t.corners) continue;
+    const isBest = bestId != null && t.id === bestId;
+    const points = t.corners.map(([x, y]) => `${x},${y}`).join(' ');
+    camOverlay.appendChild(camSvg('polygon', {
+      points,
+      class: 'tag-poly ' + (isBest ? 'best' : 'other'),
+    }));
+    const cx = t.corners.reduce((a, [x]) => a + x, 0) / 4;
+    const cy = t.corners.reduce((a, [, y]) => a + y, 0) / 4;
+    camOverlay.appendChild(camSvg('text', {
+      x: cx, y: cy,
+      'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      class: 'tag-label ' + (isBest ? 'best' : 'other'),
+    }, String(t.id)));
+  }
+}
+
+function fmtMetersUS(m) {
+  // FRC drivers think in feet — show "1.42 m (4.66 ft)" for clarity.
+  if (m == null) return '—';
+  const ft = m * 3.28084;
+  if (m < 1) return `${(m * 100).toFixed(1)} cm  (${ft.toFixed(2)} ft)`;
+  return `${m.toFixed(2)} m  (${ft.toFixed(2)} ft)`;
+}
+function fmtDeg(d) { return d == null ? '—' : `${d.toFixed(1)}°`; }
+function fmtPct(x) { return x == null ? '—' : `${(x * 100).toFixed(1)}%`; }
+
+function setCamBest(best) {
+  const fields = {
+    'cam-best-id':   best ? `#${best.id}`         : '—',
+    'cam-best-dist': best ? fmtMetersUS(best.distance_m) : '—',
+    'cam-best-yaw':  best ? fmtDeg(best.yaw_deg)  : '—',
+    'cam-best-pitch':best ? fmtDeg(best.pitch_deg): '—',
+    'cam-best-area': best ? fmtPct(best.area)     : '—',
+  };
+  for (const [id, val] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    bumpValue(el, val);
+    el.classList.toggle('v-stale', best == null);
+  }
+}
+
+function setCamDetList(tags, bestId) {
+  if (!tags || !tags.length) {
+    camDetList.innerHTML = '<div class="det-empty">No tags in view.</div>';
+    camDetCount.textContent = '0';
+    bumpValue(camMetaTags, '0');
+    return;
+  }
+  bumpValue(camMetaTags, String(tags.length));
+  camDetCount.textContent = String(tags.length);
+  camDetList.innerHTML = tags
+    .slice()
+    .sort((a, b) => b.area - a.area)
+    .map((t) => {
+      const isBest = t.id === bestId;
+      return `
+        <div class="det-row${isBest ? ' best' : ''}">
+          <span class="id">#${t.id}</span>
+          <span>${fmtMetersUS(t.distance_m).split('  ')[0]}</span>
+          <span>${fmtDeg(t.yaw_deg)}</span>
+          <span><span class="label">area</span> ${fmtPct(t.area)}</span>
+        </div>`;
+    })
+    .join('');
+}
+
+function applyCamSnapshot(s) {
+  if (s.width && s.height) {
+    camFrameSize = { w: s.width, h: s.height };
+    bumpValue(camMetaRes, `${s.width}×${s.height}`);
+    updateCamOverlaySize();
+  }
+  if (s.fps != null) {
+    bumpValue(camMetaFps, s.fps.toFixed(1));
+    camFpsPill.hidden = false;
+    camFpsPill.textContent = `${s.fps.toFixed(0)} fps`;
+  }
+  camLinkPill.hidden = false;
+  if (s.connected) {
+    camLinkPill.textContent = 'live';
+    camLinkPill.classList.add('good'); camLinkPill.classList.remove('bad');
+    camFrame.classList.remove('connecting');
+  } else {
+    camLinkPill.textContent = 'no camera';
+    camLinkPill.classList.remove('good'); camLinkPill.classList.add('bad');
+  }
+  const bestId = s.best ? s.best.id : null;
+  setCamBest(s.best);
+  setCamDetList(s.tags_full || s.tags, bestId);
+  renderCamOverlay(s.tags_full || s.tags, bestId);
+}
+
+camDevicePick.addEventListener('change', onCamDeviceChange);
+
+// Hook into the discovery update we already process for the
+// Devices tab. preload registers each `onUpdate(cb)` call as an
+// independent listener via `ipcRenderer.on`, so this *adds* a
+// handler — the Devices grid renderer above keeps working
+// untouched. This second handler keeps the camera-tab picker in
+// sync as devices come and go.
+window.acuity.discovery.onUpdate(() => {
+  refreshCamDeviceList();
+});
+
+// ============== Docs tab ==============
+//
+// Sidebar nav scroll-spies the content; clicking a link smooth-
+// scrolls the section into view. Code-block copy buttons copy the
+// adjacent <pre> text to the clipboard.
+
+const docsContent = $('#docs-content');
+
+$$('.docs-link').forEach((link) => {
+  link.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    const id = link.getAttribute('href').slice(1);
+    const target = document.getElementById(id);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Active state flips immediately on click; scroll-spy updates
+    // the rest as the user scrolls.
+    $$('.docs-link').forEach((l) => l.classList.toggle('active', l === link));
+  });
+});
+
+// Scroll-spy: highlight the nav link for whichever section is
+// closest to the top of the content viewport.
+docsContent.addEventListener('scroll', () => {
+  const scrollTop = docsContent.scrollTop;
+  let bestSection = null;
+  let bestDelta = Infinity;
+  for (const sec of $$('.docs-section')) {
+    const delta = sec.offsetTop - scrollTop - 8;
+    if (delta <= 0 && Math.abs(delta) < bestDelta) {
+      bestDelta = Math.abs(delta);
+      bestSection = sec;
+    }
+  }
+  if (bestSection) {
+    const id = bestSection.id;
+    $$('.docs-link').forEach((l) =>
+      l.classList.toggle('active', l.getAttribute('href') === `#${id}`)
+    );
+  }
+});
+
+// Copy buttons on every code block.
+$$('.copy-btn').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const block = btn.closest('.code-block');
+    const code = block?.querySelector('code')?.textContent || '';
+    try {
+      await navigator.clipboard.writeText(code);
+      const orig = btn.textContent;
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = orig;
+        btn.classList.remove('copied');
+      }, 1400);
+    } catch (e) {
+      btn.textContent = 'Copy failed';
+    }
+  });
+});

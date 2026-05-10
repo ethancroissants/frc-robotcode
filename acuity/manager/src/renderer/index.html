@@ -14,8 +14,10 @@
     </div>
     <nav class="topbar-tabs">
       <button class="tab active" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="camera">Camera</button>
       <button class="tab" data-tab="terminal">Terminal</button>
       <button class="tab" data-tab="libraries">Libraries</button>
+      <button class="tab" data-tab="docs">Docs</button>
       <button class="tab" data-tab="logs">Logs</button>
     </nav>
     <div class="topbar-right">
@@ -113,6 +115,620 @@
           </button>
         </div>
       </div>
+    </section>
+
+    <!-- ============== Camera tab ==============
+         Embeds the dashboard's MJPEG stream + AprilTag overlay
+         right inside Manager so the user doesn't need to open the
+         Pi's web UI in a browser. We connect to whichever device
+         is selected in the Devices tab; if nothing's selected we
+         show a picker. -->
+    <section class="page" data-page="camera">
+      <div class="cam-card">
+        <div class="cam-toolbar">
+          <label class="cam-pick">
+            <span class="cam-pick-label">Device</span>
+            <select id="cam-device-pick">
+              <option value="">— select a device —</option>
+            </select>
+          </label>
+          <span class="pill" id="cam-link-pill" hidden>link</span>
+          <span class="pill" id="cam-fps-pill" hidden>— fps</span>
+          <span class="cam-meta-spacer"></span>
+          <a class="ghost small" id="cam-open-dashboard" target="_blank" rel="noopener">
+            Open dashboard
+          </a>
+        </div>
+        <div class="cam-frame connecting" id="cam-frame">
+          <img id="cam-img" alt="" />
+          <svg id="cam-overlay" class="cam-overlay" preserveAspectRatio="none"></svg>
+          <div class="cam-loading">
+            <span class="spinner large"></span>
+            <span id="cam-loading-text">Pick a device to start streaming</span>
+          </div>
+        </div>
+        <div class="cam-meta">
+          <span class="meta-item"><span class="k">res</span><span class="v" id="cam-meta-res">—</span></span>
+          <span class="meta-item"><span class="k">tags</span><span class="v" id="cam-meta-tags">0</span></span>
+          <span class="meta-item"><span class="k">fps</span><span class="v" id="cam-meta-fps">—</span></span>
+        </div>
+      </div>
+
+      <aside class="cam-side">
+        <div class="panel">
+          <div class="panel-header"><h2>Best target</h2></div>
+          <dl class="kv-grid kv-big" id="cam-best-grid">
+            <dt>id</dt>      <dd id="cam-best-id" class="v-stale">—</dd>
+            <dt>distance</dt><dd id="cam-best-dist" class="v-stale">—</dd>
+            <dt>yaw</dt>     <dd id="cam-best-yaw" class="v-stale">—</dd>
+            <dt>pitch</dt>   <dd id="cam-best-pitch" class="v-stale">—</dd>
+            <dt>area</dt>    <dd id="cam-best-area" class="v-stale">—</dd>
+          </dl>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <h2>All detections</h2>
+            <span class="muted" id="cam-det-count">0</span>
+          </div>
+          <div class="det-list" id="cam-det-list">
+            <div class="det-empty">No tags in view.</div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ============== Docs tab ============== -->
+    <section class="page" data-page="docs">
+      <aside class="docs-nav">
+        <div class="docs-nav-section">
+          <h3>Getting started</h3>
+          <a href="#docs-quickstart"   class="docs-link active">Quickstart</a>
+          <a href="#docs-architecture" class="docs-link">How it fits together</a>
+        </div>
+        <div class="docs-nav-section">
+          <h3>Robot libraries</h3>
+          <a href="#docs-java"   class="docs-link">Java (WPILib)</a>
+          <a href="#docs-python" class="docs-link">Python (robotpy)</a>
+          <a href="#docs-cpp"    class="docs-link">C++ (WPILib)</a>
+        </div>
+        <div class="docs-nav-section">
+          <h3>Reference</h3>
+          <a href="#docs-nt4"      class="docs-link">NetworkTables schema</a>
+          <a href="#docs-rest"     class="docs-link">REST endpoints</a>
+          <a href="#docs-config"   class="docs-link">acuity.conf options</a>
+          <a href="#docs-trouble"  class="docs-link">Troubleshooting</a>
+        </div>
+      </aside>
+
+      <article class="docs-content" id="docs-content">
+        <!-- ============== Quickstart ============== -->
+        <section class="docs-section" id="docs-quickstart">
+          <h1>Quickstart</h1>
+          <p class="docs-lead">
+            From sealed-box Acuity to robot code reading AprilTag
+            poses in about ten minutes.
+          </p>
+          <ol>
+            <li>Plug Acuity into the RoboRIO's USB-A port. Power on.</li>
+            <li>On a phone, connect to the open WiFi
+                <code>Acuity-Setup-XXXX</code>. The captive portal
+                will pop a setup form (or browse to
+                <code>http://192.168.50.1/</code> if it doesn't).</li>
+            <li>Fill in your team number, robot WiFi SSID, and
+                password. Save. The device reboots and joins the
+                team radio at <code>10.TE.AM.11</code>.</li>
+            <li>Open this Manager — your device shows up in the
+                <strong>Devices</strong> tab automatically (mDNS
+                discovery).</li>
+            <li>Open the <strong>Libraries</strong> tab, pick your
+                team's language, and point the picker at your
+                robot project folder. Manager drops the vendordep
+                JSON or pip dep into place.</li>
+            <li>Add 3 lines to your robot code (see your language's
+                section below) and you're reading AprilTag data.</li>
+          </ol>
+        </section>
+
+        <!-- ============== Architecture ============== -->
+        <section class="docs-section" id="docs-architecture">
+          <h1>How it fits together</h1>
+          <p>
+            Acuity is a Pi Zero 2 W running a vision pipeline that
+            publishes AprilTag detections to NetworkTables 4. Three
+            pieces:
+          </p>
+          <dl class="docs-defs">
+            <dt>The device</dt>
+            <dd>
+              Camera → OpenCV capture → pyapriltags →
+              <code>/acuity/*</code> NT4 topics. Also serves a web
+              dashboard at <code>:8080</code> (live feed, settings,
+              network controls). Mounts via USB-A on the RoboRIO.
+            </dd>
+            <dt>The robot library (Java / Python / C++)</dt>
+            <dd>
+              Tiny wrapper around NT4 that handles connection state,
+              staleness, JSON parsing of the all-tags array, and
+              gives you a typed API (<code>getBestTag()</code> →
+              <code>Optional&lt;TagDetection&gt;</code> with
+              <code>distanceMeters</code> / <code>yawDeg</code> /
+              <code>pitchDeg</code> fields).
+            </dd>
+            <dt>This Manager</dt>
+            <dd>
+              Driver-station companion. Discovers devices,
+              one-clicks firmware updates, opens an in-app SSH
+              terminal, installs the robot library into your
+              project, and embeds the camera feed (Camera tab).
+            </dd>
+          </dl>
+          <p class="docs-callout">
+            All three speak NT4 over the team radio. The robot
+            never opens an HTTP socket to Acuity — it reads NT4
+            topics like every other component.
+          </p>
+        </section>
+
+        <!-- ============== Java ============== -->
+        <section class="docs-section" id="docs-java">
+          <h1>Java (WPILib)</h1>
+
+          <h2>Install</h2>
+          <p>
+            The Libraries tab installs the vendordep automatically.
+            For manual install:
+          </p>
+          <ol>
+            <li>In VS Code, open your robot project.</li>
+            <li>Click the <strong>WPILib</strong> palette icon
+                → <strong>Manage Vendor Libraries</strong>
+                → <strong>Install new library (online)</strong>.</li>
+            <li>Paste:
+              <div class="code-block">
+                <pre><code>https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/libraries/Acuity.json</code></pre>
+                <button class="copy-btn" data-copy>Copy</button>
+              </div>
+            </li>
+            <li>OK to add. Rebuild the project.</li>
+          </ol>
+
+          <h2>Minimal usage</h2>
+          <div class="code-block">
+            <pre><code class="lang-java">import tech.acuity.AcuityVision;
+import tech.acuity.TagDetection;
+
+public class Robot extends TimedRobot {
+  private final AcuityVision vision = AcuityVision.getInstance();
+
+  @Override
+  public void robotPeriodic() {
+    vision.getBestTag().ifPresent(tag -> {
+      SmartDashboard.putNumber("acuity/id",         tag.id);
+      SmartDashboard.putNumber("acuity/distance_m", tag.distanceMeters);
+      SmartDashboard.putNumber("acuity/yaw_deg",    tag.yawDeg);
+    });
+  }
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>API reference</h2>
+          <table class="docs-api">
+            <thead>
+              <tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>AcuityVision.getInstance()</code></td>
+                <td><code>AcuityVision</code></td>
+                <td>Singleton — one client per process.</td>
+              </tr>
+              <tr>
+                <td><code>vision.getBestTag()</code></td>
+                <td><code>Optional&lt;TagDetection&gt;</code></td>
+                <td>Largest tag in frame; empty when no tag or device offline.</td>
+              </tr>
+              <tr>
+                <td><code>vision.getAllTags()</code></td>
+                <td><code>List&lt;TagDetection&gt;</code></td>
+                <td>Every tag in current frame.</td>
+              </tr>
+              <tr>
+                <td><code>vision.getBestObject()</code></td>
+                <td><code>Optional&lt;ObjectDetection&gt;</code></td>
+                <td>Object detector output (off by default).</td>
+              </tr>
+              <tr>
+                <td><code>vision.getHealth()</code></td>
+                <td><code>DeviceHealth</code></td>
+                <td>CPU %, SoC °C, uptime seconds.</td>
+              </tr>
+              <tr>
+                <td><code>vision.isConnected()</code></td>
+                <td><code>boolean</code></td>
+                <td>Heartbeat fresh within 250 ms.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2><code>TagDetection</code> fields</h2>
+          <table class="docs-api">
+            <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>id</code></td><td>int</td><td>AprilTag ID. <code>-1</code> means "no tag" (you'll never see this through <code>Optional</code>, but raw NT4 readers will).</td></tr>
+              <tr><td><code>distanceMeters</code></td><td>double</td><td>Distance from camera to tag center.</td></tr>
+              <tr><td><code>yawDeg</code></td><td>double</td><td>Camera-to-tag yaw, signed. Negative = left of center.</td></tr>
+              <tr><td><code>pitchDeg</code></td><td>double</td><td>Camera-to-tag pitch, signed.</td></tr>
+              <tr><td><code>tx</code> / <code>ty</code></td><td>double</td><td>Pixel offset from frame center, normalized to <code>[-1, 1]</code> (resolution-independent).</td></tr>
+              <tr><td><code>area</code></td><td>double</td><td>Fraction of frame the tag occupies, <code>0..1</code>.</td></tr>
+              <tr><td><code>timestamp</code></td><td>double</td><td>FPGA seconds when the source frame was captured.</td></tr>
+              <tr><td><code>decisionMargin</code></td><td>double</td><td>pyapriltags confidence — bigger = stronger detection.</td></tr>
+            </tbody>
+          </table>
+
+          <h2>Common patterns</h2>
+          <h3>Auto-aim with the best tag</h3>
+          <div class="code-block">
+            <pre><code class="lang-java">vision.getBestTag().ifPresent(tag -> {
+  // Drive to face the tag (yaw_deg → heading PID setpoint).
+  double headingErrorDeg = tag.yawDeg;
+  double turnPower = -kP_HEADING * headingErrorDeg;
+  drivetrain.arcadeDrive(0, turnPower);
+});</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h3>Filter to specific tag IDs</h3>
+          <p>
+            Set the preferred-tag-ID list in the dashboard's
+            Settings tab — Acuity then picks "best" only from those
+            IDs. Or filter client-side:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">var speakerTag = vision.getAllTags().stream()
+    .filter(t -&gt; t.id == 7 || t.id == 4)   // 2025 speaker tags
+    .max(Comparator.comparingDouble(t -&gt; t.area));
+speakerTag.ifPresent(tag -&gt; { /* aim */ });</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h3>Handle the device dropping mid-match</h3>
+          <p>
+            <code>getBestTag()</code> returns empty whenever the
+            heartbeat is stale (&gt;250 ms). Check
+            <code>isConnected()</code> if you want to distinguish
+            "no tag in view" from "device unreachable":
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-java">if (!vision.isConnected()) {
+  // Device is gone — fall back to encoders + IMU only.
+  setVisionTrustWeight(0.0);
+} else {
+  setVisionTrustWeight(1.0);
+}</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== Python ============== -->
+        <section class="docs-section" id="docs-python">
+          <h1>Python (robotpy)</h1>
+
+          <h2>Install</h2>
+          <p>
+            For a robotpy project, add to <code>pyproject.toml</code>:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-toml">[tool.robotpy]
+requires = [
+  "acuity-vision&gt;=0.1",
+]</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Or use this Manager's Libraries tab and pick your robot
+            project folder — it edits <code>pyproject.toml</code>
+            for you.
+          </p>
+
+          <h2>Minimal usage</h2>
+          <div class="code-block">
+            <pre><code class="lang-python">import wpilib
+import acuity_vision
+
+class MyRobot(wpilib.TimedRobot):
+    def robotInit(self):
+        self.vision = acuity_vision.AcuityVision()
+
+    def robotPeriodic(self):
+        tag = self.vision.get_best_tag()
+        if tag is not None:
+            wpilib.SmartDashboard.putNumber("acuity/id",         tag.id)
+            wpilib.SmartDashboard.putNumber("acuity/distance_m", tag.distance_m)
+            wpilib.SmartDashboard.putNumber("acuity/yaw_deg",    tag.yaw_deg)</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>API reference</h2>
+          <table class="docs-api">
+            <thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>AcuityVision()</code></td><td>—</td><td>Construct once per robot. Lazy-imports <code>ntcore</code> from robotpy.</td></tr>
+              <tr><td><code>get_best_tag()</code></td><td><code>TagDetection | None</code></td><td>Largest tag in frame.</td></tr>
+              <tr><td><code>get_all_tags()</code></td><td><code>list[TagDetection]</code></td><td>Every tag in current frame.</td></tr>
+              <tr><td><code>get_best_object()</code></td><td><code>ObjectDetection | None</code></td><td>Object-detector output.</td></tr>
+              <tr><td><code>get_health()</code></td><td><code>DeviceHealth</code></td><td>CPU / temp / uptime.</td></tr>
+              <tr><td><code>is_connected()</code></td><td><code>bool</code></td><td>Heartbeat fresh within 100 ms.</td></tr>
+            </tbody>
+          </table>
+
+          <h2><code>TagDetection</code> fields</h2>
+          <p>Same shape as the Java <code>TagDetection</code>, with
+             snake_case field names:</p>
+          <table class="docs-api">
+            <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>id</code></td><td>int</td><td>AprilTag ID.</td></tr>
+              <tr><td><code>distance_m</code></td><td>float</td><td>Camera→tag distance.</td></tr>
+              <tr><td><code>yaw_deg</code> / <code>pitch_deg</code></td><td>float</td><td>Pose angles, signed degrees.</td></tr>
+              <tr><td><code>tx</code> / <code>ty</code></td><td>float</td><td>Normalized pixel offset from center.</td></tr>
+              <tr><td><code>area</code></td><td>float</td><td>Frame-fraction occupied.</td></tr>
+              <tr><td><code>timestamp</code></td><td>float</td><td>FPGA seconds at capture.</td></tr>
+              <tr><td><code>decision_margin</code></td><td>float</td><td>pyapriltags confidence.</td></tr>
+            </tbody>
+          </table>
+
+          <h2>Common patterns</h2>
+          <div class="code-block">
+            <pre><code class="lang-python"># Drop in commands/auto_aim.py
+import commands2
+import acuity_vision
+
+class AutoAim(commands2.Command):
+    def __init__(self, drivetrain):
+        super().__init__()
+        self.drive = drivetrain
+        self.vision = acuity_vision.AcuityVision()
+        self.addRequirements(drivetrain)
+
+    def execute(self):
+        tag = self.vision.get_best_tag()
+        if tag is None:
+            self.drive.arcadeDrive(0, 0)
+            return
+        turn = -0.04 * tag.yaw_deg
+        self.drive.arcadeDrive(0, turn)
+
+    def isFinished(self):
+        tag = self.vision.get_best_tag()
+        return tag is not None and abs(tag.yaw_deg) &lt; 1.5</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+        </section>
+
+        <!-- ============== C++ ============== -->
+        <section class="docs-section" id="docs-cpp">
+          <h1>C++ (WPILib)</h1>
+
+          <h2>Install</h2>
+          <p>
+            Same vendordep URL as Java — the JSON declares
+            both <code>javaDependencies</code> and
+            <code>cppDependencies</code>:
+          </p>
+          <div class="code-block">
+            <pre><code>https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/libraries/Acuity.json</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Minimal usage</h2>
+          <div class="code-block">
+            <pre><code class="lang-cpp">#include &lt;acuity/AcuityVision.h&gt;
+#include &lt;frc/smartdashboard/SmartDashboard.h&gt;
+
+class Robot : public frc::TimedRobot {
+ public:
+  void RobotPeriodic() override {
+    auto&amp; vision = acuity::AcuityVision::GetInstance();
+    if (auto tag = vision.GetBestTag()) {
+      frc::SmartDashboard::PutNumber("acuity/id",         tag-&gt;id);
+      frc::SmartDashboard::PutNumber("acuity/distance_m", tag-&gt;distanceMeters);
+      frc::SmartDashboard::PutNumber("acuity/yaw_deg",    tag-&gt;yawDeg);
+    }
+  }
+};</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>API reference</h2>
+          <table class="docs-api">
+            <thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>AcuityVision::GetInstance()</code></td><td><code>AcuityVision&amp;</code></td><td>Process-wide singleton.</td></tr>
+              <tr><td><code>vision.GetBestTag()</code></td><td><code>std::optional&lt;TagDetection&gt;</code></td><td>Largest tag in frame.</td></tr>
+              <tr><td><code>vision.GetAllTags()</code></td><td><code>std::vector&lt;TagDetection&gt;</code></td><td>Every tag.</td></tr>
+              <tr><td><code>vision.GetBestObject()</code></td><td><code>std::optional&lt;ObjectDetection&gt;</code></td><td>Object detector.</td></tr>
+              <tr><td><code>vision.GetHealth()</code></td><td><code>DeviceHealth</code></td><td>CPU / temp / uptime.</td></tr>
+              <tr><td><code>vision.IsConnected()</code></td><td><code>bool</code></td><td>Heartbeat fresh.</td></tr>
+            </tbody>
+          </table>
+          <p class="hint">
+            Field names match the Java binding (camelCase
+            <code>distanceMeters</code> / <code>yawDeg</code> /
+            etc.).
+          </p>
+        </section>
+
+        <!-- ============== NT4 schema ============== -->
+        <section class="docs-section" id="docs-nt4">
+          <h1>NetworkTables 4 schema</h1>
+          <p class="docs-lead">
+            Canonical contract between the device and robot code.
+            Versioned via <code>/acuity/version</code> — currently
+            <code>1</code>.
+          </p>
+
+          <h2>Identity / health</h2>
+          <table class="docs-api">
+            <thead><tr><th>Topic</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>/acuity/version</code></td><td>int</td><td>Schema version.</td></tr>
+              <tr><td><code>/acuity/build</code></td><td>string</td><td>Build identifier.</td></tr>
+              <tr><td><code>/acuity/heartbeat</code></td><td>int</td><td>+1 per second.</td></tr>
+              <tr><td><code>/acuity/camera/connected</code></td><td>bool</td><td>Is /dev/video* open?</td></tr>
+              <tr><td><code>/acuity/camera/fps</code></td><td>double</td><td>Smoothed camera FPS.</td></tr>
+              <tr><td><code>/acuity/camera/resolution</code></td><td>string</td><td>e.g. <code>"1280x720"</code>.</td></tr>
+              <tr><td><code>/acuity/health/cpu_pct</code></td><td>double</td><td>0..100.</td></tr>
+              <tr><td><code>/acuity/health/temp_c</code></td><td>double</td><td>SoC temperature.</td></tr>
+              <tr><td><code>/acuity/health/uptime_s</code></td><td>int</td><td>Seconds since boot.</td></tr>
+            </tbody>
+          </table>
+
+          <h2>Best target</h2>
+          <table class="docs-api">
+            <thead><tr><th>Topic</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>/acuity/tags/best/id</code></td><td>int</td><td>Tag ID, or <code>-1</code> if no tag.</td></tr>
+              <tr><td><code>/acuity/tags/best/distance_m</code></td><td>double</td><td>Meters.</td></tr>
+              <tr><td><code>/acuity/tags/best/yaw_deg</code></td><td>double</td><td>Signed degrees.</td></tr>
+              <tr><td><code>/acuity/tags/best/pitch_deg</code></td><td>double</td><td>Signed degrees.</td></tr>
+              <tr><td><code>/acuity/tags/best/tx</code></td><td>double</td><td>Pixel-X normalized [-1, 1].</td></tr>
+              <tr><td><code>/acuity/tags/best/ty</code></td><td>double</td><td>Pixel-Y normalized [-1, 1].</td></tr>
+              <tr><td><code>/acuity/tags/best/area</code></td><td>double</td><td>Frame-fraction.</td></tr>
+              <tr><td><code>/acuity/tags/best/timestamp</code></td><td>double</td><td>FPGA seconds.</td></tr>
+              <tr><td><code>/acuity/tags/best/decision_margin</code></td><td>double</td><td>pyapriltags confidence.</td></tr>
+            </tbody>
+          </table>
+
+          <h2>All tags</h2>
+          <table class="docs-api">
+            <thead><tr><th>Topic</th><th>Type</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>/acuity/tags/count</code></td><td>int</td><td>Tags this frame.</td></tr>
+              <tr><td><code>/acuity/tags/all</code></td><td>string</td><td>JSON array — see below.</td></tr>
+            </tbody>
+          </table>
+          <div class="code-block">
+            <pre><code class="lang-json">[
+  {
+    "id": 7,
+    "distance_m": 1.42,
+    "yaw_deg": -3.2,
+    "pitch_deg": 0.5,
+    "tx": -0.12,
+    "ty": 0.04,
+    "area": 0.018,
+    "timestamp": 41.8231,
+    "decision_margin": 38.4
+  }
+]</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+
+          <h2>Versioning policy</h2>
+          <ul>
+            <li><strong>Adding a field</strong> never bumps version.</li>
+            <li><strong>Renaming or removing</strong> a field bumps
+                <code>/acuity/version</code>. Robot libraries warn but
+                degrade gracefully.</li>
+            <li><strong>Restructuring</strong> the layout bumps
+                version + ships a migration note.</li>
+          </ul>
+        </section>
+
+        <!-- ============== REST endpoints ============== -->
+        <section class="docs-section" id="docs-rest">
+          <h1>REST endpoints (device)</h1>
+          <p>
+            The on-device dashboard exposes a small REST surface
+            on port 8080. You normally don't touch it from robot
+            code — Manager and the dashboard UI consume it. Useful
+            for debugging.
+          </p>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /</code></td><td>HTML dashboard.</td></tr>
+              <tr><td><code>GET /stream.mjpg</code></td><td>multipart MJPEG video.</td></tr>
+              <tr><td><code>GET /api/detections</code></td><td>One-shot JSON snapshot of current tags.</td></tr>
+              <tr><td><code>WS  /api/detections.ws</code></td><td>Live stream of detection snapshots, one per processed frame.</td></tr>
+              <tr><td><code>GET /api/health</code></td><td>JSON: build, FPS, CPU, temp, uptime, network state.</td></tr>
+              <tr><td><code>GET /api/settings</code></td><td>JSON of current camera + detection + NT4 settings.</td></tr>
+              <tr><td><code>POST /api/settings</code></td><td>Update settings. Body is JSON with any subset of the keys.</td></tr>
+              <tr><td><code>POST /api/reboot</code></td><td>Reboots the Pi after a 1 s grace.</td></tr>
+              <tr><td><code>POST /api/forget-wifi</code></td><td>Removes <code>/boot/firmware/acuity.conf</code> and reboots → AP-mode setup.</td></tr>
+              <tr><td><code>GET /api/logs?lines=N</code></td><td>Tail of the dashboard's systemd journal.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- ============== acuity.conf ============== -->
+        <section class="docs-section" id="docs-config">
+          <h1><code>acuity.conf</code> options</h1>
+          <p>
+            Per-Pi config on the FAT32 boot partition at
+            <code>/boot/firmware/acuity.conf</code>. Editable from
+            any laptop without booting the Pi.
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-ini"># Team number drives hostname (`acuity-NNNN.local`) and the
+# FRC-standard static IP `10.TE.AM.11`.
+TEAM=1279
+
+# Robot WiFi SSID + password. Leave PSK blank for an open network.
+SSID=1279
+PSK=robotpassword
+
+# Country code for WiFi regulatory domain.
+COUNTRY=US</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            Delete this file and reboot to re-trigger the AP-mode
+            setup wizard.
+          </p>
+        </section>
+
+        <!-- ============== Troubleshooting ============== -->
+        <section class="docs-section" id="docs-trouble">
+          <h1>Troubleshooting</h1>
+          <table class="docs-api">
+            <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Manager shows no devices</td>
+                <td>Laptop on the wrong WiFi, or device hasn't booted</td>
+                <td>Confirm laptop is on the team radio. Wait 60 s after Pi boot. Hit Rescan.</td>
+              </tr>
+              <tr>
+                <td>Camera tab spinner never resolves</td>
+                <td>Pi camera ribbon loose, or another process owns <code>/dev/video0</code></td>
+                <td>Reseat the camera ribbon. SSH in (Terminal tab) and run <code>fuser /dev/video0</code> to find a conflicting process.</td>
+              </tr>
+              <tr>
+                <td>Robot code reads <code>id == -1</code> only</td>
+                <td>Tag size mismatch — wrong <code>tag_size_m</code> in dashboard Settings, or no AprilTag in view</td>
+                <td>Check the dashboard Live tab. If tags appear there but not in robot code, check NT team number under Settings.</td>
+              </tr>
+              <tr>
+                <td><code>isConnected()</code> bouncing true/false</td>
+                <td>Spotty WiFi between Pi and radio</td>
+                <td>Open dashboard Network tab — check IP. Reboot the Pi via Manager's Reboot button.</td>
+              </tr>
+              <tr>
+                <td>SmartScreen blocks Manager on first run</td>
+                <td>We ship unsigned (no $200/yr cert)</td>
+                <td>Click <strong>More info</strong> → <strong>Run anyway</strong>. Same on every Manager update.</td>
+              </tr>
+              <tr>
+                <td>Forgot WiFi credentials</td>
+                <td>—</td>
+                <td>Forget WiFi via Manager (Devices → tile → "Forget WiFi") or pop the SD card and edit <code>/boot/firmware/acuity.conf</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </article>
     </section>
 
     <!-- ============== Logs tab ============== -->
