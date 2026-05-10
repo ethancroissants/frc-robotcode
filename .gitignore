@@ -8,6 +8,15 @@ build/
 dist/
 *.egg-info/
 
+# …but the Manager's electron-builder asset dir is also called `build/`
+# by convention (it's the default `nsis.installerSidebar` lookup root),
+# and we DO want to commit the installer banners + the custom NSIS
+# include. Un-ignore that subtree explicitly. Without this, CI clones
+# a tree where `acuity/manager/build/installer-sidebar.bmp` is missing
+# and electron-builder fails with "cannot find specified resource".
+!acuity/manager/build/
+!acuity/manager/build/**
+
 # Virtual environments
 .venv/
 venv/
