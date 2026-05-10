@@ -366,11 +366,16 @@ function promptSshCreds({ reason, err } = {}) {
 }
 
 // Stream ssh logs into both the device-detail log pane and the
-// global Logs tab so the user can review history.
+// global Logs tab so the user can review history. Also peek at the
+// stream so we can pop the firmware-update modal the moment the
+// bridge brings down the management connection (after which all
+// future log lines come from the device's stdout buffer being
+// drained, not from real progress).
 window.acuity.ssh.onLog((line) => {
   if (!logPane.hidden) logPane.textContent += line;
   globalLog.textContent += line;
   globalLog.scrollTop = globalLog.scrollHeight;
+  fwUpdateOnSshLog(line);
 });
 
 // Discovery — start on load, listen for updates. We track a
@@ -389,6 +394,7 @@ window.acuity.discovery.onUpdate(({ devices: list }) => {
   }
   renderGrid();
   renderDetail();
+  fwUpdateOnDiscovery(devices);
 });
 startScanning();
 window.acuity.discovery.start();
@@ -1221,3 +1227,149 @@ $$('.copy-btn').forEach((btn) => {
     }
   });
 });
+
+// ============== Firmware-update modal ==============
+//
+// The bridge flow takes the device offline mid-update (the moment
+// `nmcli connection up acuity-temp-update` runs, the team-WiFi IP
+// goes away → our SSH session dies). From the user's perspective
+// it looks like the update silently froze. This modal handles that
+// gap: pops the moment we see the bridge log line, stays up while
+// the device is missing from mDNS, flips to a "Firmware updated!"
+// success state when the device reappears, and auto-dismisses.
+//
+// The modal is intentionally NOT user-dismissible during the
+// updating state — closing it would leave the device hung in an
+// unknown state and the user wouldn't know whether to power-cycle.
+// A 7-minute safety timeout adds a "Dismiss" escape hatch in case
+// the device doesn't come back at all.
+
+// Module-private state. Null when no update is in progress.
+let _fwUpdate = null;
+
+const FW_BRIDGE_LOG_TRIGGERS = [
+  'connecting wlan0 to the temp WiFi',
+  '[bridge] connecting wlan0',
+];
+
+function fwUpdateOnSshLog(line) {
+  if (_fwUpdate) return;  // already showing
+  if (!selected) return;
+  if (FW_BRIDGE_LOG_TRIGGERS.some((t) => line.includes(t))) {
+    showFirmwareUpdateModal(selected);
+  }
+}
+
+function fwUpdateOnDiscovery(deviceList) {
+  if (!_fwUpdate) return;
+  const present = deviceList.some((d) => d.host === _fwUpdate.host);
+  if (!present) {
+    _fwUpdate.sawMissing = true;
+    return;
+  }
+  // We need to see the device DROP first — otherwise a discovery
+  // tick that fires between "modal opens" and "Pi actually
+  // disconnects" would immediately false-positive into success.
+  if (_fwUpdate.sawMissing) fwUpdateMarkSuccess();
+}
+
+function showFirmwareUpdateModal(device) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay fw-update-overlay';
+  overlay.innerHTML = `
+    <div class="modal-card fw-update-card">
+      <div class="fw-update-icon" id="fw-update-icon">
+        <span class="spinner large"></span>
+      </div>
+      <h2 id="fw-update-title">Firmware is updating</h2>
+      <p id="fw-update-body">
+        Please <strong>do not turn off the Acuity device</strong>,
+        <strong>don't close this app</strong>, and
+        <strong>don't put this computer to sleep</strong>.
+      </p>
+      <p class="muted" id="fw-update-detail">
+        The device is downloading the new firmware over a temporary
+        WiFi bridge. It usually takes 2–5 minutes. We'll let you
+        know the moment it comes back online.
+      </p>
+      <p class="muted" id="fw-update-elapsed">elapsed: 0:00</p>
+      <div class="modal-actions" id="fw-update-actions" hidden>
+        <button class="primary" data-act="dismiss">Dismiss</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  _fwUpdate = {
+    host: device.host,
+    name: device.name,
+    overlay,
+    sawMissing: false,
+    startedAt: Date.now(),
+    elapsedTimer: null,
+    safetyTimer: null,
+  };
+
+  // Tick the elapsed counter once a second so the user can see
+  // progress is being made even when nothing else updates.
+  _fwUpdate.elapsedTimer = setInterval(() => {
+    if (!_fwUpdate) return;
+    const s = Math.round((Date.now() - _fwUpdate.startedAt) / 1000);
+    const mm = Math.floor(s / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    const el = document.getElementById('fw-update-elapsed');
+    if (el) el.textContent = `elapsed: ${mm}:${ss}`;
+  }, 1000);
+
+  // Safety: if the device doesn't come back after 7 minutes, give
+  // the user a way out. Most updates land in 2–4 min so 7 is the
+  // "something has gone wrong" threshold.
+  _fwUpdate.safetyTimer = setTimeout(fwUpdateMarkStuck, 7 * 60 * 1000);
+}
+
+function fwUpdateMarkSuccess() {
+  if (!_fwUpdate) return;
+  const { overlay, elapsedTimer, safetyTimer, name } = _fwUpdate;
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  if (safetyTimer)  clearTimeout(safetyTimer);
+  overlay.classList.add('fw-update-success');
+  $('#fw-update-icon').innerHTML = `
+    <svg viewBox="0 0 52 52" class="fw-update-check" aria-hidden="true">
+      <circle class="fw-update-check-bg" cx="26" cy="26" r="24" fill="none"/>
+      <path  class="fw-update-check-mk" fill="none"
+             d="M14 27 l8 8 l16 -18"/>
+    </svg>`;
+  $('#fw-update-title').textContent = 'Firmware updated!';
+  $('#fw-update-body').innerHTML =
+    `<strong>${escapeHtml(name)}</strong> is back online and ready to use.`;
+  $('#fw-update-detail').textContent = '';
+  $('#fw-update-elapsed').textContent = '';
+  // Auto-close after a beat so the user gets the "ta-da" moment but
+  // isn't blocked from continuing to work.
+  setTimeout(() => fwUpdateClose(), 3500);
+}
+
+function fwUpdateMarkStuck() {
+  if (!_fwUpdate) return;
+  const { overlay, elapsedTimer } = _fwUpdate;
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  overlay.classList.add('fw-update-stuck');
+  $('#fw-update-title').textContent = "Couldn't verify the update";
+  $('#fw-update-body').innerHTML =
+    "The device hasn't reappeared on the network after 7 minutes. " +
+    "It might still be working through a slow install, or it might " +
+    "have hit an error. Power-cycle the device if it stays unreachable; " +
+    "the new firmware probably did install but couldn't auto-rejoin " +
+    "the team WiFi.";
+  $('#fw-update-detail').textContent = '';
+  $('#fw-update-actions').hidden = false;
+  $('#fw-update-actions').querySelector('[data-act="dismiss"]')
+    .addEventListener('click', () => fwUpdateClose());
+}
+
+function fwUpdateClose() {
+  if (!_fwUpdate) return;
+  const { overlay, elapsedTimer, safetyTimer } = _fwUpdate;
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  if (safetyTimer)  clearTimeout(safetyTimer);
+  overlay.remove();
+  _fwUpdate = null;
+}

@@ -386,6 +386,94 @@ code {
   letter-spacing: 0.04em !important;
 }
 
+/* =========== Firmware-update modal =========== */
+.fw-update-overlay {
+  background: rgba(15, 23, 42, 0.65);
+  /* Pulled from the app's accent so it reads "in progress, on
+   * purpose" rather than "scary error." */
+  backdrop-filter: blur(2px);
+}
+.fw-update-card {
+  text-align: center;
+  width: min(520px, 92vw);
+  padding: 32px 32px 28px;
+}
+.fw-update-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 18px;
+  height: 56px;
+  align-items: center;
+}
+.fw-update-icon .spinner {
+  width: 44px; height: 44px; border-width: 3px;
+}
+.fw-update-card h2 {
+  font-size: 17px !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  color: var(--text) !important;
+  margin: 0 0 12px !important;
+}
+.fw-update-card p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.fw-update-card p.muted {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.fw-update-card #fw-update-elapsed {
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-top: 16px;
+  margin-bottom: 0;
+  color: var(--text-soft);
+}
+
+/* Success state — animated check, green theme. */
+.fw-update-success .fw-update-card {
+  border-color: rgba(22, 163, 74, 0.5);
+}
+.fw-update-success #fw-update-title {
+  color: var(--good) !important;
+}
+
+.fw-update-check {
+  width: 56px; height: 56px;
+}
+.fw-update-check-bg {
+  stroke: var(--good);
+  stroke-width: 3;
+  stroke-dasharray: 152;
+  stroke-dashoffset: 152;
+  animation: fw-check-circle 0.5s ease-out forwards;
+}
+.fw-update-check-mk {
+  stroke: var(--good);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 50;
+  stroke-dashoffset: 50;
+  animation: fw-check-mark 0.35s 0.45s ease-out forwards;
+}
+@keyframes fw-check-circle { to { stroke-dashoffset: 0; } }
+@keyframes fw-check-mark   { to { stroke-dashoffset: 0; } }
+
+/* Stuck state — neutral, with a Dismiss button. */
+.fw-update-stuck .fw-update-card {
+  border-color: rgba(220, 38, 38, 0.5);
+}
+.fw-update-stuck #fw-update-title {
+  color: var(--bad) !important;
+}
+.fw-update-card .modal-actions {
+  margin-top: 18px;
+}
+
 /* =========== Motion / loading primitives =========== */
 
 /* Respect users with reduced-motion preference — animation goes from
