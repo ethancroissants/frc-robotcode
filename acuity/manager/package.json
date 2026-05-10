@@ -46,6 +46,10 @@
       {
         "from": "../libraries/templates",
         "to":   "libraries/templates"
+      },
+      {
+        "from": "../img/AcuityAppIcon.ico",
+        "to":   "AcuityAppIcon.ico"
       }
     ],
     "publish": [

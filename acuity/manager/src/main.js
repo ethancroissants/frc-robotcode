@@ -10,6 +10,21 @@ const path = require('path');
 
 let mainWindow = null;
 
+// Title-bar / taskbar / dock icon. Two paths because the file lives in
+// different places at dev time vs in a packaged build:
+//   * Dev (`npm run dev`): __dirname is /…/acuity/manager/src, so we
+//     reach the brand glyph at /…/acuity/img/AcuityAppIcon.ico with a
+//     simple `..` walk.
+//   * Packaged: __dirname is inside app.asar (no img/ next door). The
+//     `nsis.extraResources` entry in package.json copies the .ico to
+//     `<app>/resources/AcuityAppIcon.ico`, which Electron exposes as
+//     `process.resourcesPath`. Without this branch the BrowserWindow
+//     ends up showing Electron's default-shipped icon — the bug this
+//     comment was added to fix.
+const ICON_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'AcuityAppIcon.ico')
+  : path.resolve(__dirname, '..', '..', 'img', 'AcuityAppIcon.ico');
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -18,11 +33,7 @@ function createWindow() {
     minHeight: 600,
     title: 'Acuity Manager',
     backgroundColor: '#eef0f3',
-    // Title-bar / taskbar icon. In packaged builds Windows reads the
-    // icon embedded in the .exe (set via build.win.icon in
-    // package.json) and ignores this; we set it anyway so `npm run
-    // dev` and Linux/macOS dev builds pick up the brand glyph too.
-    icon: path.resolve(__dirname, '..', '..', 'img', 'AcuityAppIcon.ico'),
+    icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
