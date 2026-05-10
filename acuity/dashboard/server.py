@@ -123,9 +123,23 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stream_max_fps":    0,
 
     # Detection
+    #
+    # Defaults match the legacy team-tested configuration that hit
+    # ~25 ft range on a 6.5" tag with a Pi Camera + 60° HFOV. Tighter
+    # values broke detection in field testing — we tried decimate=2
+    # for "speed" and margin_min=30 to "drop weak detections" and
+    # both regressed range significantly. Don't tune these without
+    # bench-testing against a real tag at distance.
     "tag_family":       "tag36h11",
     "tag_size_m":       0.1651,        # 6.5 in — 2025 FRC standard
-    "min_decision_margin": 30.0,       # below this we drop detections
+    "min_decision_margin": 0.0,        # 0 = no filtering. pyapriltags' own
+                                       # gating is already conservative.
+    "camera_hfov_deg":  60.0,          # used to synthesize fx/fy when no
+                                       # cam_intrinsics.json is present.
+    "quad_decimate":    1.0,           # 1.0 = full resolution. Higher is
+                                       # faster but loses distant tags.
+    "quad_sigma":       0.0,
+    "decode_sharpening": 0.25,
 
     # NT4
     "nt_team":          0,             # 0 → server mode (publish only)
@@ -314,20 +328,17 @@ class TagDetectorThread(threading.Thread):
         self._stop = threading.Event()
         self._last_processed_ts = 0.0
 
-        if _HAVE_PA:
-            self._detector = _pa.Detector(
-                families="tag36h11",
-                nthreads=2,
-                quad_decimate=2.0,    # halves resolution for the detector
-                quad_sigma=0.0,
-                refine_edges=1,
-                decode_sharpening=0.25,
-                debug=0,
-            )
-        else:
+        # The detector itself is created lazily inside _detect() and
+        # re-built when any of its tuning settings change at runtime
+        # via /api/settings. pyapriltags doesn't expose runtime
+        # parameter setters, so we keep a (settings_signature →
+        # Detector) cache and rebuild on miss. Avoids a startup-time
+        # baked-in config that the operator can't change.
+        self._detector = None
+        self._detector_sig = None
+        if not _HAVE_PA:
             log.warning("pyapriltags missing; falling back to cv2.aruco "
                         "(reduced range, less precise pose)")
-            self._detector = None
 
     def stop(self) -> None:
         self._stop.set()
@@ -361,58 +372,156 @@ class TagDetectorThread(threading.Thread):
                 "wall_ts":    time.time(),
             })
 
+    def _ensure_detector(self, s: dict[str, Any]):
+        """Build (or rebuild) the pyapriltags Detector when any of
+        its constructor-time params change. Returns None if
+        pyapriltags isn't installed."""
+        if not _HAVE_PA:
+            return None
+        sig = (
+            float(s.get("quad_decimate", 1.0)),
+            float(s.get("quad_sigma", 0.0)),
+            float(s.get("decode_sharpening", 0.25)),
+        )
+        if self._detector is not None and sig == self._detector_sig:
+            return self._detector
+        try:
+            self._detector = _pa.Detector(
+                families="tag36h11",
+                nthreads=2,
+                quad_decimate=sig[0],
+                quad_sigma=sig[1],
+                refine_edges=1,
+                decode_sharpening=sig[2],
+                debug=0,
+            )
+            self._detector_sig = sig
+            log.info("AprilTag detector rebuilt: decimate=%.2f sigma=%.2f sharpen=%.2f",
+                     *sig)
+            return self._detector
+        except Exception:
+            log.exception("pyapriltags detector failed to construct")
+            self._detector = None
+            return None
+
     def _detect(self, mono: np.ndarray, w: int, h: int,
                 s: dict[str, Any]) -> list[Detection]:
-        if self._detector is None:
+        """Detection — ported 1:1 from the team's legacy dashboard,
+        which is the configuration that hit ~25 ft on a 6.5" tag.
+        Three things matter and they are NOT what pyapriltags'
+        defaults give you:
+
+          1. `estimate_tag_pose=False`. pyapriltags' built-in pose
+             estimator is less reliable than cv2.solvePnP — its
+             accuracy depends on intrinsics being almost perfect,
+             and even small mismatches make it flag detections as
+             low-confidence and effectively drop them.
+
+          2. **cv2.solvePnP with SOLVEPNP_IPPE_SQUARE** for the
+             distance. IPPE_SQUARE is the algorithm the OpenCV docs
+             specifically recommend for square fiducial markers.
+
+          3. **Yaw/pitch from corner-center pixel offsets**, not
+             from pose_t. `bearing = atan2(cx_px - principal_x, fx)`
+             is robust to all the intrinsics-mismatch problems
+             above; it's only sensitive to fx (which we synthesize
+             from HFOV) and is correct as long as the camera is
+             approximately rectilinear.
+
+          4. pyapriltags returns corners in BL, BR, TR, TL order;
+             cv2.aruco (and our PnP object points) use TL, TR, BR,
+             BL. We reverse on the way out so the rest of the
+             pipeline is detector-agnostic.
+        """
+        det = self._ensure_detector(s)
+        if det is None:
             return []
-        tag_size = float(s["tag_size_m"])
-        # We pass approximate pinhole intrinsics — for a real
-        # calibration we'd run cv2.calibrateCamera. For most teams
-        # the approximation is plenty for tag-tracking use cases;
-        # the calibration UI on the dashboard refines this if they
-        # want better PnP accuracy.
-        fx = fy = w * 0.9     # pure heuristic — good enough as a default
-        cx = w * 0.5
-        cy = h * 0.5
 
         try:
-            results = self._detector.detect(
-                mono,
-                estimate_tag_pose=True,
-                camera_params=(fx, fy, cx, cy),
-                tag_size=tag_size,
-            )
-        except Exception:
-            log.exception("AprilTag detection failed")
+            results = det.detect(mono, estimate_tag_pose=False)
+        except Exception as e:
+            log.warning("pyapriltags detect raised: %s", e)
             return []
+
+        if not results:
+            return []
+
+        # Synthesize pinhole intrinsics from horizontal FOV. Exact
+        # formula the legacy team dashboard uses.
+        hfov_deg = float(s.get("camera_hfov_deg", 60.0))
+        focal_x = (w / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+        focal_y = focal_x  # square-pixel assumption
+        cx_p   = w / 2.0
+        cy_p   = h / 2.0
+        K = np.array([
+            [focal_x, 0.0, cx_p],
+            [0.0, focal_y, cy_p],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        dist_coeffs = np.zeros(5, dtype=np.float64)
+
+        # Tag object points centered at origin, TL, TR, BR, BL —
+        # matches the post-reverse corner order.
+        tag_size = float(s["tag_size_m"])
+        half = tag_size / 2.0
+        tag_obj_points = np.array([
+            [-half,  half, 0],
+            [ half,  half, 0],
+            [ half, -half, 0],
+            [-half, -half, 0],
+        ], dtype=np.float64)
 
         out: list[Detection] = []
         min_dm = float(s["min_decision_margin"])
+        frame_area = max(1.0, float(w * h))
+
         for r in results:
             if getattr(r, "decision_margin", 0.0) < min_dm:
                 continue
-            cx_px, cy_px = float(r.center[0]), float(r.center[1])
-            tx = (cx_px - w * 0.5) / (w * 0.5)
-            ty = (cy_px - h * 0.5) / (h * 0.5)
 
-            dist_m = 0.0
-            yaw_deg = 0.0
-            pitch_deg = 0.0
-            if r.pose_t is not None and r.pose_R is not None:
-                t = np.asarray(r.pose_t).reshape(3)
-                # pyapriltags: t = [x, y, z] in meters, camera frame.
-                # z = forward distance, x = right offset, y = down offset.
-                dist_m = float(np.linalg.norm(t))
-                yaw_deg   = math.degrees(math.atan2(float(t[0]), float(t[2])))
-                pitch_deg = math.degrees(math.atan2(-float(t[1]), float(t[2])))
+            # Reverse pyapriltags' BL, BR, TR, TL → TL, TR, BR, BL.
+            corners = np.array(r.corners, dtype=np.float64)[::-1].copy()
 
-            # Tag area: corners (4×2) → polygon area / image area.
-            corners = np.asarray(r.corners, dtype=np.float64)
-            area = abs(_polygon_area(corners)) / max(1.0, float(w * h))
+            cx_px = float(corners[:, 0].mean())
+            cy_px = float(corners[:, 1].mean())
+
+            # Bearing (yaw) from pixel offset. Positive = right of
+            # the optical axis. CCW-positive when the camera is
+            # mounted with +x to the right of the robot.
+            yaw_deg   = math.degrees(math.atan2(cx_px - cx_p, focal_x))
+            # Pitch — same formula on the y axis, sign-flipped so
+            # "up" is positive. Mostly a curiosity for tag-tracking
+            # use cases but cheap to compute.
+            pitch_deg = math.degrees(math.atan2(cy_p - cy_px, focal_y))
+
+            # Distance via cv2.solvePnP. SOLVEPNP_IPPE_SQUARE is the
+            # OpenCV-recommended algorithm for square markers.
+            distance_m = 0.0
+            try:
+                ok, _rvec, tvec = cv2.solvePnP(
+                    tag_obj_points,
+                    corners.astype(np.float64),
+                    K,
+                    dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE,
+                )
+                if ok:
+                    distance_m = float(np.linalg.norm(tvec))
+            except Exception:
+                # solvePnP can raise on degenerate corner geometry;
+                # treat as "no range estimate" rather than blowing
+                # up the whole detection cycle.
+                distance_m = 0.0
+
+            # Normalized pixel offsets from frame center, [-1, 1].
+            tx = (cx_px - cx_p) / cx_p
+            ty = (cy_px - cy_p) / cy_p
+
+            area = abs(_polygon_area(corners)) / frame_area
 
             out.append(Detection(
                 id=int(r.tag_id),
-                distance_m=dist_m,
+                distance_m=distance_m,
                 yaw_deg=yaw_deg,
                 pitch_deg=pitch_deg,
                 tx=tx,
@@ -420,7 +529,7 @@ class TagDetectorThread(threading.Thread):
                 area=area,
                 timestamp=self._last_processed_ts,
                 decision_margin=float(getattr(r, "decision_margin", 0.0)),
-                corners=corners.tolist(),  # for the SVG overlay
+                corners=corners.tolist(),  # TL, TR, BR, BL — for the SVG overlay
             ))
         return out
 
