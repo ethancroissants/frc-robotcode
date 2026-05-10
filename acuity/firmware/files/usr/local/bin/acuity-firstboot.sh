@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # acuity-firstboot.sh — runs once per boot via acuity-firstboot.service.
 #
-# Single decision: do we have a configured team WiFi (acuity.conf with
-# a non-empty SSID), or do we boot into AP-mode setup?
+# Decides the network mode for this boot:
+#   - wired into the FRC radio (eth0 has a 10.TE.AM.x DHCP lease)
+#     → adopt that team number, skip the AP captive portal
+#   - SSID configured in /boot/firmware/acuity.conf → join it as STA
+#   - neither → bring up the open AP "Acuity-Setup-XXXX" so a laptop
+#     can hit the captive-portal wizard
 #
 # This script is idempotent — it doesn't matter if it runs on every
 # boot vs once. The actual mode-switching work is done by
@@ -45,10 +49,58 @@ COUNTRY="$(conf_get COUNTRY || true)"
 
 log "config: team=${TEAM:-(unset)} ssid=${SSID:-(unset)} country=$COUNTRY"
 
-# 2. Set hostname based on team number. This makes mDNS resolve to
+# 2. Detect a wired link.
+#
+# At competition the device is required to be wired to the radio, so
+# eth0 already has a DHCP-assigned 10.TE.AM.x address before we run.
+# When that's true we don't need the captive portal at all (the laptop
+# can reach us straight over the wire) AND we can infer the team
+# number from the address even if acuity.conf has no TEAM=.
+#
+# Probe up to ~10 s for eth0 carrier + DHCP. Carrier alone isn't
+# enough — we need a routable address. If nothing shows up in that
+# window we fall through to the existing wifi paths below.
+ETH_IP=""
+ETH_TEAM=""
+if [ -e /sys/class/net/eth0 ]; then
+  for _ in $(seq 1 20); do
+    ETH_IP="$(ip -4 -o addr show dev eth0 scope global 2>/dev/null \
+              | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    [ -n "$ETH_IP" ] && break
+    sleep 0.5
+  done
+fi
+if [ -n "$ETH_IP" ]; then
+  log "eth0 has IPv4 $ETH_IP — wired path is live"
+  # FRC convention: 10.TE.AM.0/24 with the radio at .1 and DHCP for
+  # everyone else. Parse team from octets 2 and 3 when the address
+  # matches. Anything else (192.168.*, etc.) just means we're on a
+  # dev/home network — wired is still usable, we just don't get a
+  # free team number out of it.
+  if [[ "$ETH_IP" =~ ^10\.([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+    te="${BASH_REMATCH[1]}"
+    am="${BASH_REMATCH[2]}"
+    cand=$(( te * 100 + am ))
+    # Require team >= 1 so a dev address like 10.0.0.5 (which would
+    # parse as "team 0") doesn't get adopted as a real team number.
+    if [ "$cand" -ge 1 ]; then
+      ETH_TEAM="$cand"
+      log "eth0 IP looks like FRC pattern → team $ETH_TEAM"
+    fi
+  fi
+fi
+
+# Effective team: explicit config wins, otherwise use what we sniffed
+# off the wire. Downstream code (hostname + wifi static IP) treats
+# TEAM as if it had been configured all along.
+if [ -z "$TEAM" ] && [ -n "$ETH_TEAM" ]; then
+  log "no TEAM in acuity.conf → adopting $ETH_TEAM from ethernet"
+  TEAM="$ETH_TEAM"
+fi
+
+# 3. Set hostname based on team number. This makes mDNS resolve to
 #    `acuity-1279.local` automatically (avahi-daemon picks up the
 #    current hostname every time it advertises).
-HOSTNAME_CHANGED=0
 if [ -n "$TEAM" ]; then
   WANT_HOSTNAME="acuity-${TEAM}"
   CUR_HOSTNAME="$(hostnamectl --static 2>/dev/null || cat /etc/hostname)"
@@ -58,7 +110,6 @@ if [ -n "$TEAM" ]; then
     # Update /etc/hosts so `sudo` doesn't complain about an unresolvable
     # hostname for ~30 s after the change.
     sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$WANT_HOSTNAME/" /etc/hosts
-    HOSTNAME_CHANGED=1
   fi
 fi
 
@@ -66,18 +117,29 @@ fi
 # AFTER wifi-mode has fully settled the network. See the bottom of
 # this file for the why — short version: avahi is socket-activated
 # and races NetworkManager, so we always need to re-sync it once
-# the final IP / hostname are in place. Doing it here on hostname
-# change isn't enough by itself.)
+# the final IP / hostname are in place.)
 
-# 3. Decide WiFi mode.
-if [ -z "$SSID" ]; then
-  log "no SSID configured → entering AP-mode setup wizard"
-  /usr/local/bin/acuity-wifi-mode.sh ap
-else
+# 4. Decide WiFi mode.
+#
+# Truth table:
+#   eth up  + SSID set → join SSID (still useful: pit-side wireless)
+#   eth up  + no SSID  → leave wifi alone, ethernet is the link
+#   eth down + SSID    → join SSID
+#   eth down + no SSID → AP-mode captive portal (last resort)
+#
+# Skipping AP mode when ethernet is up is the whole point of the
+# wired path: at competition the device is wired and we'd rather sit
+# quietly on the wire than spam an AP nobody asked for.
+if [ -n "$SSID" ]; then
   log "SSID configured ($SSID) → joining as STA (team=${TEAM:-none})"
   # Pass TEAM as the 5th arg so wifi-mode.sh can apply the FRC static
   # IP convention (10.TE.AM.11). With no team, it falls back to DHCP.
   /usr/local/bin/acuity-wifi-mode.sh sta "$SSID" "$PSK" "$COUNTRY" "$TEAM"
+elif [ -n "$ETH_IP" ]; then
+  log "ethernet is up and no SSID configured → skipping wifi entirely"
+else
+  log "no SSID and no ethernet → entering AP-mode setup wizard"
+  /usr/local/bin/acuity-wifi-mode.sh ap
 fi
 
 # 4. Re-sync avahi-daemon now that the network is in its final state.

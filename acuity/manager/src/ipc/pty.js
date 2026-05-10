@@ -94,14 +94,64 @@ function register(ipcMain) {
 
     sessions.set(id, term);
 
-    term.onData((data) => {
+    // Auto-inject the saved SSH password when ssh asks for it, so the
+    // user doesn't have to retype creds they already saved in the
+    // device-creds modal. State machine on the data stream:
+    //   "armed"    — waiting for the first "password:" prompt. Buffer
+    //                output instead of forwarding (so the prompt doesn't
+    //                flash by while we type for the user). Forward the
+    //                buffer if we hit a shell prompt or our deadline.
+    //   "auth"     — we wrote the password; eat the echoed line until
+    //                we see a newline, then disarm.
+    //   "passthru" — normal terminal behavior, no interception.
+    // We disarm after 5s no matter what so a key-based-auth session or
+    // an unexpected banner doesn't leave output buffered forever.
+    let authState = (target && target.password) ? 'armed' : 'passthru';
+    let authBuf = '';
+    const disarmAt = Date.now() + 5000;
+    function send(data) {
       if (!window.isDestroyed()) {
         window.webContents.send('pty:data', { id, data });
+      }
+    }
+
+    term.onData((data) => {
+      if (authState === 'passthru') { send(data); return; }
+      if (Date.now() > disarmAt) {
+        send(authBuf + data);
+        authBuf = '';
+        authState = 'passthru';
+        return;
+      }
+      if (authState === 'armed') {
+        authBuf += data;
+        // Standard OpenSSH prompt is `user@host's password: ` but the
+        // case + exact wording varies; match loosely.
+        if (/password:\s*$/i.test(authBuf)) {
+          authState = 'auth';
+          authBuf = '';
+          term.write(`${target.password}\r`);
+        } else if (/[%$#>]\s+$/.test(authBuf)) {
+          // Looks like we already landed at a shell prompt — auth must
+          // have happened via key. Flush and stop intercepting.
+          send(authBuf);
+          authBuf = '';
+          authState = 'passthru';
+        }
+        return;
+      }
+      if (authState === 'auth') {
+        // Eat echoed chars until end-of-line; then we're in.
+        if (/\r|\n/.test(data)) {
+          authState = 'passthru';
+        }
+        return;
       }
     });
     term.onExit(({ exitCode, signal }) => {
       sessions.delete(id);
       if (!window.isDestroyed()) {
+        if (authBuf) window.webContents.send('pty:data', { id, data: authBuf });
         window.webContents.send('pty:exit', { id, exitCode, signal });
       }
     });
