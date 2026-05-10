@@ -162,26 +162,34 @@ if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
   ssh-keygen -A
 fi
 
-# Drop-in so sshd auto-regenerates host keys on every start. Critical
-# for cloned cards: manufacturer-setup.sh deletes /etc/ssh/ssh_host_*
-# before the master card is dd'd so each clone gets unique keys, but
-# nothing in stock Pi OS Bookworm runs `ssh-keygen -A` automatically
-# at boot. Without this drop-in, every cloned card boots with sshd
-# failing because the host keys are missing — silent SSH lockout, you
-# only notice when you try to connect. The drop-in makes sshd self-
-# heal: if any host key file is missing, regenerate them all.
-mkdir -p /etc/systemd/system/ssh.service.d
-cat > /etc/systemd/system/ssh.service.d/acuity-keygen.conf <<'EOF'
-[Service]
-ExecStartPre=/bin/sh -c '[ -e /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A'
-EOF
-# Same drop-in for the alternate unit name some Debian variants use.
-mkdir -p /etc/systemd/system/sshd.service.d
-cp /etc/systemd/system/ssh.service.d/acuity-keygen.conf \
-   /etc/systemd/system/sshd.service.d/acuity-keygen.conf
+# Clean up the older ExecStartPre drop-in approach — it didn't fire
+# on Pi OS Bookworm installs that use socket-activated sshd
+# (`ssh.socket` → `[email protected]`), which is why customers were
+# getting locked out after manufacturer-setup. The oneshot
+# `acuity-ssh-keygen.service` (installed below alongside the other
+# unit files) runs Before= every SSH-related unit so it covers
+# both ssh.service AND ssh.socket variants.
+rm -f /etc/systemd/system/ssh.service.d/acuity-keygen.conf \
+      /etc/systemd/system/ssh.service.d/cfsight-keygen.conf \
+      /etc/systemd/system/sshd.service.d/acuity-keygen.conf \
+      /etc/systemd/system/sshd.service.d/cfsight-keygen.conf
+rmdir /etc/systemd/system/ssh.service.d  2>/dev/null || true
+rmdir /etc/systemd/system/sshd.service.d 2>/dev/null || true
 
-systemctl enable ssh.service 2>/dev/null || systemctl enable sshd.service 2>/dev/null || true
-systemctl start  ssh.service 2>/dev/null || systemctl start  sshd.service 2>/dev/null || true
+# Enable EVERY SSH unit name we might have. On stock Pi OS Bookworm,
+# either `ssh.service` or `ssh.socket` may be the active path
+# depending on Imager-flag presence and Pi-OS minor version. Enabling
+# both is harmless — systemd treats whichever is masked or absent as
+# a no-op. Same for sshd.* (some Debian variants use that name).
+for unit in ssh.service ssh.socket sshd.service sshd.socket; do
+  systemctl enable "$unit" 2>/dev/null || true
+done
+# Start whichever exists right now so the local Pi gets SSH back
+# without a reboot. Boot-time enablement is what matters for clones.
+systemctl start ssh.socket 2>/dev/null \
+  || systemctl start ssh.service  2>/dev/null \
+  || systemctl start sshd.service 2>/dev/null \
+  || true
 
 # Mask the upstream hostapd / dnsmasq services — we run our own
 # instances bound to the AP profile only, started/stopped by
@@ -271,6 +279,7 @@ systemctl unmask acuity-dashboard.service     2>/dev/null || true
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-firstboot.service"
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-setup-wizard.service"
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-dashboard.service"
+cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-ssh-keygen.service"
 
 cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-firstboot.sh"
 cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-wifi-mode.sh"
@@ -285,6 +294,7 @@ cp_etc "$PI_IMAGE_DIR/files/etc/acuity/dnsmasq-acuity.conf.template"
 for f in /etc/systemd/system/acuity-firstboot.service \
          /etc/systemd/system/acuity-setup-wizard.service \
          /etc/systemd/system/acuity-dashboard.service \
+         /etc/systemd/system/acuity-ssh-keygen.service \
          /usr/local/bin/acuity-firstboot.sh \
          /usr/local/bin/acuity-wifi-mode.sh; do
   [ -s "$f" ] || fail "post-install verification: $f is empty (symlink-to-/dev/null bug?)"
@@ -371,6 +381,7 @@ EOF
 systemctl daemon-reload
 systemctl enable acuity-firstboot.service
 systemctl enable acuity-dashboard.service
+systemctl enable acuity-ssh-keygen.service
 systemctl enable avahi-daemon.service
 systemctl restart avahi-daemon.service 2>/dev/null || true
 # acuity-setup-wizard intentionally NOT enabled at boot — only

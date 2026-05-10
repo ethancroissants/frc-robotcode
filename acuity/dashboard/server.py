@@ -757,21 +757,43 @@ async def favicon() -> Any:
 
 # ----- MJPEG passthrough -----
 
+# Single-viewer policy. Two MJPEG clients at once (Manager + the web
+# dashboard, or two browser tabs) double the JPEG send-rate over one
+# Pi WiFi uplink, which is exactly when the user complains "the
+# stream is laggy." We let only ONE viewer have the stream at a
+# time; the most recent connection wins. The previous viewer's
+# generator detects it's no longer the active id and quietly exits.
+_stream_lock = threading.Lock()
+_stream_id_counter = 0
+_active_stream_id = 0
+
+
 @app.get("/stream.mjpg")
 async def stream_mjpg() -> StreamingResponse:
     """Multipart MJPEG. Reuses the JPEG the camera thread already
     encoded — no per-request re-encode. Honors `stream_max_fps`
     (set in /api/settings) to throttle stream FPS independently of
-    capture, and yields TCP backpressure-aware: if the client is
-    slow to drain, the next yield blocks, the camera thread keeps
-    going, and we naturally drop intermediate frames rather than
-    queuing them."""
+    capture, and is single-viewer: a new connection takes over and
+    closes any currently-running stream."""
+    global _stream_id_counter, _active_stream_id
     boundary = "acuity-frame"
+
+    with _stream_lock:
+        _stream_id_counter += 1
+        my_id = _stream_id_counter
+        _active_stream_id = my_id
+    log.info("stream.mjpg → viewer #%d (took over from previous)", my_id)
 
     async def generator():
         last_ts = 0.0
         last_yield = 0.0
         while True:
+            # Bow out the moment a newer client arrives. They become
+            # the active viewer; we stop sending frames into a pipe
+            # that's about to be closed.
+            if _active_stream_id != my_id:
+                log.info("stream.mjpg viewer #%d yielding to a newer one", my_id)
+                return
             await asyncio.sleep(0.005)
             s = _settings_provider()
             max_fps = int(s.get("stream_max_fps", 0) or 0)

@@ -1,0 +1,37 @@
+[Unit]
+# Regenerate the SSH host keys on boot if any of them are missing.
+#
+# Why this exists: manufacturer-setup.sh deletes /etc/ssh/ssh_host_*
+# on the master card so each cloned customer card boots with a
+# unique fingerprint. Stock Pi OS Bookworm does NOT regenerate them
+# automatically. Without this, sshd silently refuses to start
+# (no host keys → fatal) and the customer's first attempt to
+# `ssh acuity@…` gets "Connection refused" with no clue why.
+#
+# We do this as a real one-shot unit — not as an `ExecStartPre`
+# drop-in on ssh.service — because Pi OS Bookworm fresh installs
+# commonly use socket-activated SSH (`ssh.socket` → `[email protected]`),
+# in which case ssh.service NEVER runs and a drop-in there does
+# nothing. Ordering Before= every SSH-related unit covers all
+# variants (ssh.service / ssh.socket / sshd.service / sshd.socket).
+Description=Regenerate SSH host keys if missing (Acuity)
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service ssh.socket sshd.service sshd.socket network-pre.target
+Wants=local-fs.target
+# Skip ourselves entirely if the keys are already there. systemd
+# evaluates conditions every start, so subsequent boots after the
+# keys exist are no-ops.
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+# Keep the unit "active" so anything WantedBy us doesn't try to
+# re-trigger us mid-boot.
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target sysinit.target

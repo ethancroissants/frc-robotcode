@@ -77,6 +77,16 @@ $$('.tab').forEach((btn) => {
       requestAnimationFrame(() =>
         typeof updateCamOverlaySize === 'function' && updateCamOverlaySize()
       );
+      // Reconnect the stream now that the tab is visible. The dashboard
+      // server enforces a single-viewer policy: this connection takes
+      // over from any other client (web dashboard, second tab, etc.).
+      if (typeof reconnectCamStream === 'function') reconnectCamStream();
+    } else {
+      // Leaving the Camera tab — stop the MJPEG so the slot is free for
+      // the on-device dashboard or another viewer. Browsers normally
+      // keep <img> connections alive until the tag is removed; clearing
+      // src forces a TCP disconnect.
+      if (typeof releaseCamStream === 'function') releaseCamStream();
     }
   });
 });
@@ -173,25 +183,19 @@ $('#dd-open-dashboard').addEventListener('click', () => {
 });
 $('#dd-update').addEventListener('click', async (e) => {
   if (!selected) return;
-  // Ask for an internet WiFi the Pi can briefly bridge through.
-  // Most production Pis sit on the team radio (no internet), so a
-  // direct curl-from-GitHub would fail. The bridge flow joins
-  // wlan0 to a user-supplied WiFi just long enough to fetch +
-  // re-install, then tears it down.
-  const creds = await promptUpdateCredentials(selected);
-  if (!creds) return;            // user cancelled
+  const wifi = await promptUpdateCredentials(selected);
+  if (!wifi) return;
   logPane.hidden = false;
   logPane.textContent = '';
   await withBusy(e.currentTarget, () =>
-    withGlobalLoading(() => {
-      if (creds.skipBridge) {
-        // "Pi already has internet" path — direct install.
-        return window.acuity.ssh.runUpdate(target(selected));
+    withGlobalLoading(() => withSshAuth((c) => {
+      if (wifi.skipBridge) {
+        return window.acuity.ssh.runUpdate(target(selected, c));
       }
       return window.acuity.ssh.runUpdateBridged(
-        target(selected), creds.ssid, creds.psk
+        target(selected, c), wifi.ssid, wifi.psk
       );
-    })
+    }))
   );
 });
 $('#dd-terminal').addEventListener('click', () => {
@@ -202,24 +206,157 @@ $('#dd-terminal').addEventListener('click', () => {
 $('#dd-reboot').addEventListener('click', async (e) => {
   if (!selected) return;
   if (!confirm(`Reboot ${selected.name}?`)) return;
-  await withBusy(e.currentTarget, () => window.acuity.ssh.reboot(target(selected)));
+  await withBusy(e.currentTarget, () =>
+    withSshAuth((c) => window.acuity.ssh.reboot(target(selected, c)))
+  );
 });
 $('#dd-forget').addEventListener('click', async (e) => {
   if (!selected) return;
   if (!confirm(
     `Forget WiFi on ${selected.name}? It will reboot into the AP-mode setup wizard.`
   )) return;
-  await withBusy(e.currentTarget, () => window.acuity.ssh.forgetWifi(target(selected)));
+  await withBusy(e.currentTarget, () =>
+    withSshAuth((c) => window.acuity.ssh.forgetWifi(target(selected, c)))
+  );
 });
 $('#dd-diagnose').addEventListener('click', async (e) => {
   if (!selected) return;
   logPane.hidden = false;
   logPane.textContent = '';
-  await withBusy(e.currentTarget, () => window.acuity.ssh.diagnose(target(selected)));
+  await withBusy(e.currentTarget, () =>
+    withSshAuth((c) => window.acuity.ssh.diagnose(target(selected, c)))
+  );
 });
 
-function target(d) {
-  return { host: d.ip, port: 22, user: 'acuity' };
+// Topbar SSH-creds button — opens the credential editor any time.
+$('#ssh-creds-btn').addEventListener('click', () => promptSshCreds({}));
+
+// SSH credential storage. Single set of creds reused across every
+// device — production cards are imaged identically so per-device
+// creds would be wasted UI. Stored in localStorage rather than
+// keychain because the user explicitly traded security for UX (the
+// device sits on a closed FRC robot radio anyway).
+const SSH_USER_KEY = 'acuity.ssh.user';
+const SSH_PASS_KEY = 'acuity.ssh.pass';
+
+function getSshCreds() {
+  return {
+    user: localStorage.getItem(SSH_USER_KEY) || 'acuity',
+    pass: localStorage.getItem(SSH_PASS_KEY) || '',
+  };
+}
+function setSshCreds(user, pass) {
+  if (user) localStorage.setItem(SSH_USER_KEY, user);
+  if (pass != null) localStorage.setItem(SSH_PASS_KEY, pass);
+}
+
+function target(d, credsOverride = null) {
+  const c = credsOverride || getSshCreds();
+  return {
+    host: d.ip,
+    port: 22,
+    user: c.user,
+    password: c.pass,
+  };
+}
+
+function isAuthError(msg) {
+  return /auth|permission denied|password/i.test(String(msg || ''));
+}
+
+// Wrap an SSH op so it transparently uses saved creds on the
+// happy path and only prompts when the Pi actually rejects them.
+// `invoke` takes a `creds` argument so we can re-run with override
+// values without touching localStorage.
+//
+// Flow:
+//   1. Run with saved creds. Almost always succeeds — no UI noise.
+//   2. If we get a real auth error, show the prompt with TWO escape
+//      hatches: "Save & retry" (overwrites saved, expected when the
+//      saved password is wrong) and "Try once" (one-shot debug, e.g.
+//      logging in as a different user without burning the default).
+//   3. Retry with whatever the prompt returned. If it fails again
+//      we surface the result; we don't loop endlessly.
+async function withSshAuth(invoke) {
+  let result = await invoke(getSshCreds());
+  if (result && result.ok === false && isAuthError(result.error)) {
+    const r = await promptSshCreds({ reason: 'auth-failed', err: result.error });
+    if (r) {
+      if (r.save) setSshCreds(r.user, r.pass);
+      result = await invoke({ user: r.user, pass: r.pass });
+    }
+  }
+  return result;
+}
+
+// Modal returns null on cancel, or { user, pass, save: bool }.
+function promptSshCreds({ reason, err } = {}) {
+  return new Promise((resolve) => {
+    const cur = getSshCreds();
+    const isFirstRun = reason === 'auth-failed' && !localStorage.getItem(SSH_PASS_KEY);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    const headline = reason === 'auth-failed'
+      ? (isFirstRun ? 'Set SSH credentials' : 'SSH login failed')
+      : 'SSH credentials';
+    const body = reason === 'auth-failed'
+      ? (isFirstRun
+         ? 'Manager runs SSH ops (update firmware, reboot, terminal) against the Pi. Set the credentials once and they get reused for every device.'
+         : 'The Pi rejected the saved password. Update it below — or use a different user just for this run if you\'re debugging.')
+      : 'Saved SSH credentials. Used by every Acuity device.';
+    overlay.innerHTML = `
+      <div class="modal-card">
+        <header><h2>${escapeHtml(headline)}</h2></header>
+        <p>${escapeHtml(body)}</p>
+        ${err ? `<p class="modal-path">${escapeHtml(err)}</p>` : ''}
+        <div class="upd-form">
+          <label>SSH username
+            <input id="cred-user" type="text" autocomplete="off"
+                   spellcheck="false" autocapitalize="off"
+                   value="${escapeHtml(cur.user)}" />
+          </label>
+          <label>SSH password
+            <input id="cred-pass" type="password" autocomplete="off"
+                   value="${escapeHtml(cur.pass)}" />
+          </label>
+          <label class="upd-check">
+            <input id="cred-save" type="checkbox" checked />
+            <span>Save as default for every device</span>
+          </label>
+          <p class="hint" style="font-size:11px;color:var(--text-soft)">
+            Uncheck to use this user/password just for this attempt
+            (debugging) without overwriting the saved default.
+            <br>The Imager-set user is usually
+            <code>cfsight</code> or <code>visionpi</code> — the
+            <code>acuity</code> service account can't SSH (no shell).
+          </p>
+        </div>
+        <div class="modal-actions">
+          <button class="ghost"   data-act="cancel">Cancel</button>
+          <button class="primary" data-act="ok">Retry with these credentials</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const userIn = overlay.querySelector('#cred-user');
+    const passIn = overlay.querySelector('#cred-pass');
+    const saveBox = overlay.querySelector('#cred-save');
+
+    const close = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector('[data-act="cancel"]').addEventListener('click', () => close(null));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+
+    const submit = () => {
+      const user = userIn.value.trim();
+      const pass = passIn.value;
+      if (!user) { userIn.focus(); userIn.style.borderColor = 'var(--bad)'; return; }
+      close({ user, pass, save: saveBox.checked });
+    };
+    overlay.querySelector('[data-act="ok"]').addEventListener('click', submit);
+    [userIn, passIn].forEach((el) =>
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); })
+    );
+    setTimeout(() => (cur.pass ? passIn : userIn).focus(), 50);
+  });
 }
 
 // Stream ssh logs into both the device-detail log pane and the
@@ -922,6 +1059,30 @@ function applyCamSnapshot(s) {
 }
 
 camDevicePick.addEventListener('change', onCamDeviceChange);
+
+// Stream lifecycle helpers used by the tab-switch handler so we
+// only hold the device's single MJPEG slot while the Camera tab
+// is actually visible. The server's single-viewer policy means
+// even if we don't release, a new connection from the web
+// dashboard will take over — this is just a courtesy that avoids
+// thrashing the slot back and forth on every tab switch.
+function releaseCamStream() {
+  // Clearing src closes the underlying TCP connection (browsers
+  // gc-finalize the request when the resource ref is dropped).
+  if (camImg.src) camImg.src = '';
+  if (camWs) {
+    try { camWs.close(); } catch (e) {}
+    camWs = null;
+  }
+  camFrame.classList.add('connecting');
+}
+function reconnectCamStream() {
+  if (!camDevice) return;
+  const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
+  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+  camFrame.classList.add('connecting');
+  if (!camWs) connectCamWs(camDevice);
+}
 
 // Click-to-lock: clicking on a tag tells the device "lock onto
 // this id." Clicking on empty space clears the lock. Same UX as
