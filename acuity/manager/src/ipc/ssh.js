@@ -13,11 +13,39 @@ const { BrowserWindow } = require('electron');
 const INSTALL_URL =
   'https://raw.githubusercontent.com/ethancroissants/frc-robotcode/master/acuity/firmware/install.sh';
 
+// ACUITY_SSH_DEBUG=0 silences the lifecycle logs. On by default — every
+// SSH regression we've shipped was caught faster because someone was
+// tailing these. Cheap (a handful of console.log per session + the
+// first ~80 chars of each data chunk).
+const DEBUG = process.env.ACUITY_SSH_DEBUG !== '0';
+let _connSeq = 0;
+function dlog(...a) { if (DEBUG) console.log('[ssh]', ...a); }
+function dwarn(...a) {              console.warn('[ssh]', ...a); }
+function sample(s, max = 80) {
+  if (s == null) return '<null>';
+  const str = Buffer.isBuffer(s) ? s.toString('utf8') : String(s);
+  const esc = str
+    .replace(/\x1b/g, '\\e')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  return esc.length <= max ? esc : esc.slice(0, max) + `…(+${esc.length - max})`;
+}
+function targetTag(t) {
+  // ID + host string for log prefixes. We never log the password.
+  return `${(t.user || 'acuity-root')}@${t.host}:${t.port || 22}`;
+}
+
 function exec(target, cmd, onData) {
   return new Promise((resolve, reject) => {
+    const cid = `c${++_connSeq}`;
+    const tag = targetTag(target);
+    const t0  = Date.now();
+    dlog(`[${cid}] connect ${tag}  cmd=${cmd.length}B  hasPassword=${!!target.password}`);
+    let bytesIn = 0, chunksIn = 0;
     const conn = new Client();
     conn
       .on('ready', () => {
+        dlog(`[${cid}] ssh ready  (handshake in ${Date.now() - t0}ms)`);
         // Wrap every remote command in `sudo -S` and feed it the SSH
         // password through stdin. Why: ssh2's exec channel has no
         // TTY, and any `sudo` call inside the script (the bridge
@@ -43,7 +71,11 @@ function exec(target, cmd, onData) {
           `sudo -k -S -p '' bash -c "$(echo ${encoded} | base64 -d)"`;
 
         conn.exec(wrapped, (err, stream) => {
-          if (err) { reject(err); conn.end(); return; }
+          if (err) {
+            dwarn(`[${cid}] conn.exec failed:`, err.message);
+            reject(err); conn.end(); return;
+          }
+          dlog(`[${cid}] exec stream open, feeding sudo password`);
 
           // Feed sudo the password. -S reads up to one '\n' for
           // the password, then everything else on stdin is the
@@ -53,23 +85,48 @@ function exec(target, cmd, onData) {
           } else {
             // No password set: send a blank line so sudo fails
             // immediately with "no password" rather than hanging.
+            dwarn(`[${cid}] no password supplied — sudo will fail fast`);
             stream.write('\n');
           }
 
-          stream.on('data',        (d) => onData(d.toString()));
-          stream.stderr.on('data', (d) => onData(d.toString()));
-          stream.on('close', (code) => {
+          stream.on('data', (d) => {
+            chunksIn += 1; bytesIn += d.length;
+            if (chunksIn <= 3 || chunksIn % 50 === 0) {
+              dlog(`[${cid}] stdout #${chunksIn} (${d.length}B): "${sample(d)}"`);
+            }
+            onData(d.toString());
+          });
+          stream.stderr.on('data', (d) => {
+            // stderr is rarer + usually significant; log every chunk.
+            dlog(`[${cid}] stderr (${d.length}B): "${sample(d)}"`);
+            onData(d.toString());
+          });
+          stream.on('close', (code, signal) => {
+            dlog(`[${cid}] stream close  code=${code} signal=${signal} ` +
+                 `· stdout chunks=${chunksIn} bytes=${bytesIn} ` +
+                 `· total elapsed=${Date.now() - t0}ms`);
             conn.end();
             resolve({ code });
           });
         });
       })
-      .on('error', reject)
+      .on('error', (err) => {
+        // Anything from "auth failed" to "ECONNREFUSED" lands here.
+        // Surface a meaningful prefix so the renderer log + the user's
+        // bug report both have the failure mode plainly visible.
+        dwarn(`[${cid}] ssh error after ${Date.now() - t0}ms:`,
+              err && (err.level ? `${err.level}: ${err.message}` : err.message));
+        reject(err);
+      })
+      .on('end',   () => dlog(`[${cid}] ssh connection ended`))
+      .on('close', () => dlog(`[${cid}] ssh connection closed`))
+      .on('banner', (msg) => dlog(`[${cid}] ssh banner: "${sample(msg)}"`))
       // Some Pi OS sshd configs treat password auth as a
       // keyboard-interactive challenge instead of straight
       // PasswordAuth. Without `tryKeyboard: true` and a handler,
       // ssh2 hangs at the auth phase against those builds.
-      .on('keyboard-interactive', (_n, _i, _l, _p, finish) => {
+      .on('keyboard-interactive', (_n, _i, _l, prompts, finish) => {
+        dlog(`[${cid}] kbd-interactive challenge with ${prompts.length} prompt(s); replying with saved password`);
         finish([target.password || '']);
       })
       .connect({

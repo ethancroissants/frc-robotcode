@@ -108,7 +108,12 @@ main { flex: 1 1 auto; min-height: 0; overflow: hidden; position: relative; }
 .page { position: absolute; inset: 0; padding: 16px; overflow: auto; display: none; }
 .page.active { display: flex; gap: 16px; }
 .page[data-page="terminal"].active,
-.page[data-page="logs"].active { flex-direction: column; }
+.page[data-page="logs"].active,
+.page[data-page="scripts"].active { flex-direction: column; }
+/* The Scripts page paints its own toolbar bg + panels at full width;
+   strip .page's outer padding so they bleed edge-to-edge instead of
+   floating in a 16-px gray frame. */
+.page[data-page="scripts"].active { padding: 0; gap: 0; }
 
 /* =========== Buttons =========== */
 button {
@@ -1250,32 +1255,35 @@ button.busy .button-spinner {
 }
 
 /* ============== Scripts tab ==============
-   No editor. The tab is a single scrollable column: a toolbar
-   (device + script dropdowns + new/upload/refresh buttons), then
-   either an empty-state hint or a detail card for the selected
-   script (metadata + actions + schedule + run output). */
+   The tab is a single scrollable column under .page-direction-
+   column (see the .page[data-page="scripts"] rule earlier):
+     [ toolbar (fixed-height) ]
+     [ empty-state hint OR detail card (fills the rest) ]
+   No in-app editor. Editing is delegated to the user's OS editor
+   via Electron's dialog + shell.openPath. */
 .scripts-toolbar {
   display: flex; align-items: center; gap: 12px;
-  padding: 10px 14px;
+  padding: 12px 18px;
   background: var(--panel);
   border-bottom: 1px solid var(--line, #d8dce4);
+  flex: 0 0 auto;   /* toolbar keeps its content-height; never grows */
   flex-wrap: wrap;
 }
 .scripts-toolbar .cam-meta-spacer { flex: 1 1 auto; }
 
 .scripts-empty {
+  flex: 1 1 auto;    /* fill the rest of the page under column-flex */
   padding: 32px 28px;
   color: var(--text-dim);
   font: 13px/1.55 var(--sans);
   background: var(--panel-2);
-  min-height: calc(100vh - 150px);
 }
-.scripts-empty p { margin: 0; max-width: 540px; }
+.scripts-empty p { margin: 0; max-width: 560px; }
 
 .scripts-detail {
+  flex: 1 1 auto;
   padding: 18px 22px 28px;
   background: var(--panel-2);
-  min-height: calc(100vh - 150px);
   overflow-y: auto;
 }
 .scripts-detail-header {

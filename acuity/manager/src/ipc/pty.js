@@ -14,6 +14,28 @@ const { BrowserWindow } = require('electron');
 const sessions = new Map();  // id → IPty
 let nextId = 1;
 
+// Set the env var ACUITY_PTY_DEBUG=0 to silence the main-process
+// terminal logs; on by default because every regression we've shipped
+// in this code path was first noticed because someone was watching
+// these lines scroll. Cheap (a handful of console.log per session +
+// a max-80-char sample per data chunk).
+const DEBUG = process.env.ACUITY_PTY_DEBUG !== '0';
+function dlog(...a) { if (DEBUG) console.log('[pty]', ...a); }
+function dwarn(...a) {              console.warn('[pty]', ...a); }
+
+// Trim+escape a chunk for log lines so we can read what the remote
+// is actually sending without a terminal full of ANSI cursor codes.
+function sample(s, max = 80) {
+  if (s == null) return '<null>';
+  const str = Buffer.isBuffer(s) ? s.toString('utf8') : String(s);
+  const esc = str
+    .replace(/\x1b/g, '\\e')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+  return esc.length <= max ? esc : esc.slice(0, max) + `…(+${esc.length - max})`;
+}
+
 // Resolve the absolute path to the system `ssh` binary.
 //
 // Why this isn't just "ssh": Electron on Windows doesn't reliably
@@ -45,19 +67,30 @@ const SSH_BIN = (() => {
   return 'ssh';
 })();
 
+dlog('SSH_BIN resolved to', SSH_BIN);
+
 function register(ipcMain) {
   ipcMain.handle('pty:open', (event, target) => {
     const id = String(nextId++);
     const window = BrowserWindow.fromWebContents(event.sender);
+    const t0 = Date.now();
+
+    dlog(`[#${id}] pty:open requested`, {
+      host: target && target.host,
+      port: (target && target.port) || 22,
+      user: (target && target.user) || 'acuity-root',
+      hasPassword: !!(target && target.password),
+      sshBin: SSH_BIN,
+    });
 
     // Refuse up front if we couldn't find ssh.exe on disk —
     // node-pty's own error includes no path on Windows, which makes
     // it impossible for the user to know what to install.
     if (SSH_BIN !== 'ssh' && !fs.existsSync(SSH_BIN)) {
-      throw new Error(
-        `ssh client not found at ${SSH_BIN}. ` +
-        'Install OpenSSH from Settings → Apps → Optional Features.'
-      );
+      const msg = `ssh client not found at ${SSH_BIN}. ` +
+        'Install OpenSSH from Settings → Apps → Optional Features.';
+      dwarn(`[#${id}]`, msg);
+      throw new Error(msg);
     }
 
     // Launch ssh as a real PTY so the remote shell is fully
@@ -75,6 +108,7 @@ function register(ipcMain) {
       '-o', `UserKnownHostsFile=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
       '-o', 'LogLevel=ERROR',
     ];
+    dlog(`[#${id}] spawn argv =`, [SSH_BIN, ...args].join(' '));
 
     let term;
     try {
@@ -86,29 +120,40 @@ function register(ipcMain) {
         env: process.env,
       });
     } catch (e) {
-      throw new Error(
-        `Failed to start ssh PTY: ${e.message}. ssh path: ${SSH_BIN}. ` +
-        'If this is a packaged build, node-pty may not be asar-unpacked.'
-      );
+      const msg = `Failed to start ssh PTY: ${e.message}. ssh path: ${SSH_BIN}. ` +
+        'If this is a packaged build, node-pty may not be asar-unpacked.';
+      dwarn(`[#${id}] pty.spawn threw:`, e.message);
+      throw new Error(msg);
     }
+
+    dlog(`[#${id}] pty.spawn ok, pid =`, term.pid);
 
     sessions.set(id, term);
 
-    // Auto-inject the saved SSH password when ssh asks for it, so the
-    // user doesn't have to retype creds they already saved in the
-    // device-creds modal. State machine on the data stream:
-    //   "armed"    — waiting for the first "password:" prompt. Buffer
-    //                output instead of forwarding (so the prompt doesn't
-    //                flash by while we type for the user). Forward the
-    //                buffer if we hit a shell prompt or our deadline.
-    //   "auth"     — we wrote the password; eat the echoed line until
-    //                we see a newline, then disarm.
-    //   "passthru" — normal terminal behavior, no interception.
-    // We disarm after 5s no matter what so a key-based-auth session or
-    // an unexpected banner doesn't leave output buffered forever.
-    let authState = (target && target.password) ? 'armed' : 'passthru';
-    let authBuf = '';
-    const disarmAt = Date.now() + 5000;
+    // Auto-inject the saved password if ssh asks for one.
+    //
+    // CRITICAL UX RULE: never buffer the terminal output. If we hold
+    // bytes back waiting for a "password:" prompt that's never coming,
+    // the user sees a blank cursor and the whole tab looks dead. We
+    // forward every byte the moment it arrives; the auto-injector
+    // only watches a small rolling tail of the stream for the prompt
+    // pattern. Worst case if our regex misses, the prompt shows up
+    // and the user types their password — same as plain ssh.
+    //
+    // The state machine has just two states now:
+    //   "watching"  — auto-injector active. Forwards every byte;
+    //                 keeps a 256-char rolling tail; if the tail ends
+    //                 in /password:\s*$/i we write the password to
+    //                 the pty and flip to "done". Auto-disarms after
+    //                 4 s with no match (key-based auth path).
+    //   "done"      — passthrough only, no matching.
+    let authState = (target && target.password) ? 'watching' : 'done';
+    let authTail  = '';
+    const TAIL_CAP   = 256;
+    const DEADLINE   = Date.now() + 4000;
+    let dataChunks   = 0;
+    let dataBytes    = 0;
+
     function send(data) {
       if (!window.isDestroyed()) {
         window.webContents.send('pty:data', { id, data });
@@ -116,42 +161,46 @@ function register(ipcMain) {
     }
 
     term.onData((data) => {
-      if (authState === 'passthru') { send(data); return; }
-      if (Date.now() > disarmAt) {
-        send(authBuf + data);
-        authBuf = '';
-        authState = 'passthru';
+      dataChunks += 1;
+      dataBytes  += data.length;
+      // Sample the first ~5 chunks then sample every 50th to keep the
+      // log from drowning during an `ls -laR /` style flood.
+      if (dataChunks <= 5 || dataChunks % 50 === 0) {
+        dlog(`[#${id}] onData #${dataChunks} (${data.length}B) state=${authState} sample="${sample(data)}"`);
+      }
+
+      // Always forward, immediately.
+      send(data);
+
+      // Watch for the password prompt if we still have a password to
+      // inject. Concatenate into a rolling tail bounded by TAIL_CAP
+      // so the regex stays cheap even on heavy output.
+      if (authState !== 'watching') return;
+      if (Date.now() > DEADLINE) {
+        dlog(`[#${id}] auth watcher disarming on deadline (no password prompt seen in 4s)`);
+        authState = 'done';
+        authTail = '';
         return;
       }
-      if (authState === 'armed') {
-        authBuf += data;
-        // Standard OpenSSH prompt is `user@host's password: ` but the
-        // case + exact wording varies; match loosely.
-        if (/password:\s*$/i.test(authBuf)) {
-          authState = 'auth';
-          authBuf = '';
+      authTail = (authTail + data).slice(-TAIL_CAP);
+      if (/password:\s*$/i.test(authTail)) {
+        dlog(`[#${id}] saw password prompt, injecting saved password`);
+        try {
           term.write(`${target.password}\r`);
-        } else if (/[%$#>]\s+$/.test(authBuf)) {
-          // Looks like we already landed at a shell prompt — auth must
-          // have happened via key. Flush and stop intercepting.
-          send(authBuf);
-          authBuf = '';
-          authState = 'passthru';
+        } catch (e) {
+          dwarn(`[#${id}] password write failed:`, e.message);
         }
-        return;
-      }
-      if (authState === 'auth') {
-        // Eat echoed chars until end-of-line; then we're in.
-        if (/\r|\n/.test(data)) {
-          authState = 'passthru';
-        }
-        return;
+        authState = 'done';
+        authTail  = '';
       }
     });
+
     term.onExit(({ exitCode, signal }) => {
+      const elapsed = Date.now() - t0;
+      dlog(`[#${id}] onExit exitCode=${exitCode} signal=${signal} ` +
+           `after ${elapsed}ms · chunks=${dataChunks} bytes=${dataBytes}`);
       sessions.delete(id);
       if (!window.isDestroyed()) {
-        if (authBuf) window.webContents.send('pty:data', { id, data: authBuf });
         window.webContents.send('pty:exit', { id, exitCode, signal });
       }
     });
@@ -161,17 +210,29 @@ function register(ipcMain) {
 
   ipcMain.on('pty:write', (_e, { id, data }) => {
     const term = sessions.get(id);
-    if (term) term.write(data);
+    if (!term) {
+      dwarn(`[#${id}] pty:write to dead session (ignored), ${data && data.length}B`);
+      return;
+    }
+    term.write(data);
   });
   ipcMain.on('pty:resize', (_e, { id, cols, rows }) => {
     const term = sessions.get(id);
-    if (term) term.resize(cols, rows);
+    if (!term) {
+      dwarn(`[#${id}] pty:resize to dead session (ignored)`);
+      return;
+    }
+    dlog(`[#${id}] resize → ${cols}x${rows}`);
+    term.resize(cols, rows);
   });
   ipcMain.on('pty:close', (_e, { id }) => {
     const term = sessions.get(id);
     if (term) {
+      dlog(`[#${id}] pty:close (renderer asked us to kill)`);
       term.kill();
       sessions.delete(id);
+    } else {
+      dwarn(`[#${id}] pty:close to dead session (ignored)`);
     }
   });
 }

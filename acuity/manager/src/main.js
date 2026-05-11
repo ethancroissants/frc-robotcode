@@ -83,6 +83,28 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // DevTools keyboard shortcuts — F12 and Ctrl/Cmd+Shift+I.
+  //
+  // We strip the default Electron application menu (see
+  // Menu.setApplicationMenu(null) up top) because users don't need
+  // its boilerplate File/Edit/View entries, but the menu also carried
+  // the default View → Toggle DevTools accelerator. Without it,
+  // there's no way to open DevTools in a packaged build — which
+  // matters when the renderer breaks silently (e.g. a missing IPC
+  // handler) and we need to read its console to diagnose. Register
+  // the accelerators directly on the window so they keep working.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const isMac = process.platform === 'darwin';
+    const ctrlOrCmd = isMac ? input.meta : input.control;
+    const f12          = input.key === 'F12';
+    const shiftCtrlI   = ctrlOrCmd && input.shift && input.key.toLowerCase() === 'i';
+    if (f12 || shiftCtrlI) {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
+    }
+  });
 }
 
 // IPC handlers. Each module returns { register(ipcMain) } so we wire

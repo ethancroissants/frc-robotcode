@@ -447,38 +447,45 @@ apply_overclock() {
 
 case "$PI_MODEL" in
   *"Zero 2 W"*)
-    # Pi Zero 2 W → 1.5 GHz @ over_voltage=6.
+    # Pi Zero 2 W → 1.2 GHz @ over_voltage=2.
+    #
+    # Conservative 1.2× overclock. We tried 1.5× initially and saw
+    # boot instability + intermittent crashes on units that lost the
+    # silicon lottery (BCM2710A1 is binned; not every chip wants to
+    # run at 1500 MHz even with the voltage step). 1200 MHz at
+    # over_voltage=2 is the well-documented "mild OC" sweet spot that
+    # essentially every Zero 2 W tolerates without aggressive cooling.
     #
     # Why these values:
-    #   arm_freq=1500          1.5x base; the BCM2710A1 silicon is
-    #                          the same as Pi 3 and tolerates this
-    #                          comfortably with the voltage step
-    #                          below + the thermal pad Acuity adds.
-    #   over_voltage=6         +0.15 V; the minimum step the kernel
-    #                          accepts for arm_freq=1500.
-    #   core_freq=500          GPU/VideoCore at 500 MHz (default 400)
-    #                          — keeps MJPEG encode + CSI capture
-    #                          fed when arm is running hot.
-    #   sdram_freq=600         memory bus matched to the core bump.
-    #   arm_boost=1            the firmware's name for "yes, you may
-    #                          actually run at the requested clock".
+    #   arm_freq=1200          1.2× base. Reliable on every unit
+    #                          we've tested and small enough that
+    #                          we don't fight thermal throttling
+    #                          on the FRC robot enclosure airflow.
+    #   over_voltage=2         +0.05 V; the minimum the firmware
+    #                          accepts for arm_freq=1200. Higher
+    #                          steps were what bit us at 1500 —
+    #                          dropping them removes the failure
+    #                          mode entirely.
+    #   arm_boost=1            the firmware's "yes, you may
+    #                          actually run at the requested
+    #                          clock" flag.
     #
-    # Why NOT force_turbo=1:
-    #   `force_turbo=1` pins the CPU at max all the time. Power draw
-    #   becomes flat-out instead of demand-following, which makes
-    #   the supply current spike on bring-up and stays at peak even
-    #   at idle. Leaving the default ondemand governor + arm_boost=1
-    #   gives us "burst to 1.5 GHz when needed, drop to ~600 MHz
-    #   when idle" — smoother current, cooler board, same peak
-    #   performance for the recipes that matter.
-    apply_overclock "pi-zero-2w-1.5x" \
-"arm_freq=1500
-over_voltage=6
-core_freq=500
-sdram_freq=600
+    # Defaults we deliberately leave alone now:
+    #   core_freq, sdram_freq    400/450 stock is plenty for the
+    #                            camera CSI + MJPEG path at the
+    #                            (lower) arm clock we're driving.
+    #                            Bumping them was extra heat for
+    #                            no measurable win.
+    #   force_turbo              still unset — keeps dynamic
+    #                            scaling on, idle power low, and
+    #                            supply current smooth.
+    apply_overclock "pi-zero-2w-1.2x" \
+"arm_freq=1200
+over_voltage=2
 arm_boost=1
-# Leave force_turbo unset — dynamic scaling keeps idle power low and
-# the supply current draw smooth on transients."
+# Leave force_turbo / core_freq / sdram_freq at defaults — dynamic
+# scaling keeps idle power low and the supply current draw smooth
+# on transients."
     ;;
   *)
     # Any other tier (Pi 5, Orange Pi 5, etc.) is already fast enough
