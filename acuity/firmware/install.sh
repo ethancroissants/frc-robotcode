@@ -336,9 +336,13 @@ cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-firstboot.service"
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-setup-wizard.service"
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-dashboard.service"
 cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-ssh-keygen.service"
+cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-status-led.service"
+cp_unit "$PI_IMAGE_DIR/files/etc/systemd/system/acuity-error.service"
 
 cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-firstboot.sh"
 cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-wifi-mode.sh"
+cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-status-led.sh"
+cp_bin "$PI_IMAGE_DIR/files/usr/local/bin/acuity-status"
 
 install -d -m 755 /etc/acuity
 cp_etc "$PI_IMAGE_DIR/files/etc/acuity/hostapd-acuity.conf.template"
@@ -361,8 +365,12 @@ for f in /etc/systemd/system/acuity-firstboot.service \
          /etc/systemd/system/acuity-setup-wizard.service \
          /etc/systemd/system/acuity-dashboard.service \
          /etc/systemd/system/acuity-ssh-keygen.service \
+         /etc/systemd/system/acuity-status-led.service \
+         /etc/systemd/system/acuity-error.service \
          /usr/local/bin/acuity-firstboot.sh \
-         /usr/local/bin/acuity-wifi-mode.sh; do
+         /usr/local/bin/acuity-wifi-mode.sh \
+         /usr/local/bin/acuity-status-led.sh \
+         /usr/local/bin/acuity-status; do
   [ -s "$f" ] || fail "post-install verification: $f is empty (symlink-to-/dev/null bug?)"
 done
 
@@ -582,6 +590,13 @@ systemctl daemon-reload
 systemctl enable acuity-firstboot.service
 systemctl enable acuity-dashboard.service
 systemctl enable acuity-ssh-keygen.service
+# Status-LED daemon runs forever, started early so the boot heartbeat
+# is visible while the rest of the system is still coming up.
+systemctl enable acuity-status-led.service
+# acuity-error is a oneshot fired only via OnFailure= on the units
+# that hook it; nothing to "enable" at boot, but we still want it
+# unmasked + visible to `systemctl list-unit-files`.
+systemctl unmask acuity-error.service 2>/dev/null || true
 # acuity-setup-wizard intentionally NOT enabled at boot — only
 # acuity-wifi-mode.sh starts it when entering AP mode.
 

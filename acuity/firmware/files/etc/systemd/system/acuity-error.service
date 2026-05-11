@@ -1,0 +1,16 @@
+[Unit]
+# Hooked from `OnFailure=acuity-error.service` on the units we care
+# about (acuity-dashboard, acuity-firstboot). Flips the status LED to
+# the Morse SOS pattern so the failure is visible without a laptop.
+#
+# Deliberately a one-shot — once we've signalled the error we exit;
+# the LED daemon keeps blinking SOS until something else publishes a
+# different state (e.g. an admin SSHs in and runs `acuity-status
+# connected` after fixing the underlying issue).
+Description=Acuity error indicator
+DefaultDependencies=no
+After=acuity-status-led.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/acuity-status error

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# acuity-status — one-liner CLI that publishes the current device
+# state to the LED daemon. Usage:
+#
+#   acuity-status ap
+#   acuity-status sta-connecting
+#   acuity-status connected
+#   acuity-status wired
+#   acuity-status update
+#   acuity-status error
+#   acuity-status off
+#   acuity-status boot     (typically only firstboot sets this)
+#
+# Writes one word to /run/acuity/status atomically so a half-written
+# file never confuses the daemon. /run is tmpfs so we don't burn SD
+# card wear on every state transition.
+
+set -u
+
+STATE_FILE="${ACUITY_LED_STATE_FILE:-/run/acuity/status}"
+
+if [ "$#" -lt 1 ] || [ -z "${1:-}" ]; then
+  echo "usage: acuity-status <state>" >&2
+  echo "       states: boot ap sta-connecting connected wired update error off" >&2
+  exit 2
+fi
+
+state="$1"
+mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
+
+# Atomic write — never let the daemon read a half-written file.
+tmp="${STATE_FILE}.tmp.$$"
+printf '%s\n' "$state" > "$tmp" || exit 1
+mv -f "$tmp" "$STATE_FILE"

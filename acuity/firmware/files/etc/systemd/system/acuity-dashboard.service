@@ -6,6 +6,10 @@ Description=Acuity (camera + control web UI)
 # but the operator can still see the camera feed.
 After=network.target acuity-firstboot.service
 Wants=network.target
+# Flip the status LED to Morse SOS if the dashboard hits StartLimit /
+# crashes outright. Restart=always normally papers over restarts, but
+# OnFailure fires when systemd gives up entirely.
+OnFailure=acuity-error.service
 StartLimitIntervalSec=0
 
 [Service]

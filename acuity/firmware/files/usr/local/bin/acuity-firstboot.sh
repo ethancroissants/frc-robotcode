@@ -19,6 +19,121 @@ CONF="/boot/firmware/acuity.conf"
 log() { logger -t acuity-firstboot "$*"; printf '[acuity-firstboot] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# Publish a state to the LED daemon. Falls back silently if the helper
+# isn't installed (e.g. devel checkout without firmware updates yet).
+status() {
+  /usr/local/bin/acuity-status "$1" 2>/dev/null || true
+}
+
+# Anything that escapes set -e or set -u is a firstboot failure that
+# leaves the device in an unknown state. Make sure the LED reflects
+# that before systemd's OnFailure hook also flips it.
+trap 'status error; log "firstboot bailed out — LED set to error"' ERR
+status boot
+
+# Expand the root filesystem to fill the SD card if we're shipping a
+# shrunken image.
+#
+# Why this lives here and not in Pi OS's stock first-boot path: we
+# ship a *premade* image that's been booted, configured, and then
+# shrunk (pishrink.sh) so the .img is small and quick to flash. That
+# means Pi OS's one-shot expansion flag in cmdline.txt has already
+# been consumed before the customer ever sees the device, so on their
+# first boot the rootfs stays at the shrunken size and they're stuck
+# with ~1 GB of free space.
+#
+# Solution: on every boot, before we touch network config, check
+# whether the partition fills the underlying disk. If not, call
+# `raspi-config nonint do_expand_rootfs` (which rewrites the
+# partition table + schedules a resize2fs_once on next boot) and
+# reboot. The next boot's firstboot sees the disk fully used and
+# this function exits in ~1 ms — so we eat one extra reboot exactly
+# once in the lifetime of the device.
+#
+# Robust to non-mmc media (USB-SSD-booted Pi 5) and to the kernel
+# device-tree differences between Pi 4/5 (mmcblk0p2) and a Pi running
+# off NVMe (nvme0n1p2).
+expand_rootfs_if_needed() {
+  local root_part root_disk root_partnum
+  root_part="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+  if [[ ! "$root_part" =~ ^/dev/ ]]; then
+    log "rootfs: '/' is not on a block device ($root_part) — skipping expand check"
+    return 0
+  fi
+
+  # Split <disk><partnum>. Pi OS Bookworm devices come in three shapes:
+  #   /dev/mmcblk0p2    SD card
+  #   /dev/nvme0n1p2    NVMe (Pi 5)
+  #   /dev/sda2         USB SSD / older naming
+  if [[ "$root_part" =~ ^(/dev/(mmcblk[0-9]+|nvme[0-9]+n[0-9]+))p([0-9]+)$ ]]; then
+    root_disk="${BASH_REMATCH[1]}"
+    root_partnum="${BASH_REMATCH[3]}"
+  elif [[ "$root_part" =~ ^(/dev/[a-z]+)([0-9]+)$ ]]; then
+    root_disk="${BASH_REMATCH[1]}"
+    root_partnum="${BASH_REMATCH[2]}"
+  else
+    log "rootfs: can't parse partition pattern from $root_part — skipping"
+    return 0
+  fi
+
+  if [ ! -b "$root_disk" ]; then
+    log "rootfs: parent disk $root_disk doesn't exist as a block dev — skipping"
+    return 0
+  fi
+
+  # Disk total in 512-byte sectors.
+  local disk_sectors part_start part_size
+  disk_sectors="$(blockdev --getsz "$root_disk" 2>/dev/null || echo 0)"
+  # Partition START is reported in 512-byte sectors; SIZE in bytes.
+  # lsblk's `-bno` keeps it script-friendly (raw numbers, no headers).
+  part_start="$(lsblk -bno START "$root_part" 2>/dev/null | head -n1 | tr -d ' ')"
+  part_size="$(lsblk -bno SIZE  "$root_part" 2>/dev/null | head -n1 | tr -d ' ')"
+
+  if [ -z "$part_start" ] || [ -z "$part_size" ] || [ "$part_size" = "0" ]; then
+    log "rootfs: lsblk gave no START/SIZE for $root_part — skipping"
+    return 0
+  fi
+  local part_end_sectors=$(( part_start + (part_size / 512) ))
+  local free_sectors=$(( disk_sectors - part_end_sectors ))
+  local free_mb=$(( free_sectors / 2048 ))
+
+  # Threshold: anything under ~64 MB unallocated is normal SD-card
+  # slack (partition alignment, reserved tail) — not worth a reboot.
+  if [ "$free_mb" -lt 64 ]; then
+    log "rootfs already fills the disk (${free_mb} MB tail, partition ${root_partnum} on $root_disk)"
+    return 0
+  fi
+
+  log "shrunken rootfs detected: ${free_mb} MB unallocated after partition ${root_partnum} end on $root_disk"
+
+  if ! command -v raspi-config >/dev/null 2>&1; then
+    log "raspi-config not installed — can't auto-expand. Will retry next boot."
+    return 0
+  fi
+
+  log "running 'raspi-config nonint do_expand_rootfs'"
+  if raspi-config nonint do_expand_rootfs; then
+    log "partition table updated, resize2fs scheduled for next boot — rebooting now"
+    # Make sure pending writes to /boot/firmware (e.g. an updated
+    # cmdline.txt from raspi-config) hit the card before we cut power.
+    sync
+    # Stop the dashboard before reboot so its NT4 client doesn't
+    # accidentally publish a stale snapshot during shutdown.
+    systemctl stop acuity-dashboard.service 2>/dev/null || true
+    sleep 1
+    systemctl reboot
+    # `systemctl reboot` returns synchronously while the reboot is
+    # queued. Exit the script so the rest of firstboot doesn't run
+    # on a partition table the kernel is about to re-read.
+    exit 0
+  else
+    log "raspi-config expand_rootfs failed — proceeding with shrunken rootfs"
+    return 1
+  fi
+}
+
+expand_rootfs_if_needed
+
 # Helper: read KEY= from acuity.conf, returning empty if missing.
 conf_get() {
   local key="$1"
@@ -132,13 +247,17 @@ fi
 # quietly on the wire than spam an AP nobody asked for.
 if [ -n "$SSID" ]; then
   log "SSID configured ($SSID) → joining as STA (team=${TEAM:-none})"
+  status sta-connecting
   # Pass TEAM as the 5th arg so wifi-mode.sh can apply the FRC static
   # IP convention (10.TE.AM.11). With no team, it falls back to DHCP.
   /usr/local/bin/acuity-wifi-mode.sh sta "$SSID" "$PSK" "$COUNTRY" "$TEAM"
+  status connected
 elif [ -n "$ETH_IP" ]; then
   log "ethernet is up and no SSID configured → skipping wifi entirely"
+  status wired
 else
   log "no SSID and no ethernet → entering AP-mode setup wizard"
+  status ap
   /usr/local/bin/acuity-wifi-mode.sh ap
 fi
 

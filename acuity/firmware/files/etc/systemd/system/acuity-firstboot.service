@@ -10,6 +10,9 @@ Description=Acuity — first-boot WiFi configurator
 After=NetworkManager.service local-fs.target
 Wants=NetworkManager.service
 Before=acuity-dashboard.service
+# A firstboot crash leaves the device in an undefined network state,
+# which is exactly the situation a Morse SOS light is for.
+OnFailure=acuity-error.service
 
 [Service]
 Type=oneshot

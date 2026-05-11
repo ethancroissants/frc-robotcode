@@ -1,0 +1,24 @@
+[Unit]
+# Drive the onboard ACT LED so a glance at the device tells you which
+# state it's in (booting, AP-setup, connecting, connected, error, …).
+#
+# Starts very early so the boot heartbeat is visible while the rest of
+# the boot proceeds. We don't gate on acuity-firstboot or
+# acuity-dashboard — the LED should be lit before either of them runs.
+Description=Acuity status LED driver
+DefaultDependencies=no
+After=local-fs.target
+Before=acuity-firstboot.service acuity-dashboard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/acuity-status-led.sh
+Restart=always
+RestartSec=2
+# Run as root because /sys/class/leds/*/brightness needs root on most
+# Pi OS Bookworm builds. The script itself does no other privileged
+# work and stays inside /sys + /run.
+User=root
+
+[Install]
+WantedBy=multi-user.target

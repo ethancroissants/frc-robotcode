@@ -599,6 +599,45 @@
             on the robot. Acuity exists in part so you don't have to.
           </p>
 
+          <h2>Status light</h2>
+          <p>
+            The onboard activity LED is taken over by Acuity at boot
+            so a glance at the device tells you which state it's in.
+            No laptop required. Patterns from "I'm waiting for setup"
+            to "I crashed, please help" are visible across a pit.
+          </p>
+          <table class="docs-api">
+            <thead><tr><th>Pattern</th><th>State</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td>Slow double-pulse</td><td><code>boot</code></td><td>System booting; first-boot script still running.</td></tr>
+              <tr><td>Rapid blink (5 Hz)</td><td><code>ap</code></td><td>AP-mode setup wizard up. Connect to <code>Acuity-Setup-XXXX</code> and configure.</td></tr>
+              <tr><td>Medium blink (~1 Hz)</td><td><code>sta-connecting</code></td><td>Joining the configured team WiFi.</td></tr>
+              <tr><td>Solid on</td><td><code>connected</code></td><td>Live on team WiFi. Dashboard reachable.</td></tr>
+              <tr><td>Short-short-long (every ~3 s)</td><td><code>wired</code></td><td>Live on ethernet. Visually distinct from <code>connected</code> so an inspector can tell at a glance which link is in use.</td></tr>
+              <tr><td>Triple-blip + pause</td><td><code>update</code></td><td>Firmware update in progress. Don't power-cycle.</td></tr>
+              <tr><td>Morse SOS  · · · — — — · · ·</td><td><code>error</code></td><td>A critical service hit systemd's failure limit (acuity-firstboot crashed, acuity-dashboard refused to come up, etc.). SSH in or pop the SD card.</td></tr>
+              <tr><td>Solid off</td><td><code>off</code></td><td>Forced dark — set manually for night-match stealth.</td></tr>
+            </tbody>
+          </table>
+          <p>
+            The state is published to <code>/run/acuity/status</code>
+            (a single word on one line). Custom scripts can drive it:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-bash">acuity-status update   # before a long-running operation
+acuity-status connected # back to normal
+acuity-status off       # silence the LED entirely</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p class="hint">
+            Pre-userspace boot failures (kernel or start.elf not
+            found, SD-card unreadable, …) are signalled by the GPU
+            firmware's own blink codes — those run before any of our
+            services can take over the LED. The <code>error</code>
+            state above covers everything that breaks <em>after</em>
+            Acuity has taken control.
+          </p>
+
           <h2>Tested where it matters</h2>
           <p>
             Every Acuity tier is tested on our own team's robots
