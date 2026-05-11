@@ -5,8 +5,41 @@
 // the library installer). The renderer talks to us via the
 // contextBridge IPC channels declared in preload.js.
 
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const path = require('path');
+
+// Remove the default Electron application menu (File / Edit / View /
+// Window / Help). We have our own top-bar tabs in the renderer for
+// everything Manager actually does; the OS menu just adds visual
+// clutter and exposes generic Electron actions (Reload, Toggle
+// DevTools, Zoom, etc.) that a packaged-product user shouldn't see.
+// Setting to null removes the bar entirely; we lose the default
+// accelerators with it, which is fine — none of them are useful for
+// this app, and Cmd/Ctrl+C, Cmd/Ctrl+V, Cmd/Ctrl+W etc. still work
+// because Chromium provides them at the widget layer regardless of
+// the application menu.
+Menu.setApplicationMenu(null);
+
+// Pin the Windows AppUserModelID before anything else runs.
+//
+// Windows groups taskbar entries — and looks up which icon to show —
+// by AUMID, not by the .exe path. Electron does NOT derive this
+// from package.json's `build.appId` at runtime; you have to call
+// setAppUserModelId() yourself, and you have to do it before the
+// first window opens or Windows caches the wrong identity.
+//
+// Symptom this fixes: title-bar icon updates fine via
+// BrowserWindow({ icon }), but the taskbar entry keeps showing
+// Electron's default icon even after uninstall + reinstall —
+// because without an explicit AUMID, Windows can't tie the running
+// window back to the NSIS-installed shortcut that has our icon
+// embedded, so it falls through to the cached Electron default.
+//
+// The string MUST match `build.appId` in package.json. NSIS bakes
+// the same AUMID into the shortcut at install time.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('tech.acuity.manager');
+}
 
 let mainWindow = null;
 

@@ -32,6 +32,7 @@
     <nav class="topbar-tabs">
       <button class="tab active" data-tab="devices">Devices</button>
       <button class="tab" data-tab="camera">Camera</button>
+      <button class="tab" data-tab="scripts">Scripts</button>
       <button class="tab" data-tab="terminal">Terminal</button>
       <button class="tab" data-tab="libraries">Libraries</button>
       <button class="tab" data-tab="docs">Docs</button>
@@ -110,6 +111,90 @@
       <div id="term-host"></div>
     </section>
 
+    <!-- ============== Scripts tab ==============
+         Pick a device, browse its /var/lib/acuity/scripts/ tree, edit
+         in-app, run, schedule. Each panel is independent so the user
+         can be running one script and editing another. -->
+    <section class="page" data-page="scripts">
+      <div class="scripts-toolbar">
+        <label class="cam-pick">
+          <span class="cam-pick-label">Device</span>
+          <select id="scr-device-pick">
+            <option value="">— select a device —</option>
+          </select>
+        </label>
+        <button class="ghost small" id="scr-refresh">Refresh</button>
+        <button class="ghost small" id="scr-new">New script</button>
+        <label class="ghost small scr-upload-btn">
+          Upload…<input type="file" id="scr-upload" hidden />
+        </label>
+        <span class="cam-meta-spacer"></span>
+        <span class="muted small" id="scr-status">No device selected</span>
+      </div>
+
+      <div class="scripts-layout">
+        <aside class="scripts-list" id="scr-list">
+          <div class="det-empty">Pick a device to load scripts.</div>
+        </aside>
+
+        <section class="scripts-editor">
+          <header class="scripts-editor-header">
+            <input type="text" id="scr-name" placeholder="filename (e.g. pose_fuser.py)"
+                   spellcheck="false" autocomplete="off" />
+            <div class="scripts-editor-actions">
+              <button class="ghost small" id="scr-save" disabled>Save</button>
+              <button class="primary small" id="scr-run" disabled>Run</button>
+              <button class="ghost small" id="scr-stop" hidden>Stop</button>
+              <button class="danger small" id="scr-delete" disabled>Delete</button>
+            </div>
+          </header>
+          <textarea id="scr-editor" class="scripts-editor-area"
+                    placeholder="# Pick or create a script."
+                    spellcheck="false" autocapitalize="off"
+                    autocomplete="off" wrap="off"></textarea>
+
+          <div class="scripts-schedule" id="scr-schedule" hidden>
+            <h3>Schedule</h3>
+            <p class="muted small">
+              Fire this script automatically. The dashboard's
+              built-in scheduler checks every second; the minimum
+              interval is 5 seconds.
+            </p>
+            <div class="scripts-schedule-row">
+              <label>
+                <input type="checkbox" id="scr-sched-enable" />
+                <span>Enabled</span>
+              </label>
+              <label>
+                Every
+                <input type="number" id="scr-sched-interval"
+                       min="5" max="86400" value="60" />
+                seconds
+              </label>
+              <label>
+                Args
+                <input type="text" id="scr-sched-args"
+                       placeholder="space-separated args"
+                       spellcheck="false" />
+              </label>
+              <button class="primary small" id="scr-sched-save">Save schedule</button>
+              <button class="ghost small"  id="scr-sched-clear">Remove</button>
+            </div>
+            <p class="muted small" id="scr-sched-last"></p>
+          </div>
+
+          <div class="scripts-output" id="scr-output-wrap" hidden>
+            <header>
+              <span>Output</span>
+              <span class="muted small" id="scr-output-meta"></span>
+              <button class="ghost small" id="scr-output-clear">Clear</button>
+            </header>
+            <pre id="scr-output"></pre>
+          </div>
+        </section>
+      </div>
+    </section>
+
     <!-- ============== Libraries tab ============== -->
     <section class="page" data-page="libraries">
       <div class="libraries-wrapper">
@@ -151,6 +236,12 @@
             <span class="cam-pick-label">Device</span>
             <select id="cam-device-pick">
               <option value="">— select a device —</option>
+            </select>
+          </label>
+          <label class="cam-pick" id="cam-source-wrap" hidden>
+            <span class="cam-pick-label">Camera</span>
+            <select id="cam-source-pick">
+              <option value="main">main</option>
             </select>
           </label>
           <span class="pill" id="cam-link-pill" hidden>link</span>
@@ -420,6 +511,53 @@
             pose at 200 Hz, and log telemetry concurrently — and
             the device that arrives is provisioned to do all of it
             without you tuning anything.
+          </p>
+
+          <h3>Adding cameras at runtime</h3>
+          <p>
+            The primary camera always exists and feeds the AprilTag
+            pipeline. Additional cameras are configured via the
+            <code>extra_cameras</code> field on the device's
+            <code>/api/settings</code> — one entry per camera, each
+            with its own <code>name</code>, <code>index</code>,
+            capture + stream knobs:
+          </p>
+          <div class="code-block">
+            <pre><code class="lang-bash">curl -X POST http://acuity-1279.local:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "extra_cameras": [
+      { "name": "intake", "index": 1,
+        "resolution":        [640, 480],
+        "target_fps":        15,
+        "stream_resolution": [320, 240],
+        "stream_quality":    50,
+        "stream_max_fps":    15 }
+    ]
+  }'</code></pre>
+            <button class="copy-btn" data-copy>Copy</button>
+          </div>
+          <p>
+            <code>GET /api/cameras</code> lists every active camera
+            (primary + extras) with live FPS, resolution, and
+            connection state. The MJPEG stream picks a camera via
+            <code>?cam=&lt;name&gt;</code>:
+            <code>http://acuity-1279.local:8080/stream.mjpg?cam=intake</code>.
+            Same query works on <code>/api/snapshot</code>.
+          </p>
+          <p>
+            Manager's <strong>Camera</strong> tab auto-shows a
+            camera picker the moment a device reports more than one
+            camera from <code>/api/cameras</code> — there's nothing
+            to configure on the laptop side.
+          </p>
+          <p class="hint">
+            The defaults applied to extras (lower resolution, lower
+            JPEG quality, capped FPS) are the auto-quality safety
+            net: adding a second camera at the click of a button
+            shouldn't accidentally double the capture CPU. Override
+            them per-camera once you know what your specific setup
+            can sustain.
           </p>
 
           <h2>Storage — at least 64 GB on every device</h2>
@@ -902,16 +1040,22 @@ class Robot : public frc::TimedRobot {
 
           <h2>Script runner</h2>
           <p>
-            Drop any executable file (or
-            <code>.py</code>) into
-            <code>/var/lib/acuity/scripts/</code> over SSH and run
-            it from any HTTP client. Each run gets a buffered
-            stdout/stderr you can poll until exit.
+            Drop any executable file (or <code>.py</code>) into
+            <code>/var/lib/acuity/scripts/</code> on the device and
+            run it from any HTTP client. Each run gets a buffered
+            stdout/stderr you can poll until exit. The easiest way
+            to manage these is Manager's <strong>Scripts</strong>
+            tab — pick your device, edit in-app, hit Run, watch
+            output. The REST endpoints below are what the tab
+            drives:
           </p>
           <table class="docs-api">
             <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
             <tbody>
               <tr><td><code>GET /api/scripts</code></td><td>List scripts in the scripts dir (name, size, mtime, executable bit).</td></tr>
+              <tr><td><code>GET /api/scripts/&lt;name&gt;</code></td><td>Plain-text source — Manager's editor opens with this.</td></tr>
+              <tr><td><code>PUT /api/scripts/&lt;name&gt;</code></td><td>Body is the raw source. Creates or overwrites. Non-<code>.py</code> files get <code>+x</code> on write.</td></tr>
+              <tr><td><code>DELETE /api/scripts/&lt;name&gt;</code></td><td>Remove the script. Any schedule pointing at it is purged too.</td></tr>
               <tr><td><code>POST /api/scripts/&lt;name&gt;/run</code></td><td>Optional body <code>{ "args": ["..."] }</code>. Returns a <code>run_id</code>.</td></tr>
               <tr><td><code>GET /api/scripts/runs</code></td><td>List every run from this dashboard process.</td></tr>
               <tr><td><code>GET /api/scripts/runs/&lt;run_id&gt;</code></td><td>Run state, exit code, full captured output (capped at 256 KB).</td></tr>
@@ -925,6 +1069,32 @@ class Robot : public frc::TimedRobot {
             "I forgot to mark it runnable" doesn't get masked. Runs
             don't persist across dashboard restarts — there's no
             on-disk state.
+          </p>
+
+          <h2>Scheduler</h2>
+          <p>
+            Fire a script automatically on an interval — heartbeats,
+            log rotation, periodic snapshots. The dashboard runs a
+            built-in scheduler thread that wakes every second; the
+            minimum schedulable interval is 5 seconds. Manager's
+            Scripts tab has a UI; the REST surface is:
+          </p>
+          <table class="docs-api">
+            <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /api/schedules</code></td><td>List every schedule, with last-fired timestamps.</td></tr>
+              <tr><td><code>POST /api/schedules</code></td><td>Body <code>{ script, interval_s, args?, enabled? }</code>. Returns a schedule id.</td></tr>
+              <tr><td><code>PUT /api/schedules/&lt;id&gt;</code></td><td>Update <code>interval_s</code>, <code>enabled</code>, or <code>args</code> on an existing schedule.</td></tr>
+              <tr><td><code>DELETE /api/schedules/&lt;id&gt;</code></td><td>Remove the schedule (the script itself is untouched).</td></tr>
+            </tbody>
+          </table>
+          <p class="hint">
+            Schedules persist to
+            <code>/var/lib/acuity/schedules.json</code> and survive
+            reboots. They use the same script-runner machinery as
+            manual <code>/api/scripts/&lt;name&gt;/run</code> calls,
+            so each scheduled run shows up in
+            <code>GET /api/scripts/runs</code> alongside ad-hoc runs.
           </p>
 
           <h2>NT4 publish passthrough</h2>

@@ -60,8 +60,37 @@ function bumpValue(el, newText) {
 
 // ============== Tab routing ==============
 
+// Tabs that need at least one discovered device to do anything
+// useful. We gray them out + intercept clicks while `devices` is
+// empty so users don't open the Camera tab and see a confused
+// "select a device" empty state when there ISN'T one to select.
+const DEVICE_GATED_TABS = new Set(['camera', 'terminal', 'scripts', 'logs']);
+
+function updateDeviceGatedTabs() {
+  const haveDevices = devices.length > 0;
+  $$('.tab').forEach((btn) => {
+    if (!DEVICE_GATED_TABS.has(btn.dataset.tab)) return;
+    btn.classList.toggle('disabled', !haveDevices);
+    btn.title = haveDevices ? '' : 'Connect an Acuity device first';
+  });
+  // If a now-disabled tab is currently active, fall back to Devices
+  // so the user isn't staring at an inert page.
+  if (!haveDevices) {
+    const active = $('.tab.active');
+    if (active && DEVICE_GATED_TABS.has(active.dataset.tab)) {
+      $('.tab[data-tab="devices"]').click();
+    }
+  }
+}
+
 $$('.tab').forEach((btn) => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (ev) => {
+    if (btn.classList.contains('disabled')) {
+      // Swallow the click; the .disabled visual already explains why.
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      return;
+    }
     $$('.tab').forEach((t) => t.classList.toggle('active', t === btn));
     const target = btn.dataset.tab;
     $$('.page').forEach((p) =>
@@ -87,6 +116,11 @@ $$('.tab').forEach((btn) => {
       // keep <img> connections alive until the tag is removed; clearing
       // src forces a TCP disconnect.
       if (typeof releaseCamStream === 'function') releaseCamStream();
+    }
+    if (target === 'scripts') {
+      // Lazy-load the scripts tab the first time it's selected so we
+      // don't hit the device for a list on every Manager launch.
+      if (typeof initScriptsTab === 'function') initScriptsTab();
     }
   });
 });
@@ -395,7 +429,13 @@ window.acuity.discovery.onUpdate(({ devices: list }) => {
   renderGrid();
   renderDetail();
   fwUpdateOnDiscovery(devices);
+  // Tabs that only do something useful with a discovered device gate
+  // off their own ability to be clicked when nothing's around.
+  updateDeviceGatedTabs();
 });
+// Initial gate: until the first discovery update lands, devices is
+// empty and the device-bound tabs should already look unavailable.
+updateDeviceGatedTabs();
 startScanning();
 window.acuity.discovery.start();
 
@@ -826,11 +866,18 @@ const camMetaFps    = $('#cam-meta-fps');
 const camDetList    = $('#cam-det-list');
 const camDetCount   = $('#cam-det-count');
 const camOpenDash   = $('#cam-open-dashboard');
+const camSourceWrap = $('#cam-source-wrap');
+const camSourcePick = $('#cam-source-pick');
 
 let camWs        = null;
 let camWsBackoff = 250;
 let camDevice    = null;
 let camFrameSize = { w: 0, h: 0 };
+// Which camera on the selected device we're currently streaming.
+// "main" is the primary; any other name is an entry in
+// settings.extra_cameras on the device. The detector only runs on
+// "main", so we hide the SVG tag overlay when this isn't "main".
+let camSource    = 'main';
 
 function camOptionLabel(d) {
   return `${d.name}  —  ${d.ip}`;
@@ -859,7 +906,62 @@ function refreshCamDeviceList() {
 function onCamDeviceChange() {
   const host = camDevicePick.value;
   const dev = devices.find((d) => d.host === host) || null;
+  camSource = 'main';   // reset to primary whenever device changes
   setCamDevice(dev);
+  refreshCamSources(dev);
+}
+
+// Pull /api/cameras from the device and rebuild the source picker.
+// The primary is always there; extras only appear if the operator
+// configured `extra_cameras` on the device. With only one camera
+// (the common case), we hide the picker entirely so the toolbar
+// doesn't carry an extra widget for nothing.
+async function refreshCamSources(d) {
+  camSourcePick.innerHTML = '<option value="main">main</option>';
+  if (!d) {
+    camSourceWrap.hidden = true;
+    return;
+  }
+  try {
+    const base = `http://${d.ip}:${d.port || 8080}`;
+    const r = await fetch(`${base}/api/cameras`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const { cameras } = await r.json();
+    camSourcePick.innerHTML = '';
+    for (const c of cameras || []) {
+      const opt = document.createElement('option');
+      opt.value = c.name;
+      opt.textContent = c.primary
+        ? `${c.name}  (primary)`
+        : `${c.name}  (extra)`;
+      camSourcePick.appendChild(opt);
+    }
+    camSourcePick.value = camSource;
+    camSourceWrap.hidden = (cameras || []).length < 2;
+  } catch (e) {
+    // Older firmware doesn't expose /api/cameras — fall through to
+    // the single-camera path. Hide the picker; "main" is implied.
+    camSourceWrap.hidden = true;
+  }
+}
+
+camSourcePick.addEventListener('change', () => {
+  camSource = camSourcePick.value || 'main';
+  // Re-source the <img>. The single-viewer policy is per-camera on
+  // the device side, so swapping cam= just opens a stream against
+  // the new camera and the old one's generator exits cleanly.
+  if (camDevice && _camStreamActive) {
+    const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
+    camImg.src = streamUrlFor(camDevice, camSource);
+  }
+  // Tag overlay only makes sense on the detector's source camera.
+  camOverlay.style.opacity = camSource === 'main' ? '' : '0';
+});
+
+function streamUrlFor(d, cam) {
+  const base = `http://${d.ip}:${d.port || 8080}`;
+  const q = `cb=${Date.now()}` + (cam && cam !== 'main' ? `&cam=${encodeURIComponent(cam)}` : '');
+  return `${base}/stream.mjpg?${q}`;
 }
 
 function setCamDevice(d) {
@@ -889,7 +991,7 @@ function setCamDevice(d) {
   // the user isn't even looking.
   if (!_camStreamActive) return;
 
-  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+  camImg.src = streamUrlFor(camDevice || d, camSource);
   camFrame.classList.add('connecting');
   camLoadingTxt.textContent = `Connecting to ${d.name}…`;
   camLinkPill.hidden = false; camLinkPill.textContent = 'connecting';
@@ -1133,7 +1235,7 @@ function reconnectCamStream() {
   if (!camDevice) return;
   _camStreamActive = true;
   const base = `http://${camDevice.ip}:${camDevice.port || 8080}`;
-  camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+  camImg.src = streamUrlFor(camDevice || d, camSource);
   camFrame.classList.add('connecting');
   if (!camWs) connectCamWs(camDevice);
 }
@@ -1178,7 +1280,7 @@ $('#cam-quality').addEventListener('change', async (ev) => {
     // Force the <img> to reconnect so the new resolution takes
     // effect (browsers stick to whatever resolution they got on
     // the initial multipart-MJPEG content-type sniff).
-    camImg.src = `${base}/stream.mjpg?cb=${Date.now()}`;
+    camImg.src = streamUrlFor(camDevice || d, camSource);
   } catch (e) { /* user can retry */ }
 });
 
@@ -1399,3 +1501,395 @@ function fwUpdateClose() {
   overlay.remove();
   _fwUpdate = null;
 }
+
+
+// ============== Scripts ==============
+//
+// Pick a device, browse its /var/lib/acuity/scripts/ tree, edit
+// in-app, run, schedule. Talks directly to the device's HTTP API
+// (the same one robot code uses) — no SSH or Manager-side plumbing
+// required. Mode is mostly stateless; everything lives on the device.
+
+const scrDevicePick = $('#scr-device-pick');
+const scrList       = $('#scr-list');
+const scrName       = $('#scr-name');
+const scrEditor     = $('#scr-editor');
+const scrSave       = $('#scr-save');
+const scrRun        = $('#scr-run');
+const scrStop       = $('#scr-stop');
+const scrDelete     = $('#scr-delete');
+const scrStatus     = $('#scr-status');
+const scrSchedule   = $('#scr-schedule');
+const scrSchEnable  = $('#scr-sched-enable');
+const scrSchInterval= $('#scr-sched-interval');
+const scrSchArgs    = $('#scr-sched-args');
+const scrSchSave    = $('#scr-sched-save');
+const scrSchClear   = $('#scr-sched-clear');
+const scrSchLast    = $('#scr-sched-last');
+const scrOutputWrap = $('#scr-output-wrap');
+const scrOutput     = $('#scr-output');
+const scrOutputMeta = $('#scr-output-meta');
+const scrOutputClear= $('#scr-output-clear');
+const scrUploadInp  = $('#scr-upload');
+
+let scrDevice    = null;
+let scrCurrent   = null;   // currently-open script name (file on the device)
+let scrDirty     = false;
+let scrRunId     = null;   // run id currently being polled
+let scrRunPoller = null;
+let scrInited    = false;
+
+function scrBase() {
+  if (!scrDevice) return null;
+  return `http://${scrDevice.ip}:${scrDevice.port || 8080}`;
+}
+function scrSetStatus(msg, kind) {
+  scrStatus.textContent = msg;
+  scrStatus.className = 'muted small' + (kind === 'err' ? ' status-err' : '');
+}
+
+async function scrFetch(path, opts) {
+  const base = scrBase();
+  if (!base) throw new Error('no device');
+  const r = await fetch(base + path, { cache: 'no-store', ...opts });
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+  return r;
+}
+
+function scrRefreshDevicePick() {
+  const prev = scrDevicePick.value;
+  scrDevicePick.innerHTML = '<option value="">— select a device —</option>';
+  for (const d of devices) {
+    const opt = document.createElement('option');
+    opt.value = d.host;
+    opt.textContent = `${d.name}  —  ${d.ip}`;
+    scrDevicePick.appendChild(opt);
+  }
+  if (devices.find((d) => d.host === prev)) {
+    scrDevicePick.value = prev;
+  } else if (devices.length === 1 && !prev) {
+    scrDevicePick.value = devices[0].host;
+    onScrDeviceChange();
+  }
+}
+
+function onScrDeviceChange() {
+  const host = scrDevicePick.value;
+  scrDevice = devices.find((d) => d.host === host) || null;
+  scrCurrent = null;
+  scrEditor.value = '';
+  scrName.value = '';
+  scrSetButtons(false);
+  scrSchedule.hidden = true;
+  scrOutputWrap.hidden = true;
+  if (scrDevice) {
+    scrSetStatus(`Loading ${scrDevice.name}…`);
+    refreshScriptsList();
+  } else {
+    scrSetStatus('No device selected');
+    scrList.innerHTML = '<div class="det-empty">Pick a device to load scripts.</div>';
+  }
+}
+
+function scrSetButtons(open) {
+  scrSave.disabled   = !open;
+  scrRun.disabled    = !open || !scrName.value;
+  scrDelete.disabled = !scrCurrent;
+}
+
+async function refreshScriptsList() {
+  if (!scrDevice) return;
+  try {
+    const r = await scrFetch('/api/scripts');
+    const data = await r.json();
+    const scripts = data.scripts || [];
+    if (!scripts.length) {
+      scrList.innerHTML = '<div class="det-empty">No scripts yet. Click <b>New script</b> or <b>Upload</b>.</div>';
+    } else {
+      scrList.innerHTML = scripts.map((s) => `
+        <div class="scr-row${s.name === scrCurrent ? ' selected' : ''}"
+             data-name="${escapeHtml(s.name)}">
+          <span class="scr-row-name">${escapeHtml(s.name)}</span>
+          <span class="scr-row-meta muted small">${fmtBytes(s.size)}</span>
+        </div>`).join('');
+      $$in(scrList, '.scr-row').forEach((row) => {
+        row.addEventListener('click', () => openScript(row.dataset.name));
+      });
+    }
+    scrSetStatus(`${scripts.length} script${scripts.length === 1 ? '' : 's'} on ${scrDevice.name}`);
+  } catch (e) {
+    scrSetStatus(`Could not list scripts: ${e.message}`, 'err');
+    scrList.innerHTML = `<div class="det-empty">Couldn't reach <code>${escapeHtml(scrDevice.ip)}</code>.</div>`;
+  }
+}
+
+// Local helper: scoped variant of the global $$ that confines the
+// query to a specific subtree (e.g. just the script list, not the
+// whole document). The global $$ at the top of this file is doc-wide.
+function $$in(root, sel) {
+  return Array.from(root.querySelectorAll(sel));
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function openScript(name) {
+  if (scrDirty && !confirm('Discard unsaved changes?')) return;
+  try {
+    const r = await scrFetch(`/api/scripts/${encodeURIComponent(name)}`);
+    scrEditor.value = await r.text();
+    scrName.value   = name;
+    scrCurrent      = name;
+    scrDirty        = false;
+    scrSetButtons(true);
+    scrSchedule.hidden = false;
+    await refreshScheduleForCurrent();
+    // Mark the selected row.
+    $$in(scrList, '.scr-row').forEach((row) =>
+      row.classList.toggle('selected', row.dataset.name === name));
+  } catch (e) {
+    scrSetStatus(`Could not open ${name}: ${e.message}`, 'err');
+  }
+}
+
+scrName.addEventListener('input', () => {
+  scrDirty = true;
+  scrSetButtons(scrName.value.length > 0);
+});
+scrEditor.addEventListener('input', () => {
+  scrDirty = true;
+});
+
+scrSave.addEventListener('click', async () => {
+  const name = scrName.value.trim();
+  if (!name) return scrSetStatus('Filename required', 'err');
+  try {
+    await scrFetch(`/api/scripts/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: scrEditor.value,
+    });
+    scrCurrent = name;
+    scrDirty   = false;
+    scrSetButtons(true);
+    scrSetStatus(`Saved ${name}`);
+    await refreshScriptsList();
+  } catch (e) {
+    scrSetStatus(`Save failed: ${e.message}`, 'err');
+  }
+});
+
+scrDelete.addEventListener('click', async () => {
+  if (!scrCurrent) return;
+  if (!confirm(`Delete ${scrCurrent}? This also removes any schedule for it.`)) return;
+  try {
+    await scrFetch(`/api/scripts/${encodeURIComponent(scrCurrent)}`, { method: 'DELETE' });
+    scrCurrent = null;
+    scrName.value = '';
+    scrEditor.value = '';
+    scrDirty = false;
+    scrSchedule.hidden = true;
+    scrSetButtons(false);
+    await refreshScriptsList();
+  } catch (e) {
+    scrSetStatus(`Delete failed: ${e.message}`, 'err');
+  }
+});
+
+scrRun.addEventListener('click', async () => {
+  // Save first if dirty — running a stale on-disk version is the
+  // most confusing UX failure mode here.
+  if (scrDirty) {
+    if (!confirm('You have unsaved changes. Save and run?')) return;
+    scrSave.click();
+    // Wait one tick for the save to land.
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const name = scrName.value.trim();
+  if (!name) return;
+  try {
+    const r = await scrFetch(`/api/scripts/${encodeURIComponent(name)}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: [] }),
+    });
+    const data = await r.json();
+    scrRunId = data.id;
+    scrOutputWrap.hidden = false;
+    scrOutput.textContent = '';
+    scrOutputMeta.textContent = `run ${scrRunId} starting…`;
+    scrStop.hidden = false;
+    startRunPoller();
+  } catch (e) {
+    scrSetStatus(`Run failed: ${e.message}`, 'err');
+  }
+});
+
+scrStop.addEventListener('click', async () => {
+  if (!scrRunId) return;
+  try {
+    await scrFetch(`/api/scripts/runs/${encodeURIComponent(scrRunId)}/stop`,
+                   { method: 'POST' });
+  } catch (e) { /* poller will reflect state anyway */ }
+});
+
+function startRunPoller() {
+  if (scrRunPoller) clearInterval(scrRunPoller);
+  scrRunPoller = setInterval(async () => {
+    if (!scrRunId) return;
+    try {
+      const r = await scrFetch(`/api/scripts/runs/${encodeURIComponent(scrRunId)}`);
+      const run = await r.json();
+      scrOutput.textContent = run.output || '';
+      scrOutputMeta.textContent =
+        `run ${run.id} · ${run.state}` +
+        (run.exit_code != null ? ` · exit ${run.exit_code}` : '') +
+        (run.truncated ? ' · truncated' : '');
+      // Auto-scroll while output is still streaming.
+      scrOutput.scrollTop = scrOutput.scrollHeight;
+      if (run.state !== 'running') {
+        clearInterval(scrRunPoller); scrRunPoller = null;
+        scrStop.hidden = true;
+      }
+    } catch (e) {
+      clearInterval(scrRunPoller); scrRunPoller = null;
+      scrStop.hidden = true;
+    }
+  }, 500);
+}
+
+scrOutputClear.addEventListener('click', () => {
+  scrOutput.textContent = '';
+  scrOutputMeta.textContent = '';
+});
+
+// ----- Schedule -----
+
+async function refreshScheduleForCurrent() {
+  scrSchLast.textContent = '';
+  if (!scrCurrent) return;
+  try {
+    const r = await scrFetch('/api/schedules');
+    const data = await r.json();
+    const mine = (data.schedules || []).find((s) => s.script === scrCurrent);
+    if (mine) {
+      scrSchEnable.checked  = !!mine.enabled;
+      scrSchInterval.value  = mine.interval_s;
+      scrSchArgs.value      = (mine.args || []).join(' ');
+      if (mine.last_run_ts) {
+        scrSchLast.textContent =
+          `Last fired ${new Date(mine.last_run_ts * 1000).toLocaleTimeString()}.`;
+      }
+      scrSchClear.hidden = false;
+      scrSchSave.dataset.id = mine.id;
+    } else {
+      scrSchEnable.checked = true;
+      scrSchInterval.value = 60;
+      scrSchArgs.value = '';
+      scrSchClear.hidden = true;
+      scrSchSave.dataset.id = '';
+    }
+  } catch (e) {
+    scrSchLast.textContent = `Could not load schedule: ${e.message}`;
+  }
+}
+
+scrSchSave.addEventListener('click', async () => {
+  if (!scrCurrent) return;
+  const id = scrSchSave.dataset.id;
+  const payload = {
+    script:     scrCurrent,
+    interval_s: parseInt(scrSchInterval.value, 10) || 60,
+    enabled:    scrSchEnable.checked,
+    args:       scrSchArgs.value.trim().split(/\s+/).filter(Boolean),
+  };
+  try {
+    if (id) {
+      await scrFetch(`/api/schedules/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      scrSetStatus(`Schedule updated for ${scrCurrent}`);
+    } else {
+      const r = await scrFetch('/api/schedules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const s = await r.json();
+      scrSchSave.dataset.id = s.id;
+      scrSetStatus(`Schedule created for ${scrCurrent}`);
+    }
+    await refreshScheduleForCurrent();
+  } catch (e) {
+    scrSetStatus(`Schedule save failed: ${e.message}`, 'err');
+  }
+});
+
+scrSchClear.addEventListener('click', async () => {
+  const id = scrSchSave.dataset.id;
+  if (!id) return;
+  if (!confirm('Remove this schedule?')) return;
+  try {
+    await scrFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    scrSchSave.dataset.id = '';
+    scrSchClear.hidden = true;
+    scrSchLast.textContent = 'Schedule removed.';
+  } catch (e) {
+    scrSetStatus(`Schedule remove failed: ${e.message}`, 'err');
+  }
+});
+
+// ----- Upload + new script -----
+
+$('#scr-new').addEventListener('click', () => {
+  if (scrDirty && !confirm('Discard unsaved changes?')) return;
+  scrCurrent = null;
+  scrName.value = '';
+  scrEditor.value = '#!/usr/bin/env python3\n\n';
+  scrEditor.focus();
+  scrDirty = true;
+  scrSetButtons(true);
+  scrSchedule.hidden = true;
+});
+
+$('#scr-refresh').addEventListener('click', () => refreshScriptsList());
+
+scrUploadInp.addEventListener('change', async () => {
+  const f = scrUploadInp.files && scrUploadInp.files[0];
+  if (!f) return;
+  if (!scrDevice) { scrSetStatus('Pick a device first', 'err'); return; }
+  const body = await f.arrayBuffer();
+  try {
+    await scrFetch(`/api/scripts/${encodeURIComponent(f.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body,
+    });
+    scrSetStatus(`Uploaded ${f.name}`);
+    await refreshScriptsList();
+    await openScript(f.name);
+  } catch (e) {
+    scrSetStatus(`Upload failed: ${e.message}`, 'err');
+  } finally {
+    scrUploadInp.value = '';
+  }
+});
+
+scrDevicePick.addEventListener('change', onScrDeviceChange);
+
+function initScriptsTab() {
+  if (scrInited) return;
+  scrInited = true;
+  scrRefreshDevicePick();
+}
+
+// Keep the Scripts device picker in sync with mDNS discovery.
+window.acuity.discovery.onUpdate(() => {
+  if (scrInited) scrRefreshDevicePick();
+});

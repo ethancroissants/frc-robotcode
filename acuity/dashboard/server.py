@@ -141,6 +141,29 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "quad_sigma":       0.0,
     "decode_sharpening": 0.25,
 
+    # Multi-camera. The primary camera is always present and reads
+    # from the top-level fields above (camera_index, resolution,
+    # stream_* …) — this keeps the legacy single-camera path
+    # untouched. Each entry in `extra_cameras` spawns an additional
+    # CameraThread which serves its own MJPEG feed at
+    # `/stream.mjpg?cam=<name>`. The AprilTag detector continues to
+    # run on the primary only — adding secondary cameras costs ~one
+    # core for capture + encode, but no detection CPU.
+    #
+    # Per-camera entry schema (any missing field uses sane lower-than-
+    # primary defaults so adding a camera at runtime doesn't accidentally
+    # blow the CPU budget):
+    #   { "name": "intake",   ← required, must be unique
+    #     "index": 1,         ← /dev/video<index> or v4l2 index
+    #     "resolution":        [640, 480],
+    #     "target_fps":        15,
+    #     "flip_horizontal":   false, "flip_vertical": false,
+    #     "stream_resolution": [320, 240],
+    #     "stream_quality":    50,
+    #     "stream_max_fps":    15
+    #   }
+    "extra_cameras":    [],
+
     # NT4
     "nt_team":          0,             # 0 → server mode (publish only)
     "nt_server_host":   "",            # blank → use roborio-{team}-frc.local
@@ -228,10 +251,11 @@ class CameraThread(threading.Thread):
     browser sees full camera FPS even if detection drops to 5 Hz.
     """
 
-    def __init__(self, settings_provider):
-        super().__init__(daemon=True, name="camera")
+    def __init__(self, settings_provider, *, name: str = "main"):
+        super().__init__(daemon=True, name=f"camera-{name}")
         self._settings = settings_provider
         self._stop = threading.Event()
+        self.cam_name = name
 
         self.latest_jpeg: Optional[bytes] = None    # raw MJPEG frame
         self.latest_bgr:  Optional[np.ndarray] = None  # decoded for detector
@@ -1013,7 +1037,170 @@ def _settings_provider() -> dict[str, Any]:
     with _settings_lock:
         return dict(_settings)
 
-camera   = CameraThread(_settings_provider)
+# Multi-camera manager. Owns one CameraThread per configured camera
+# (the primary plus every entry in settings.extra_cameras). The
+# legacy `camera` variable below is preserved as an alias for the
+# primary so the detector, NT publisher, snapshot endpoint, and the
+# MJPEG generator can keep accessing it the way they did when there
+# was only one camera.
+class CameraManager:
+    """Spawns / despawns CameraThread instances to match settings.
+
+    Lifecycle:
+      * On construction, builds the primary thread immediately.
+      * `start()` starts every owned thread.
+      * `sync()` is called after each /api/settings POST — it diffs
+        the configured `extra_cameras` against running threads and
+        starts/stops the delta. No restart of the primary; you can't
+        retire it without restarting the dashboard.
+
+    Naming: primary is always "main". Extra cameras inherit whatever
+    `name` they declare; the manager rejects duplicates (incl.
+    duplicates of "main").
+    """
+
+    # Reduced defaults applied to extras when the user hasn't set
+    # them. The primary keeps the top-level resolution + fps + quality
+    # — these defaults only shape the *extras* so a second camera
+    # added at runtime doesn't double the camera-capture CPU.
+    _EXTRA_DEFAULTS = {
+        "resolution":        [640, 480],
+        "target_fps":        15,
+        "flip_horizontal":   False,
+        "flip_vertical":     False,
+        "stream_resolution": [320, 240],
+        "stream_quality":    50,
+        "stream_max_fps":    15,
+    }
+
+    def __init__(self, settings_provider):
+        self._settings = settings_provider
+        self._threads: dict[str, CameraThread] = {}
+        self._lock = threading.Lock()
+        # Primary always exists and reads top-level fields. Keep a
+        # direct reference so consumers can grab it without going
+        # through the dict.
+        self.primary = CameraThread(self._settings, name="main")
+        self._threads["main"] = self.primary
+        self._sync_extras()
+
+    def start(self) -> None:
+        with self._lock:
+            for t in self._threads.values():
+                if not t.is_alive():
+                    t.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            for t in self._threads.values():
+                t.stop()
+
+    def get(self, name: Optional[str]) -> Optional[CameraThread]:
+        """Look up a camera by name. None / "" → primary."""
+        if not name:
+            return self.primary
+        with self._lock:
+            return self._threads.get(name)
+
+    def cameras_view(self) -> list[dict[str, Any]]:
+        """JSON-safe snapshot for /api/cameras."""
+        out: list[dict[str, Any]] = []
+        s = self._settings()
+        extras = {e.get("name"): e for e in s.get("extra_cameras") or []
+                  if isinstance(e, dict) and e.get("name")}
+        with self._lock:
+            for name, t in self._threads.items():
+                cfg = extras.get(name, {}) if name != "main" else {
+                    "index":       s.get("camera_index", 0),
+                    "resolution":  s.get("resolution"),
+                    "target_fps":  s.get("target_fps"),
+                }
+                out.append({
+                    "name":       name,
+                    "primary":    name == "main",
+                    "index":      cfg.get("index"),
+                    "resolution": list(t.resolution) if t.resolution[0] else cfg.get("resolution"),
+                    "fps":        round(t.fps, 1),
+                    "connected":  bool(t.connected),
+                    "target_fps": cfg.get("target_fps"),
+                    "stream_resolution": cfg.get("stream_resolution"),
+                    "stream_quality":    cfg.get("stream_quality"),
+                    "stream_max_fps":    cfg.get("stream_max_fps"),
+                })
+        return out
+
+    def sync(self) -> None:
+        """Diff settings.extra_cameras against running threads and
+        bring the delta into life. Call this after /api/settings POSTs
+        that touch extra_cameras."""
+        self._sync_extras()
+
+    def _make_provider(self, cam_name: str):
+        """Build a settings_provider closure that returns a dict
+        shaped like the top-level settings but populated from the
+        per-camera entry. CameraThread doesn't have to care that
+        it's reading a synthesized config."""
+        def provider() -> dict[str, Any]:
+            s = self._settings()
+            extras = s.get("extra_cameras") or []
+            cfg = next((e for e in extras
+                        if isinstance(e, dict) and e.get("name") == cam_name),
+                       None)
+            if cfg is None:
+                # Camera was removed mid-loop; serve last-known values
+                # so the thread doesn't crash before its stop() lands.
+                cfg = {}
+            merged = dict(self._EXTRA_DEFAULTS)
+            merged.update({k: v for k, v in cfg.items() if v is not None})
+            # CameraThread reads these specific keys; rewrap to that
+            # exact shape.
+            return {
+                "camera_index":       int(merged.get("index", 0)),
+                "resolution":         list(merged["resolution"]),
+                "target_fps":         int(merged["target_fps"]),
+                "flip_horizontal":    bool(merged["flip_horizontal"]),
+                "flip_vertical":      bool(merged["flip_vertical"]),
+                "stream_resolution":  list(merged["stream_resolution"]),
+                "stream_quality":     int(merged["stream_quality"]),
+                "stream_max_fps":     int(merged["stream_max_fps"]),
+            }
+        return provider
+
+    def _sync_extras(self) -> None:
+        s = self._settings()
+        extras = s.get("extra_cameras") or []
+        # Validate + dedupe by name; silently drop entries that
+        # collide with the primary or each other (Manager validates
+        # at write time, but be defensive in case settings.json was
+        # hand-edited).
+        wanted: dict[str, dict[str, Any]] = {}
+        for e in extras:
+            if not isinstance(e, dict): continue
+            nm = (e.get("name") or "").strip()
+            if not nm or nm == "main" or nm in wanted: continue
+            wanted[nm] = e
+
+        with self._lock:
+            # Stop any thread for an extra that's been removed.
+            for name in list(self._threads.keys()):
+                if name == "main": continue
+                if name not in wanted:
+                    log.info("camera manager: retiring '%s'", name)
+                    self._threads[name].stop()
+                    del self._threads[name]
+            # Spawn any newly-added extra.
+            for nm in wanted:
+                if nm in self._threads: continue
+                log.info("camera manager: spawning '%s'", nm)
+                t = CameraThread(self._make_provider(nm), name=nm)
+                t.start()
+                self._threads[nm] = t
+
+
+camera_manager = CameraManager(_settings_provider)
+# Legacy alias — every read-only reference to `camera.*` below this
+# point hits the primary thread.
+camera = camera_manager.primary
 publisher = NTPublisher(_settings_provider)
 latest_snapshot: dict[str, Any] = {}
 latest_lock = threading.Lock()
@@ -1073,7 +1260,7 @@ def _broadcast_snapshot() -> None:
 async def _startup() -> None:
     global ws_event_loop
     ws_event_loop = asyncio.get_running_loop()
-    camera.start()
+    camera_manager.start()
     detector.start()
     log.info("acuity dashboard ready")
 
@@ -1081,7 +1268,7 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     detector.stop()
-    camera.stop()
+    camera_manager.stop()
 
 
 # ----- HTML / static -----
@@ -1112,40 +1299,63 @@ _stream_id_counter = 0
 _active_stream_id = 0
 
 
+# Per-camera single-viewer policy. Each camera tracks its own
+# _active_stream_id so opening the primary in one tab + an extra
+# camera in another doesn't make them fight for the active slot.
+_active_stream_ids: dict[str, int] = {}
+
+
 @app.get("/stream.mjpg")
-async def stream_mjpg() -> StreamingResponse:
+async def stream_mjpg(cam: Optional[str] = None) -> StreamingResponse:
     """Multipart MJPEG. Reuses the JPEG the camera thread already
     encoded — no per-request re-encode. Honors `stream_max_fps`
     (set in /api/settings) to throttle stream FPS independently of
-    capture, and is single-viewer: a new connection takes over and
-    closes any currently-running stream."""
-    global _stream_id_counter, _active_stream_id
-    boundary = "acuity-frame"
+    capture, and is single-viewer per camera: a new connection on
+    the same camera takes over and closes any currently-running one.
 
+    Query:
+      cam=<name>   which camera to stream. Default: primary ("main").
+                   Names come from `extra_cameras[].name` in settings.
+    """
+    global _stream_id_counter
+    cam_name = (cam or "main").strip() or "main"
+    cam_thread = camera_manager.get(cam_name)
+    if cam_thread is None:
+        raise HTTPException(404, f"no such camera: {cam_name}")
+
+    boundary = "acuity-frame"
     with _stream_lock:
         _stream_id_counter += 1
         my_id = _stream_id_counter
-        _active_stream_id = my_id
-    log.info("stream.mjpg → viewer #%d (took over from previous)", my_id)
+        _active_stream_ids[cam_name] = my_id
+    log.info("stream.mjpg[%s] → viewer #%d (took over from previous)",
+             cam_name, my_id)
 
     async def generator():
         last_ts = 0.0
         last_yield = 0.0
         while True:
-            # Bow out the moment a newer client arrives. They become
-            # the active viewer; we stop sending frames into a pipe
-            # that's about to be closed.
-            if _active_stream_id != my_id:
-                log.info("stream.mjpg viewer #%d yielding to a newer one", my_id)
+            # Bow out when a newer client takes over the SAME camera.
+            if _active_stream_ids.get(cam_name) != my_id:
+                log.info("stream.mjpg[%s] viewer #%d yielding to a newer one",
+                         cam_name, my_id)
                 return
             await asyncio.sleep(0.005)
             s = _settings_provider()
-            max_fps = int(s.get("stream_max_fps", 0) or 0)
+            # Per-camera fps cap. For the primary we read top-level;
+            # for extras we have to dig into the matching entry.
+            if cam_name == "main":
+                max_fps = int(s.get("stream_max_fps", 0) or 0)
+            else:
+                entry = next((e for e in s.get("extra_cameras") or []
+                              if isinstance(e, dict) and e.get("name") == cam_name),
+                             None) or {}
+                max_fps = int(entry.get("stream_max_fps", 15) or 0)
             min_interval = (1.0 / max_fps) if max_fps > 0 else 0.0
 
-            with camera._lock:
-                ts = camera.latest_ts
-                jpg = camera.latest_jpeg
+            with cam_thread._lock:
+                ts = cam_thread.latest_ts
+                jpg = cam_thread.latest_jpeg
             if jpg is None or ts == last_ts:
                 continue
             now = time.monotonic()
@@ -1163,6 +1373,13 @@ async def stream_mjpg() -> StreamingResponse:
         media_type=f"multipart/x-mixed-replace; boundary={boundary}",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/cameras")
+async def api_cameras() -> JSONResponse:
+    """Inventory of every configured camera and its live state.
+    Manager calls this to drive the Camera tab's per-camera picker."""
+    return JSONResponse({"cameras": camera_manager.cameras_view()})
 
 
 @app.post("/api/target")
@@ -1234,21 +1451,26 @@ async def detections() -> JSONResponse:
 
 
 @app.get("/api/snapshot")
-async def api_snapshot() -> Any:
-    """Single JPEG of whatever the camera most recently produced.
+async def api_snapshot(cam: Optional[str] = None) -> Any:
+    """Single JPEG of whatever the named camera most recently
+    produced (default: primary).
 
     Cheap: we hand back the JPEG buffer the MJPEG streamer already
     has cached, so there's no extra encode pass. Good for screenshot
     buttons in robot dashboards / Slack bots / event-triggered
     capture from a script in /api/scripts."""
-    with camera._lock:
-        jpeg = camera.latest_jpeg
-        ts   = camera.latest_ts
+    cam_thread = camera_manager.get(cam)
+    if cam_thread is None:
+        raise HTTPException(404, f"no such camera: {cam}")
+    with cam_thread._lock:
+        jpeg = cam_thread.latest_jpeg
+        ts   = cam_thread.latest_ts
     if jpeg is None:
         raise HTTPException(503, "camera has not produced a frame yet")
     headers = {
         "Cache-Control": "no-store",
         "X-Acuity-Frame-Ts": f"{ts:.6f}",
+        "X-Acuity-Camera":   cam_thread.cam_name,
     }
     return Response(content=bytes(jpeg), media_type="image/jpeg",
                     headers=headers)
@@ -1267,6 +1489,7 @@ async def set_settings(req: Request) -> JSONResponse:
     if not isinstance(body, dict):
         raise HTTPException(400, "expected JSON object")
     out: dict[str, Any] = {}
+    touched_cameras = False
     with _settings_lock:
         for k, v in body.items():
             if k not in DEFAULT_SETTINGS:
@@ -1285,9 +1508,16 @@ async def set_settings(req: Request) -> JSONResponse:
                 else:
                     _settings[k] = v
                 out[k] = _settings[k]
+                if k == "extra_cameras":
+                    touched_cameras = True
             except (TypeError, ValueError) as e:
                 raise HTTPException(400, f"bad value for {k}: {e}")
         _save_settings(_settings)
+    # Spawn / retire extra-camera threads to match the new config.
+    # Done outside the settings lock so a slow .start() doesn't block
+    # other API calls.
+    if touched_cameras:
+        camera_manager.sync()
     return JSONResponse(out)
 
 
@@ -1681,12 +1911,95 @@ def _run_view(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_script_path(name: str) -> Path:
+    """Resolve a request-supplied script name to an absolute path
+    confined to SCRIPTS_DIR. Refuses path traversal (..), absolute
+    paths, and dot-prefixed names so a POST can't smuggle a write
+    to e.g. /etc/passwd or /var/lib/acuity/.config."""
+    if not name or name.startswith(".") or "/" in name or "\\" in name:
+        raise HTTPException(400, "bad script name")
+    p = (SCRIPTS_DIR / name).resolve()
+    try:
+        p.relative_to(SCRIPTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "script name escapes scripts dir")
+    return p
+
+
+# Max source size we accept on PUT. Scripts are people-readable Python
+# / shell / etc., not assets — 1 MB is a generous ceiling. Without a
+# cap, a runaway PUT loop could fill the SD card.
+MAX_SCRIPT_BYTES = 1 * 1024 * 1024
+
+
 @app.get("/api/scripts")
 async def api_scripts_list() -> JSONResponse:
     return JSONResponse({
         "dir":     str(SCRIPTS_DIR),
         "scripts": _list_scripts(),
     })
+
+
+@app.get("/api/scripts/{name}")
+async def api_scripts_get(name: str) -> PlainTextResponse:
+    """Read a script's source. Manager's in-app editor opens with this."""
+    p = _safe_script_path(name)
+    if not p.is_file():
+        raise HTTPException(404, f"no such script: {name}")
+    try:
+        return PlainTextResponse(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        raise HTTPException(500, f"read failed: {e}")
+
+
+@app.put("/api/scripts/{name}")
+async def api_scripts_put(name: str, req: Request) -> JSONResponse:
+    """Create or overwrite a script. Body is the raw source (any
+    encoding — we coerce to UTF-8). For .py files we leave the +x
+    bit off and rely on `python3 <path>` at run time; for anything
+    else (shell, node, compiled binary) we chmod +x so the runner
+    can exec it directly. The runner refuses non-executable
+    non-.py files with a clear message — so a shell script you
+    forgot to mark +x is the only way you'd ever notice.
+    """
+    SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _safe_script_path(name)
+    body = await req.body()
+    if len(body) > MAX_SCRIPT_BYTES:
+        raise HTTPException(413, f"script body exceeds {MAX_SCRIPT_BYTES} bytes")
+    # Atomic write via .tmp + rename so a partial write doesn't
+    # leave a half-empty script the scheduler might fire.
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    try:
+        tmp.write_bytes(body)
+        os.replace(tmp, p)
+    except Exception as e:
+        try: tmp.unlink()
+        except Exception: pass
+        raise HTTPException(500, f"write failed: {e}")
+    if p.suffix.lower() != ".py":
+        try:
+            mode = p.stat().st_mode
+            os.chmod(p, mode | 0o111)   # u+x g+x o+x
+        except Exception:
+            pass
+    return JSONResponse({"ok": True, "name": name, "size": len(body)})
+
+
+@app.delete("/api/scripts/{name}")
+async def api_scripts_delete(name: str) -> JSONResponse:
+    p = _safe_script_path(name)
+    if not p.exists():
+        raise HTTPException(404, f"no such script: {name}")
+    try:
+        p.unlink()
+    except Exception as e:
+        raise HTTPException(500, f"delete failed: {e}")
+    # Reap any schedule pointing at this script — leaving a stale
+    # schedule pointed at a deleted file would just spam the run log
+    # with "no such script" errors every interval.
+    _purge_schedules_for(name)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/scripts/{name}/run")
@@ -2036,4 +2349,201 @@ async def api_log_clear() -> JSONResponse:
             _log_fh = None
         if LOG_FILE.exists():
             LOG_FILE.unlink()
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------
+# Scheduler — fire scripts in /var/lib/acuity/scripts/ on an interval
+#
+# We deliberately keep this simpler than cron: each schedule is just a
+# (script_name, interval_s, enabled, args) tuple, and a single
+# background thread sweeps every second to see which ones are due. This
+# covers ~all the FRC use cases (heartbeats, log rotations, periodic
+# snapshots) without dragging in a cron parser or a wakeup-time
+# scheduling library; teams that want real cron can still use the
+# device's systemd timers via SSH.
+#
+# Persistence: JSON at /var/lib/acuity/schedules.json, dict keyed by an
+# auto-assigned `id`. Loaded once at boot; mutations write through.
+# ---------------------------------------------------------------------
+
+SCHEDULES_PATH = Path(os.environ.get(
+    "ACUITY_SCHEDULES", "/var/lib/acuity/schedules.json"))
+
+
+def _load_schedules() -> dict[str, dict[str, Any]]:
+    if not SCHEDULES_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SCHEDULES_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_schedules(d: dict[str, Any]) -> None:
+    SCHEDULES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SCHEDULES_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2))
+    os.replace(tmp, SCHEDULES_PATH)
+
+
+_sched_lock = threading.Lock()
+_schedules = _load_schedules()
+_sched_seq = max(
+    (int(k[1:]) for k in _schedules.keys() if k.startswith("s") and k[1:].isdigit()),
+    default=0)
+
+
+def _purge_schedules_for(script_name: str) -> None:
+    """Called from the script DELETE handler. Drops any schedule
+    that points at the now-gone script so the scheduler stops trying
+    to fire it."""
+    with _sched_lock:
+        gone = [k for k, v in _schedules.items() if v.get("script") == script_name]
+        for k in gone:
+            del _schedules[k]
+        if gone:
+            _save_schedules(_schedules)
+
+
+def _scheduler_loop():
+    """One-second tick. For each enabled schedule whose interval has
+    elapsed since its last run, kick off a run via the existing
+    `_start_run` machinery — so the per-run buffer + state-machine
+    behavior is identical to manually-fired runs."""
+    while True:
+        time.sleep(1.0)
+        try:
+            now = time.monotonic()
+            due: list[dict[str, Any]] = []
+            with _sched_lock:
+                for sid, sch in list(_schedules.items()):
+                    if not sch.get("enabled", True):
+                        continue
+                    last = sch.get("_last_mono", 0.0)
+                    if now - last >= float(sch.get("interval_s", 60)):
+                        sch["_last_mono"] = now
+                        sch["last_run_ts"] = time.time()
+                        due.append({
+                            "id":     sid,
+                            "script": sch["script"],
+                            "args":   sch.get("args", []),
+                        })
+                if due:
+                    _save_schedules(_schedules)
+            # Kick the runs OUTSIDE the lock — _start_run takes its
+            # own lock and we don't want to nest.
+            for d in due:
+                try:
+                    _start_run(d["script"], [str(a) for a in d["args"]])
+                except HTTPException as e:
+                    log.warning("schedule %s skipped run of %s: %s",
+                                d["id"], d["script"], e.detail)
+                except Exception:
+                    log.exception("schedule %s crashed firing %s",
+                                  d["id"], d["script"])
+        except Exception:
+            # Never let a transient bug kill the scheduler thread —
+            # the dashboard would silently stop firing schedules and
+            # nobody would notice until match time.
+            log.exception("scheduler loop iteration crashed")
+
+
+threading.Thread(target=_scheduler_loop, name="scheduler", daemon=True).start()
+
+
+def _schedule_view(sid: str, sch: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id":           sid,
+        "script":       sch.get("script"),
+        "interval_s":   sch.get("interval_s"),
+        "enabled":      sch.get("enabled", True),
+        "args":         sch.get("args", []),
+        "last_run_ts":  sch.get("last_run_ts"),
+    }
+
+
+@app.get("/api/schedules")
+async def api_schedules_list() -> JSONResponse:
+    with _sched_lock:
+        return JSONResponse({
+            "schedules": [_schedule_view(k, v) for k, v in _schedules.items()]
+        })
+
+
+@app.post("/api/schedules")
+async def api_schedules_add(req: Request) -> JSONResponse:
+    """Body: { script, interval_s, args?, enabled? }"""
+    global _sched_seq
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected JSON object")
+    script = (body.get("script") or "").strip()
+    if not script:
+        raise HTTPException(400, "'script' is required")
+    # Sanity-check the script exists before saving the schedule so
+    # we don't strand a broken entry that fires "no such script"
+    # errors every interval.
+    _safe_script_path(script)
+    if not (SCRIPTS_DIR / script).is_file():
+        raise HTTPException(404, f"no such script: {script}")
+    try:
+        interval = int(body.get("interval_s", 60))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "interval_s must be an integer")
+    if interval < 5:
+        raise HTTPException(400, "interval_s must be >= 5 seconds")
+    args = body.get("args") or []
+    if not isinstance(args, list):
+        raise HTTPException(400, "args must be a list")
+
+    with _sched_lock:
+        _sched_seq += 1
+        sid = f"s{_sched_seq}"
+        _schedules[sid] = {
+            "script":     script,
+            "interval_s": interval,
+            "args":       [str(a) for a in args],
+            "enabled":    bool(body.get("enabled", True)),
+            "_last_mono": 0.0,
+            "last_run_ts": None,
+        }
+        _save_schedules(_schedules)
+        return JSONResponse(_schedule_view(sid, _schedules[sid]))
+
+
+@app.put("/api/schedules/{sid}")
+async def api_schedules_update(sid: str, req: Request) -> JSONResponse:
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected JSON object")
+    with _sched_lock:
+        sch = _schedules.get(sid)
+        if sch is None:
+            raise HTTPException(404, f"no such schedule: {sid}")
+        if "interval_s" in body:
+            try:
+                v = int(body["interval_s"])
+                if v < 5: raise ValueError("interval_s must be >= 5")
+                sch["interval_s"] = v
+            except (TypeError, ValueError) as e:
+                raise HTTPException(400, str(e))
+        if "enabled" in body:
+            sch["enabled"] = bool(body["enabled"])
+        if "args" in body:
+            if not isinstance(body["args"], list):
+                raise HTTPException(400, "args must be a list")
+            sch["args"] = [str(a) for a in body["args"]]
+        _save_schedules(_schedules)
+        return JSONResponse(_schedule_view(sid, sch))
+
+
+@app.delete("/api/schedules/{sid}")
+async def api_schedules_delete(sid: str) -> JSONResponse:
+    with _sched_lock:
+        if sid not in _schedules:
+            raise HTTPException(404, f"no such schedule: {sid}")
+        del _schedules[sid]
+        _save_schedules(_schedules)
     return JSONResponse({"ok": True})
