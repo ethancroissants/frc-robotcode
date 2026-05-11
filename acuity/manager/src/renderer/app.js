@@ -1505,21 +1505,45 @@ function fwUpdateClose() {
 
 // ============== Scripts ==============
 //
-// Pick a device, browse its /var/lib/acuity/scripts/ tree, edit
-// in-app, run, schedule. Talks directly to the device's HTTP API
-// (the same one robot code uses) — no SSH or Manager-side plumbing
-// required. Mode is mostly stateless; everything lives on the device.
+// No in-app editor. The Acuity device is the source of truth — scripts
+// live in /var/lib/acuity/scripts/ on the device, and Manager talks to
+// the device's HTTP API to list / upload / run / delete them.
+//
+// The user-facing workflow is intentionally small:
+//   1. Pick a device.
+//   2. Pick a script from the dropdown (or hit "+ New script" to make
+//      one on disk in the OS-default editor, or "Upload existing"
+//      to upload a file the user already has).
+//   3. Configure: run / schedule / delete.
+//
+// Manager remembers the LOCAL-disk path each script was uploaded from
+// (per device, in localStorage) so "Edit locally" can pop the file in
+// the user's editor and "Re-upload from disk" can resync after they
+// save. If the local path is missing (e.g., they're on a different
+// laptop), they can Download the current device-side content to a
+// local file and edit it from there.
 
 const scrDevicePick = $('#scr-device-pick');
-const scrList       = $('#scr-list');
-const scrName       = $('#scr-name');
-const scrEditor     = $('#scr-editor');
-const scrSave       = $('#scr-save');
+const scrPickWrap   = $('#scr-pick-wrap');
+const scrPick       = $('#scr-pick');
+const scrEmpty      = $('#scr-empty');
+const scrDetail     = $('#scr-detail');
+const scrDetailName = $('#scr-detail-name');
+const scrDetailPath = $('#scr-detail-path');
+const scrMetaSize   = $('#scr-meta-size');
+const scrMetaMtime  = $('#scr-meta-mtime');
+const scrMetaExec   = $('#scr-meta-exec');
+const scrMetaLocal  = $('#scr-meta-local');
+const scrStatus     = $('#scr-status');
+const scrNewBtn     = $('#scr-new');
+const scrUploadBtn  = $('#scr-upload');
+const scrRefreshBtn = $('#scr-refresh');
+const scrEditLocal  = $('#scr-edit-local');
+const scrReupload   = $('#scr-reupload');
+const scrDownload   = $('#scr-download');
 const scrRun        = $('#scr-run');
 const scrStop       = $('#scr-stop');
 const scrDelete     = $('#scr-delete');
-const scrStatus     = $('#scr-status');
-const scrSchedule   = $('#scr-schedule');
 const scrSchEnable  = $('#scr-sched-enable');
 const scrSchInterval= $('#scr-sched-interval');
 const scrSchArgs    = $('#scr-sched-args');
@@ -1530,12 +1554,10 @@ const scrOutputWrap = $('#scr-output-wrap');
 const scrOutput     = $('#scr-output');
 const scrOutputMeta = $('#scr-output-meta');
 const scrOutputClear= $('#scr-output-clear');
-const scrUploadInp  = $('#scr-upload');
 
 let scrDevice    = null;
-let scrCurrent   = null;   // currently-open script name (file on the device)
-let scrDirty     = false;
-let scrRunId     = null;   // run id currently being polled
+let scrCurrent   = null;     // currently-open script name on the device
+let scrRunId     = null;
 let scrRunPoller = null;
 let scrInited    = false;
 
@@ -1547,7 +1569,6 @@ function scrSetStatus(msg, kind) {
   scrStatus.textContent = msg;
   scrStatus.className = 'muted small' + (kind === 'err' ? ' status-err' : '');
 }
-
 async function scrFetch(path, opts) {
   const base = scrBase();
   if (!base) throw new Error('no device');
@@ -1555,6 +1576,40 @@ async function scrFetch(path, opts) {
   if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
   return r;
 }
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Per-device map of script-name → local-disk path so "Edit locally"
+// + "Re-upload from disk" know where to look. localStorage key shape:
+//   acuity.scripts.localPaths.<host> = { "foo.py": "/Users/.../foo.py", … }
+function scrLocalKey(d) {
+  return d ? `acuity.scripts.localPaths.${d.host}` : null;
+}
+function scrLoadLocalMap() {
+  const k = scrLocalKey(scrDevice);
+  if (!k) return {};
+  try { return JSON.parse(localStorage.getItem(k) || '{}'); }
+  catch (e) { return {}; }
+}
+function scrSaveLocalMap(map) {
+  const k = scrLocalKey(scrDevice);
+  if (k) localStorage.setItem(k, JSON.stringify(map));
+}
+function scrRememberLocal(name, path) {
+  const m = scrLoadLocalMap(); m[name] = path; scrSaveLocalMap(m);
+}
+function scrForgetLocal(name) {
+  const m = scrLoadLocalMap(); delete m[name]; scrSaveLocalMap(m);
+}
+function scrLocalPathFor(name) {
+  return scrLoadLocalMap()[name] || null;
+}
+
+// ----- Device + script list -----
 
 function scrRefreshDevicePick() {
   const prev = scrDevicePick.value;
@@ -1573,28 +1628,21 @@ function scrRefreshDevicePick() {
   }
 }
 
-function onScrDeviceChange() {
+async function onScrDeviceChange() {
   const host = scrDevicePick.value;
   scrDevice = devices.find((d) => d.host === host) || null;
   scrCurrent = null;
-  scrEditor.value = '';
-  scrName.value = '';
-  scrSetButtons(false);
-  scrSchedule.hidden = true;
-  scrOutputWrap.hidden = true;
-  if (scrDevice) {
-    scrSetStatus(`Loading ${scrDevice.name}…`);
-    refreshScriptsList();
-  } else {
+  scrDetail.hidden = true;
+  scrEmpty.hidden = false;
+  scrPickWrap.hidden = !scrDevice;
+  scrNewBtn.disabled    = !scrDevice;
+  scrUploadBtn.disabled = !scrDevice;
+  scrRefreshBtn.disabled = !scrDevice;
+  if (!scrDevice) {
     scrSetStatus('No device selected');
-    scrList.innerHTML = '<div class="det-empty">Pick a device to load scripts.</div>';
+    return;
   }
-}
-
-function scrSetButtons(open) {
-  scrSave.disabled   = !open;
-  scrRun.disabled    = !open || !scrName.value;
-  scrDelete.disabled = !scrCurrent;
+  await refreshScriptsList();
 }
 
 async function refreshScriptsList() {
@@ -1603,83 +1651,172 @@ async function refreshScriptsList() {
     const r = await scrFetch('/api/scripts');
     const data = await r.json();
     const scripts = data.scripts || [];
-    if (!scripts.length) {
-      scrList.innerHTML = '<div class="det-empty">No scripts yet. Click <b>New script</b> or <b>Upload</b>.</div>';
-    } else {
-      scrList.innerHTML = scripts.map((s) => `
-        <div class="scr-row${s.name === scrCurrent ? ' selected' : ''}"
-             data-name="${escapeHtml(s.name)}">
-          <span class="scr-row-name">${escapeHtml(s.name)}</span>
-          <span class="scr-row-meta muted small">${fmtBytes(s.size)}</span>
-        </div>`).join('');
-      $$in(scrList, '.scr-row').forEach((row) => {
-        row.addEventListener('click', () => openScript(row.dataset.name));
-      });
+    const prev = scrPick.value;
+    scrPick.innerHTML = '<option value="">— none —</option>';
+    for (const s of scripts) {
+      const opt = document.createElement('option');
+      opt.value = s.name;
+      opt.textContent = `${s.name}   (${fmtBytes(s.size)})`;
+      opt.dataset.meta = JSON.stringify(s);
+      scrPick.appendChild(opt);
+    }
+    if (scripts.find((s) => s.name === prev)) {
+      scrPick.value = prev;
+    } else if (scrCurrent && !scripts.find((s) => s.name === scrCurrent)) {
+      // Currently-open script vanished (deleted from elsewhere); blank.
+      scrCurrent = null;
+      scrDetail.hidden = true; scrEmpty.hidden = false;
     }
     scrSetStatus(`${scripts.length} script${scripts.length === 1 ? '' : 's'} on ${scrDevice.name}`);
   } catch (e) {
     scrSetStatus(`Could not list scripts: ${e.message}`, 'err');
-    scrList.innerHTML = `<div class="det-empty">Couldn't reach <code>${escapeHtml(scrDevice.ip)}</code>.</div>`;
   }
 }
 
-// Local helper: scoped variant of the global $$ that confines the
-// query to a specific subtree (e.g. just the script list, not the
-// whole document). The global $$ at the top of this file is doc-wide.
-function $$in(root, sel) {
-  return Array.from(root.querySelectorAll(sel));
-}
-
-function fmtBytes(n) {
-  n = Number(n) || 0;
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function openScript(name) {
-  if (scrDirty && !confirm('Discard unsaved changes?')) return;
-  try {
-    const r = await scrFetch(`/api/scripts/${encodeURIComponent(name)}`);
-    scrEditor.value = await r.text();
-    scrName.value   = name;
-    scrCurrent      = name;
-    scrDirty        = false;
-    scrSetButtons(true);
-    scrSchedule.hidden = false;
-    await refreshScheduleForCurrent();
-    // Mark the selected row.
-    $$in(scrList, '.scr-row').forEach((row) =>
-      row.classList.toggle('selected', row.dataset.name === name));
-  } catch (e) {
-    scrSetStatus(`Could not open ${name}: ${e.message}`, 'err');
+scrPick.addEventListener('change', () => {
+  const name = scrPick.value;
+  if (!name) {
+    scrCurrent = null;
+    scrDetail.hidden = true; scrEmpty.hidden = false;
+    return;
   }
+  const sel = scrPick.options[scrPick.selectedIndex];
+  let meta = null;
+  try { meta = sel.dataset.meta ? JSON.parse(sel.dataset.meta) : null; }
+  catch (e) { meta = null; }
+  openScript(name, meta);
+});
+
+function openScript(name, meta) {
+  scrCurrent = name;
+  scrEmpty.hidden = true;
+  scrDetail.hidden = false;
+  scrDetailName.textContent = name;
+  scrDetailPath.textContent = `on device · /var/lib/acuity/scripts/${name}`;
+  if (meta) {
+    scrMetaSize.textContent  = fmtBytes(meta.size);
+    scrMetaMtime.textContent = meta.modified
+      ? new Date(meta.modified * 1000).toLocaleString()
+      : '—';
+    scrMetaExec.textContent  = meta.executable ? 'yes' : 'no';
+  } else {
+    scrMetaSize.textContent = scrMetaMtime.textContent = scrMetaExec.textContent = '—';
+  }
+  const local = scrLocalPathFor(name);
+  if (local) {
+    scrMetaLocal.textContent = local;
+    scrReupload.hidden = false;
+  } else {
+    scrMetaLocal.textContent = '(none — Download to keep an editable copy locally)';
+    scrReupload.hidden = true;
+  }
+  scrStop.hidden = true;
+  scrOutputWrap.hidden = true;
+  scrPick.value = name;
+  refreshScheduleForCurrent();
 }
 
-scrName.addEventListener('input', () => {
-  scrDirty = true;
-  scrSetButtons(scrName.value.length > 0);
-});
-scrEditor.addEventListener('input', () => {
-  scrDirty = true;
+scrRefreshBtn.addEventListener('click', () => refreshScriptsList());
+
+// ----- New + upload -----
+
+scrNewBtn.addEventListener('click', async () => {
+  if (!scrDevice) return;
+  const suggested = `acuity_${Date.now().toString(36)}.py`;
+  const r = await window.acuity.scriptsFs.pickNew(suggested);
+  if (!r.ok) {
+    if (r.error) scrSetStatus(`Could not create file: ${r.error}`, 'err');
+    return;
+  }
+  // Upload the just-written file so it shows up on the device
+  // immediately. Users will iterate locally and click "Re-upload"
+  // after each save.
+  await uploadContent(r.name, r.content, r.path);
+  scrSetStatus(
+    r.createdStarter
+      ? `Created ${r.name}, opened in your editor. Save and use "Re-upload" to push changes.`
+      : `Loaded ${r.name} from disk and uploaded.`);
 });
 
-scrSave.addEventListener('click', async () => {
-  const name = scrName.value.trim();
-  if (!name) return scrSetStatus('Filename required', 'err');
+scrUploadBtn.addEventListener('click', async () => {
+  if (!scrDevice) return;
+  const r = await window.acuity.scriptsFs.pickExisting();
+  if (!r.ok) {
+    if (r.error) scrSetStatus(`Could not read file: ${r.error}`, 'err');
+    return;
+  }
+  await uploadContent(r.name, r.content, r.path);
+  scrSetStatus(`Uploaded ${r.name}`);
+});
+
+async function uploadContent(name, content, localPath) {
   try {
     await scrFetch(`/api/scripts/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/octet-stream' },
-      body: scrEditor.value,
+      body: content,
     });
-    scrCurrent = name;
-    scrDirty   = false;
-    scrSetButtons(true);
-    scrSetStatus(`Saved ${name}`);
+    if (localPath) scrRememberLocal(name, localPath);
     await refreshScriptsList();
+    scrPick.value = name;
+    const opt = Array.from(scrPick.options).find((o) => o.value === name);
+    let meta = null;
+    try { meta = opt && opt.dataset.meta ? JSON.parse(opt.dataset.meta) : null; }
+    catch (e) { meta = null; }
+    openScript(name, meta);
   } catch (e) {
-    scrSetStatus(`Save failed: ${e.message}`, 'err');
+    scrSetStatus(`Upload failed: ${e.message}`, 'err');
+  }
+}
+
+// ----- Detail-pane actions -----
+
+scrEditLocal.addEventListener('click', async () => {
+  if (!scrCurrent) return;
+  const p = scrLocalPathFor(scrCurrent);
+  if (!p) {
+    scrSetStatus(
+      'No local copy on file — Download first, or use Upload existing.',
+      'err');
+    return;
+  }
+  const r = await window.acuity.scriptsFs.open(p);
+  if (!r.ok) {
+    scrSetStatus(`Could not open ${p}: ${r.error || r.reason}`, 'err');
+    if (r.reason === 'missing') scrForgetLocal(scrCurrent);
+  }
+});
+
+scrReupload.addEventListener('click', async () => {
+  if (!scrCurrent) return;
+  const p = scrLocalPathFor(scrCurrent);
+  if (!p) return;
+  const r = await window.acuity.scriptsFs.read(p);
+  if (!r.ok) {
+    scrSetStatus(`Could not read ${p}: ${r.error || r.reason}`, 'err');
+    if (r.reason === 'missing') scrForgetLocal(scrCurrent);
+    return;
+  }
+  await uploadContent(scrCurrent, r.content, p);
+  scrSetStatus(`Re-uploaded ${scrCurrent}`);
+});
+
+scrDownload.addEventListener('click', async () => {
+  if (!scrCurrent) return;
+  try {
+    const r = await scrFetch(`/api/scripts/${encodeURIComponent(scrCurrent)}`);
+    const content = await r.text();
+    const save = await window.acuity.scriptsFs.saveAs(scrCurrent, content);
+    if (!save.ok) {
+      if (save.error) scrSetStatus(`Save failed: ${save.error}`, 'err');
+      return;
+    }
+    scrRememberLocal(scrCurrent, save.path);
+    scrMetaLocal.textContent = save.path;
+    scrReupload.hidden = false;
+    scrSetStatus(`Downloaded to ${save.path}`);
+  } catch (e) {
+    scrSetStatus(`Download failed: ${e.message}`, 'err');
   }
 });
 
@@ -1688,12 +1825,9 @@ scrDelete.addEventListener('click', async () => {
   if (!confirm(`Delete ${scrCurrent}? This also removes any schedule for it.`)) return;
   try {
     await scrFetch(`/api/scripts/${encodeURIComponent(scrCurrent)}`, { method: 'DELETE' });
+    scrForgetLocal(scrCurrent);
     scrCurrent = null;
-    scrName.value = '';
-    scrEditor.value = '';
-    scrDirty = false;
-    scrSchedule.hidden = true;
-    scrSetButtons(false);
+    scrDetail.hidden = true; scrEmpty.hidden = false;
     await refreshScriptsList();
   } catch (e) {
     scrSetStatus(`Delete failed: ${e.message}`, 'err');
@@ -1701,18 +1835,9 @@ scrDelete.addEventListener('click', async () => {
 });
 
 scrRun.addEventListener('click', async () => {
-  // Save first if dirty — running a stale on-disk version is the
-  // most confusing UX failure mode here.
-  if (scrDirty) {
-    if (!confirm('You have unsaved changes. Save and run?')) return;
-    scrSave.click();
-    // Wait one tick for the save to land.
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  const name = scrName.value.trim();
-  if (!name) return;
+  if (!scrCurrent) return;
   try {
-    const r = await scrFetch(`/api/scripts/${encodeURIComponent(name)}/run`, {
+    const r = await scrFetch(`/api/scripts/${encodeURIComponent(scrCurrent)}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: [] }),
@@ -1734,7 +1859,7 @@ scrStop.addEventListener('click', async () => {
   try {
     await scrFetch(`/api/scripts/runs/${encodeURIComponent(scrRunId)}/stop`,
                    { method: 'POST' });
-  } catch (e) { /* poller will reflect state anyway */ }
+  } catch (e) { /* poller will reflect state */ }
 });
 
 function startRunPoller() {
@@ -1749,7 +1874,6 @@ function startRunPoller() {
         `run ${run.id} · ${run.state}` +
         (run.exit_code != null ? ` · exit ${run.exit_code}` : '') +
         (run.truncated ? ' · truncated' : '');
-      // Auto-scroll while output is still streaming.
       scrOutput.scrollTop = scrOutput.scrollHeight;
       if (run.state !== 'running') {
         clearInterval(scrRunPoller); scrRunPoller = null;
@@ -1845,41 +1969,7 @@ scrSchClear.addEventListener('click', async () => {
   }
 });
 
-// ----- Upload + new script -----
-
-$('#scr-new').addEventListener('click', () => {
-  if (scrDirty && !confirm('Discard unsaved changes?')) return;
-  scrCurrent = null;
-  scrName.value = '';
-  scrEditor.value = '#!/usr/bin/env python3\n\n';
-  scrEditor.focus();
-  scrDirty = true;
-  scrSetButtons(true);
-  scrSchedule.hidden = true;
-});
-
-$('#scr-refresh').addEventListener('click', () => refreshScriptsList());
-
-scrUploadInp.addEventListener('change', async () => {
-  const f = scrUploadInp.files && scrUploadInp.files[0];
-  if (!f) return;
-  if (!scrDevice) { scrSetStatus('Pick a device first', 'err'); return; }
-  const body = await f.arrayBuffer();
-  try {
-    await scrFetch(`/api/scripts/${encodeURIComponent(f.name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body,
-    });
-    scrSetStatus(`Uploaded ${f.name}`);
-    await refreshScriptsList();
-    await openScript(f.name);
-  } catch (e) {
-    scrSetStatus(`Upload failed: ${e.message}`, 'err');
-  } finally {
-    scrUploadInp.value = '';
-  }
-});
+// ----- Boot -----
 
 scrDevicePick.addEventListener('change', onScrDeviceChange);
 

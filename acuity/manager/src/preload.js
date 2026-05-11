@@ -57,6 +57,24 @@ contextBridge.exposeInMainWorld('acuity', {
     reveal: (path) => ipcRenderer.invoke('libraries:reveal', path),
   },
 
+  // Scripts-tab local-file helpers. The Scripts tab itself does
+  // every device-side operation (list, upload, run, schedule)
+  // straight over the device's HTTP API; these handlers only exist
+  // to bridge the renderer to the OS file dialogs + default editor,
+  // which the sandboxed renderer can't reach directly. Source of
+  // truth for scripts themselves is /var/lib/acuity/scripts/ ON THE
+  // DEVICE — never the laptop.
+  scriptsFs: {
+    pickNew:      (suggestedName) =>
+      ipcRenderer.invoke('scripts-fs:pick-new', { suggestedName }),
+    pickExisting: () =>
+      ipcRenderer.invoke('scripts-fs:pick-existing'),
+    read:         (path) => ipcRenderer.invoke('scripts-fs:read', path),
+    open:         (path) => ipcRenderer.invoke('scripts-fs:open', path),
+    saveAs:       (suggestedName, content) =>
+      ipcRenderer.invoke('scripts-fs:save-as', { suggestedName, content }),
+  },
+
   // Auto-updater — pulls new releases from GitHub Releases.
   updater: {
     currentVersion: () => ipcRenderer.invoke('updater:current-version'),

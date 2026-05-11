@@ -91,6 +91,7 @@ require('./ipc/discovery').register(ipcMain);
 require('./ipc/ssh').register(ipcMain);
 require('./ipc/pty').register(ipcMain);
 require('./ipc/libraries').register(ipcMain);
+require('./ipc/scripts-fs').register(ipcMain);
 require('./ipc/updater').register(ipcMain);
 
 app.whenReady().then(createWindow);

@@ -112,9 +112,12 @@
     </section>
 
     <!-- ============== Scripts tab ==============
-         Pick a device, browse its /var/lib/acuity/scripts/ tree, edit
-         in-app, run, schedule. Each panel is independent so the user
-         can be running one script and editing another. -->
+         No in-app editor. Workflow: pick a device → either upload an
+         existing local file or click "+ New" to have Manager create
+         one and open it in the user's OS-default editor → upload →
+         run / schedule / delete. Scripts live ON THE DEVICE, in
+         /var/lib/acuity/scripts/; this tab is just a thin remote
+         control over the device's HTTP API. -->
     <section class="page" data-page="scripts">
       <div class="scripts-toolbar">
         <label class="cam-pick">
@@ -123,76 +126,85 @@
             <option value="">— select a device —</option>
           </select>
         </label>
-        <button class="ghost small" id="scr-refresh">Refresh</button>
-        <button class="ghost small" id="scr-new">New script</button>
-        <label class="ghost small scr-upload-btn">
-          Upload…<input type="file" id="scr-upload" hidden />
+        <label class="cam-pick" id="scr-pick-wrap" hidden>
+          <span class="cam-pick-label">Script</span>
+          <select id="scr-pick">
+            <option value="">— none —</option>
+          </select>
         </label>
+        <button class="primary small" id="scr-new" disabled>+ New script…</button>
+        <button class="ghost small"   id="scr-upload" disabled>Upload existing…</button>
+        <button class="ghost small"   id="scr-refresh" disabled>Refresh</button>
         <span class="cam-meta-spacer"></span>
         <span class="muted small" id="scr-status">No device selected</span>
       </div>
 
-      <div class="scripts-layout">
-        <aside class="scripts-list" id="scr-list">
-          <div class="det-empty">Pick a device to load scripts.</div>
-        </aside>
-
-        <section class="scripts-editor">
-          <header class="scripts-editor-header">
-            <input type="text" id="scr-name" placeholder="filename (e.g. pose_fuser.py)"
-                   spellcheck="false" autocomplete="off" />
-            <div class="scripts-editor-actions">
-              <button class="ghost small" id="scr-save" disabled>Save</button>
-              <button class="primary small" id="scr-run" disabled>Run</button>
-              <button class="ghost small" id="scr-stop" hidden>Stop</button>
-              <button class="danger small" id="scr-delete" disabled>Delete</button>
-            </div>
-          </header>
-          <textarea id="scr-editor" class="scripts-editor-area"
-                    placeholder="# Pick or create a script."
-                    spellcheck="false" autocapitalize="off"
-                    autocomplete="off" wrap="off"></textarea>
-
-          <div class="scripts-schedule" id="scr-schedule" hidden>
-            <h3>Schedule</h3>
-            <p class="muted small">
-              Fire this script automatically. The dashboard's
-              built-in scheduler checks every second; the minimum
-              interval is 5 seconds.
-            </p>
-            <div class="scripts-schedule-row">
-              <label>
-                <input type="checkbox" id="scr-sched-enable" />
-                <span>Enabled</span>
-              </label>
-              <label>
-                Every
-                <input type="number" id="scr-sched-interval"
-                       min="5" max="86400" value="60" />
-                seconds
-              </label>
-              <label>
-                Args
-                <input type="text" id="scr-sched-args"
-                       placeholder="space-separated args"
-                       spellcheck="false" />
-              </label>
-              <button class="primary small" id="scr-sched-save">Save schedule</button>
-              <button class="ghost small"  id="scr-sched-clear">Remove</button>
-            </div>
-            <p class="muted small" id="scr-sched-last"></p>
-          </div>
-
-          <div class="scripts-output" id="scr-output-wrap" hidden>
-            <header>
-              <span>Output</span>
-              <span class="muted small" id="scr-output-meta"></span>
-              <button class="ghost small" id="scr-output-clear">Clear</button>
-            </header>
-            <pre id="scr-output"></pre>
-          </div>
-        </section>
+      <div class="scripts-empty" id="scr-empty">
+        <p>Pick a device above, then either upload an existing script
+           or hit <b>+ New script</b> to create one in your editor of
+           choice.</p>
       </div>
+
+      <section class="scripts-detail" id="scr-detail" hidden>
+        <header class="scripts-detail-header">
+          <div>
+            <h2 id="scr-detail-name">script.py</h2>
+            <p class="muted small" id="scr-detail-path">on device · /var/lib/acuity/scripts/</p>
+          </div>
+          <div class="scripts-detail-actions">
+            <button class="ghost small" id="scr-edit-local">Edit locally</button>
+            <button class="ghost small" id="scr-reupload" hidden>Re-upload from disk</button>
+            <button class="ghost small" id="scr-download">Download…</button>
+            <button class="primary small" id="scr-run">Run</button>
+            <button class="ghost small" id="scr-stop" hidden>Stop</button>
+            <button class="danger small" id="scr-delete">Delete</button>
+          </div>
+        </header>
+
+        <dl class="kv-grid scripts-meta">
+          <dt>Size</dt>     <dd id="scr-meta-size">—</dd>
+          <dt>Modified</dt> <dd id="scr-meta-mtime">—</dd>
+          <dt>Executable</dt><dd id="scr-meta-exec">—</dd>
+          <dt>Local copy</dt><dd id="scr-meta-local">(none — Download or pick a local file with Re-upload)</dd>
+        </dl>
+
+        <div class="scripts-schedule" id="scr-schedule">
+          <h3>Schedule</h3>
+          <p class="muted small">
+            Fire automatically on the device. Minimum interval is 5 s.
+          </p>
+          <div class="scripts-schedule-row">
+            <label>
+              <input type="checkbox" id="scr-sched-enable" />
+              <span>Enabled</span>
+            </label>
+            <label>
+              Every
+              <input type="number" id="scr-sched-interval"
+                     min="5" max="86400" value="60" />
+              seconds
+            </label>
+            <label>
+              Args
+              <input type="text" id="scr-sched-args"
+                     placeholder="space-separated args"
+                     spellcheck="false" />
+            </label>
+            <button class="primary small" id="scr-sched-save">Save schedule</button>
+            <button class="ghost small"   id="scr-sched-clear" hidden>Remove</button>
+          </div>
+          <p class="muted small" id="scr-sched-last"></p>
+        </div>
+
+        <div class="scripts-output" id="scr-output-wrap" hidden>
+          <header>
+            <span>Output</span>
+            <span class="muted small" id="scr-output-meta"></span>
+            <button class="ghost small" id="scr-output-clear">Clear</button>
+          </header>
+          <pre id="scr-output"></pre>
+        </div>
+      </section>
     </section>
 
     <!-- ============== Libraries tab ============== -->
