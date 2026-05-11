@@ -140,19 +140,47 @@ function register(ipcMain) {
     // pattern. Worst case if our regex misses, the prompt shows up
     // and the user types their password — same as plain ssh.
     //
-    // The state machine has just two states now:
+    // Two states:
     //   "watching"  — auto-injector active. Forwards every byte;
-    //                 keeps a 256-char rolling tail; if the tail ends
-    //                 in /password:\s*$/i we write the password to
-    //                 the pty and flip to "done". Auto-disarms after
-    //                 4 s with no match (key-based auth path).
+    //                 keeps a 512-char rolling tail; runs the prompt
+    //                 match against an ANSI-stripped copy of it.
+    //                 Windows ConPTY wraps the prompt with cursor
+    //                 on/off escapes (e.g. \x1b[?25l) which made an
+    //                 earlier `\s*$`-anchored regex whiff — stripping
+    //                 those escapes before matching is the fix.
     //   "done"      — passthrough only, no matching.
+    // The watcher auto-disarms after 6 s with no match (key-based
+    // auth path, or a non-standard prompt we'd rather let the user
+    // type into).
     let authState = (target && target.password) ? 'watching' : 'done';
     let authTail  = '';
-    const TAIL_CAP   = 256;
-    const DEADLINE   = Date.now() + 4000;
-    let dataChunks   = 0;
-    let dataBytes    = 0;
+    const TAIL_CAP = 512;
+    const DEADLINE = Date.now() + 6000;
+    let dataChunks = 0;
+    let dataBytes  = 0;
+    let lastTailLogged = '';
+
+    // ANSI / VT escape stripper. Handles CSI sequences (\x1b[…letter),
+    // OSC sequences (\x1b]…BEL or ST), simple two-byte escapes
+    // (\x1b<letter>), nF / Fp finals, and stray C0 control bytes.
+    // Covers the cursor-visibility + screen-mode sequences ConPTY
+    // wraps around the password prompt on Windows.
+    function stripAnsi(s) {
+      return s
+        .replace(/\x1b\[[\d;?]*[ -/]*[@-~]/g, '')        // CSI
+        .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')     // OSC … BEL / ST
+        .replace(/\x1b[NOPX^_]/g, '')                    // single-char two-byte
+        .replace(/\x1b[ -/]+[@-~]/g, '')                 // nF / Fp final
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');   // misc C0 noise
+    }
+
+    // Loose prompt match. The canonical OpenSSH prompt is
+    //   "user@host's password: "
+    // but variants exist ("Password:", passphrase for a key, the same
+    // strings with no trailing space when ConPTY wraps them, etc.).
+    // Tolerate them all rather than play whack-a-mole next time the
+    // sshd config or the local ssh client changes.
+    const PROMPT_RE = /(password|passcode|passphrase)[^a-z\d]{0,6}:\s*$/i;
 
     function send(data) {
       if (!window.isDestroyed()) {
@@ -163,8 +191,9 @@ function register(ipcMain) {
     term.onData((data) => {
       dataChunks += 1;
       dataBytes  += data.length;
-      // Sample the first ~5 chunks then sample every 50th to keep the
-      // log from drowning during an `ls -laR /` style flood.
+      // Sample the first ~5 chunks then every 50th. Keeps the log
+      // useful for "did we even get any output?" without drowning
+      // during an `ls -laR /` style flood.
       if (dataChunks <= 5 || dataChunks % 50 === 0) {
         dlog(`[#${id}] onData #${dataChunks} (${data.length}B) state=${authState} sample="${sample(data)}"`);
       }
@@ -172,19 +201,26 @@ function register(ipcMain) {
       // Always forward, immediately.
       send(data);
 
-      // Watch for the password prompt if we still have a password to
-      // inject. Concatenate into a rolling tail bounded by TAIL_CAP
-      // so the regex stays cheap even on heavy output.
       if (authState !== 'watching') return;
       if (Date.now() > DEADLINE) {
-        dlog(`[#${id}] auth watcher disarming on deadline (no password prompt seen in 4s)`);
+        dlog(`[#${id}] auth watcher disarming on deadline (no prompt match in 6s; ` +
+             `last-clean-tail="${sample(stripAnsi(authTail).slice(-120))}")`);
         authState = 'done';
         authTail = '';
         return;
       }
       authTail = (authTail + data).slice(-TAIL_CAP);
-      if (/password:\s*$/i.test(authTail)) {
-        dlog(`[#${id}] saw password prompt, injecting saved password`);
+      const cleanTail = stripAnsi(authTail);
+      // Log only when the clean tail's last 40 chars change shape —
+      // keeps the noise down while still showing what we're matching
+      // against when the user reports "it didn't auto-inject."
+      const tailSig = cleanTail.slice(-40);
+      if (tailSig !== lastTailLogged) {
+        lastTailLogged = tailSig;
+        dlog(`[#${id}] clean-tail="${sample(cleanTail.slice(-80))}"`);
+      }
+      if (PROMPT_RE.test(cleanTail)) {
+        dlog(`[#${id}] PROMPT MATCH, injecting saved password (${target.password.length} chars)`);
         try {
           term.write(`${target.password}\r`);
         } catch (e) {
